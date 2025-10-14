@@ -1,0 +1,24 @@
+{
+    "generators":{
+        "uuid":{"type":"faker","method":"uuid4"},
+        "name":{"type":"faker","method":"name"},
+        "first_name":{"type":"faker","method":"first_name"},
+        "last_name":{"type":"faker","method":"last_name"},
+        "date_of_birth":{"type":"faker","method":"date_of_birth","params":{"minimum_age":18, "maximum_age": 80}},
+        "phone_number":{"type":"faker","method":"phone_number"},
+        "street_address":{"type":"faker","method":"street_address"},
+        "secondary_address":{"type":"faker","method":"secondary_address"},
+        "city":{"type":"faker","method":"city"},
+        "email":{"type":"faker","method":"email"},
+        "state":{"type":"faker","method":"state"},
+        "post_code":{"type":"faker","method":"postcode"},
+        "country":{"type":"faker","method":"country"},
+        "int_uniform":{"type":"random_int","params":{"min":0,"max":9999}},
+        "float_uniform":{"type":"random_float","params":{"min":0,"max":9999,"decimals":2}},
+        "float_exponential":{"type":"random_float","params":{"distribution":"exponential","scale":10000,"decimals":2}},
+        "category_generic":{"type":"category","values":[],"weights":[]},
+        "sequence":{"type":"sequence","params":{"start":1,"step":1}},
+        "derived":{"type":"derived","params":{"expression":""}},
+        "date_recent":{"type":"faker","method":"date_between","params":{"start_date":"-1y","end_date":"today"}}
+    }
+}
