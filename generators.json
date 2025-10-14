@@ -1,24 +1,60 @@
 {
-    "generators":{
-        "uuid":{"type":"faker","method":"uuid4"},
-        "name":{"type":"faker","method":"name"},
-        "first_name":{"type":"faker","method":"first_name"},
-        "last_name":{"type":"faker","method":"last_name"},
-        "date_of_birth":{"type":"faker","method":"date_of_birth","params":{"minimum_age":18, "maximum_age": 80}},
-        "phone_number":{"type":"faker","method":"phone_number"},
-        "street_address":{"type":"faker","method":"street_address"},
-        "secondary_address":{"type":"faker","method":"secondary_address"},
-        "city":{"type":"faker","method":"city"},
-        "email":{"type":"faker","method":"email"},
-        "state":{"type":"faker","method":"state"},
-        "post_code":{"type":"faker","method":"postcode"},
-        "country":{"type":"faker","method":"country"},
-        "int_uniform":{"type":"random_int","params":{"min":0,"max":9999}},
-        "float_uniform":{"type":"random_float","params":{"min":0,"max":9999,"decimals":2}},
-        "float_exponential":{"type":"random_float","params":{"distribution":"exponential","scale":10000,"decimals":2}},
-        "category_generic":{"type":"category","values":[],"weights":[]},
-        "sequence":{"type":"sequence","params":{"start":1,"step":1}},
-        "derived":{"type":"derived","params":{"expression":""}},
-        "date_recent":{"type":"faker","method":"date_between","params":{"start_date":"-1y","end_date":"today"}}
+  "generators": {
+    "uuid": { "type": "faker", "method": "uuid4" },
+    "name": { "type": "faker", "method": "name" },
+    "first_name": { "type": "faker", "method": "first_name" },
+    "first_name_male": { "type": "faker", "method": "first_name_male" },
+    "first_name_female": { "type": "faker", "method": "first_name_female" },
+    "last_name": { "type": "faker", "method": "last_name" },
+    "date_of_birth": { "type": "faker", "method": "date_of_birth", "params": {"minimum_age": 18, "maximum_age": 80} },
+    "email": { "type": "faker", "method": "email" },
+    "phone_number": { "type": "faker", "method": "phone_number" },
+    "gender": { "type": "faker", "method": "random_element", "params": {"elements": ["Male","Female"]} },
+    "ssn": { "type": "faker", "method": "ssn" },
+    "company": { "type": "faker", "method": "company" },
+    "job": { "type": "faker", "method": "job" },
+    "text": { "type": "faker", "method": "text" },
+    "paragraph": { "type": "faker", "method": "paragraph" },
+    "city": { "type": "faker", "method": "city" },
+    "state": { "type": "faker", "method": "state" },
+    "country": { "type": "faker", "method": "country" },
+    "postcode": { "type": "faker", "method": "postcode" },
+    "street_address": { "type": "faker", "method": "street_address" },
+    "secondary_address": { "type": "faker", "method": "secondary_address" },
+    "latitude": { "type": "faker", "method": "latitude" },
+    "longitude": { "type": "faker", "method": "longitude" },
+    "url": { "type": "faker", "method": "url" },
+    "ipv4": { "type": "faker", "method": "ipv4" },
+    "ipv6": { "type": "faker", "method": "ipv6" },
+    "mac_address": { "type": "faker", "method": "mac_address" },
+    "color_name": { "type": "faker", "method": "color_name" },
+    "currency_code": { "type": "faker", "method": "currency_code" },
+    "iban": { "type": "faker", "method": "iban" },
+    "credit_card_number": { "type": "faker", "method": "credit_card_number" },
+    "credit_card_expire": { "type": "faker", "method": "credit_card_expire" },
+    "credit_card_provider": { "type": "faker", "method": "credit_card_provider" },
+    "int_uniform": { "type": "random_int", "params": {"min": 0, "max": 9999} },
+    "float_uniform": { "type": "random_float", "params": {"min": 0, "max": 9999, "decimals": 2} },
+    "float_exponential": { "type": "random_float", "params": {"distribution": "exponential", "scale": 10000, "decimals": 2} },
+    "category_generic": { "type": "category", "values": [], "weights": [] },
+    "sequence": { "type": "sequence", "params": {"start": 1, "step": 1} },
+    "derived": { "type": "derived", "params": {"expression": ""} },
+    "date_recent": { "type": "faker", "method": "date_between", "params": {"start_date": "-1y", "end_date": "today"} },
+    "person_profile": {
+      "type": "composite",
+      "fields": ["first_name", "last_name", "email", "gender", "phone_number", "date_of_birth", "ssn", "job", "company"],
+      "params": {
+        "locales": ["en_US"],
+        "min_age": 18,
+        "max_age": 80
+      }
+    },
+    "address_profile": {
+      "type": "composite",
+      "fields": ["street_address", "secondary_address", "city", "state", "post_code", "country", "latitude", "longitude"],
+      "params": {
+        "locales": ["en_US"]
+      }
     }
+  }
 }
