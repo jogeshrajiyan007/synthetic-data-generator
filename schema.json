@@ -1,0 +1,56 @@
+{
+    "tables":{
+        "customers":{
+            "rows":1000,
+            "columns":{
+                "customer_id":{"generator":"int_uniform","params":{"min":1000,"max":9999}, "unique": true},
+                "first_name":{"generator":"first_name"},
+                "last_name":{"generator":"last_name"},
+                "dob":{"generator":"date_of_birth"},
+                "email":{"generator":"email"},
+                "phone_number":{"generator":"phone_number"},
+                "address_line1":{"generator":"street_address"},
+                "address_line2":{"generator":"secondary_address"},
+                "city":{"generator":"city"},
+                "zip_code":{"generator":"post_code"},
+                "country":{"generator":"country"},
+                "status":{"generator":"category_generic","params":{"values":["Active","Inactive","Prospect"], "weights":[0.7,0.2,0.1]}}
+
+            }
+        },
+        "policies":{
+            "rows":1000,
+            "columns":{
+                "policy_id":{"generator":"uuid"},
+                "customer_id":{"type":"fk","ref":"customers.customer_id"},
+                "start_date":{"generator":"date_recent"},
+                "end_date":{"generator":"date_recent","params":{"start_col":"start_date","min_days":30,"max_days":365}},
+                "premium":{"generator":"float_exponential","params":{"scale":10000,"decimals":2}},
+                "coverage_type":{"generator":"category_generic","params":{"values":["Comprehensive","Third Party","Collision"]}},
+                "status":{"generator":"category_generic","params":{"values":["Active","Expired","Cancelled"]}}
+            }
+        },
+        "quotes":{
+            "rows":1000,
+            "columns":{
+                "quote_id":{"generator":"uuid"},
+                "customer_id":{"type":"fk","ref":"policies.customer_id"},
+                "quote_date":{"generator":"date_recent"},
+                "premium_quoted":{"generator":"float_uniform","params":{"min":4000,"max":30000,"decimals":2}},
+                "coverage_type":{"type":"fk_value","ref_table":"policies","ref_column":"coverage_type","via":"customer_id"},
+                "status":{"generator":"category_generic","params":{"values":["Approved","Pending","Rejected"]}}
+            }
+        },
+        "claims":{
+            "rows":1000,
+            "columns":{
+                "claim_id":{"generator":"uuid"},
+                "policy_id":{"type":"fk","ref":"policies.policy_id"},
+                "claim_date":{"generator":"date_recent","params":{"ref_table":"policies","ref_column":"start_date","via":"policy_id","min_days":8,"max_days":365}},
+                "amount_claimed":{"generator":"float_uniform","params":{"min":2000,"max":20000,"decimals":2}},
+                "amount_paid":{"generator":"derived","expression":"amount_claimed*(np.random.uniform(0.5,1.0))"},
+                "status":{"generator":"category_generic","params":{"values":["Open","Closed","Under Review"]}}
+            }
+        }
+    }
+}
