@@ -1,498 +1,235 @@
-{
-    "contract_id": "AXAGBSDC-e2068e57-5b86-4d67-9a75-89e0da50351c",
-    "name": "Guidewire Motors - Test Product",
-    "domain": "DAAS DMG",
-    "version": "1.0",
-    "dataset": {
-        "name": "az__guidewire_motor__azureagbsdmgcontainer",
-        "logicalType": "object",
-        "physicalType": "table",
-        "description": "This dataset contains comprehensive information on motor Claims, coverage details, and claims, including financials, policy statuses, and provider information.",
-        "dataGranularityDescription": "",
-        "schema": {
-            "type": "object",
-            "properties": [
-                {
-                    "physicalName": "Allowable_Schedule",
-                    "dataType": "string",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                },
-                {
-                    "physicalName": "Address",
-                    "dataType": "string",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                },
-                {
-                    "physicalName": "Bill_Method",
-                    "dataType": "string",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                },
-                {
-                    "physicalName": "Coverage_Type",
-                    "dataType": "string",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                },
-                {
-                    "physicalName": "Default_Copayment",
-                    "dataType": "int",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                },
-                {
-                    "physicalName": "City",
-                    "dataType": "string",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                },
-                {
-                    "physicalName": "Effective_Date",
-                    "dataType": "date",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": "",
-                    "format": "YYYY-MM-DD"
-                },
-                {
-                    "physicalName": "Insurance_Group",
-                    "dataType": "string",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                },
-                {
-                    "physicalName": "Expiration_Date",
-                    "dataType": "date",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": "",
-                    "format": "YYYY-MM-DD"
-                },
-                {
-                    "physicalName": "Is_Medicaid_Plan",
-                    "dataType": "string",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                },
-                {
-                    "physicalName": "Is_Capitated_Plan",
-                    "dataType": "string",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                },
-                {
-                    "physicalName": "Payor_ID",
-                    "dataType": "int",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                },
-                {
-                    "physicalName": "Insurer_Code",
-                    "dataType": "int",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                },
-                {
-                    "physicalName": "Policy_Description",
-                    "dataType": "string",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                },
-                {
-                    "physicalName": "Policy_Date",
-                    "dataType": "date",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": "",
-                    "format": "YYYY-MM-DD"
-                },
-                {
-                    "physicalName": "Policy_Number",
-                    "dataType": "int",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                },
-                {
-                    "physicalName": "Premium_Amount",
-                    "dataType": "double",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                },
-                {
-                    "physicalName": "Policy_Status",
-                    "dataType": "string",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                },
-                {
-                    "physicalName": "Policyholder_Name",
-                    "dataType": "string",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                },
-                {
-                    "physicalName": "Zip_Code",
-                    "dataType": "int",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                },
-                {
-                    "physicalName": "State",
-                    "dataType": "string",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                },
-                {
-                    "physicalName": "Short_Name",
-                    "dataType": "string",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                },
-                {
-                    "physicalName": "row_id",
-                    "dataType": "string",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                },
-                {
-                    "physicalName": "Claim_Amount",
-                    "dataType": "double",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                },
-                {
-                    "physicalName": "Deductible_Amount",
-                    "dataType": "int",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                },
-                {
-                    "physicalName": "Brokerage_Cost",
-                    "dataType": "string",
-                    "attributeName": "",
-                    "criticalDataElement": "Y",
-                    "description": ""
-                }
-            ]
-        }
-    },
-    "servers": [
-        {
-            "server": "Azure Cloud Storage",
-            "type": "Cloud Storage",
-            "config": {
-                "SOURCE_CONNECTION_STRING": "gAAAAABpIJSMrqRV7J8k-EdtSLm5pEFrtp2yNIe-1G1_U-dyoJouZ5V3swCwMhEHbZkSAoNl1iL26yt2DwFSZYtcrP6BoKvjCZ3dr77lG4AC8RIEyb2BV4hu5pShy0z_QwUcUISuNnWELnyI6a9HPTJ8xKA9x3H6fo5O0ZJK1PMUVhXS2A2Hq06NCkLiyjJ1FUgyII298vYb",
-                "file_path": "abfss://datagovernance@zabsdaasdv01ae1storg01.dfs.core.windows.net/Ingestion/Source/Guidewire/guidewire_motor.csv",
-                "account_name": "zabsdaasdv01ae1storg01",
-                "container_name": "datagovernance",
-                "path_prefix": "",
-                "auth_mode": "account-key"
-            }
-        }
-    ],
-    "quality": {
-        "rules": {
-            "completeness": [
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Insurance_Group",
-                    "ruleCondition": "IS NOT NULL",
-                    "ruleCriterion": "IS NOT NULL",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Expiration_Date",
-                    "ruleCondition": "IS NOT NULL",
-                    "ruleCriterion": "IS NOT NULL",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Is_Medicaid_Plan",
-                    "ruleCondition": "IS NOT NULL",
-                    "ruleCriterion": "IS NOT NULL",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Is_Capitated_Plan",
-                    "ruleCondition": "IS NOT NULL",
-                    "ruleCriterion": "IS NOT NULL",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Coverage_Type",
-                    "ruleCondition": "IS NOT NULL",
-                    "ruleCriterion": "IS NOT NULL",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Policyholder_Name",
-                    "ruleCondition": "IS NOT NULL",
-                    "ruleCriterion": "IS NOT NULL",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Zip_Code",
-                    "ruleCondition": "IS NOT NULL",
-                    "ruleCriterion": "IS NOT NULL",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "State",
-                    "ruleCondition": "IS NOT NULL",
-                    "ruleCriterion": "IS NOT NULL",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Short_Name",
-                    "ruleCondition": "IS NOT NULL",
-                    "ruleCriterion": "IS NOT NULL",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Payor_ID",
-                    "ruleCondition": "IS NOT NULL",
-                    "ruleCriterion": "IS NOT NULL",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Insurer_Code",
-                    "ruleCondition": "IS NOT NULL",
-                    "ruleCriterion": "IS NOT NULL",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Policy_Description",
-                    "ruleCondition": "IS NOT NULL",
-                    "ruleCriterion": "IS NOT NULL",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Allowable_Schedule",
-                    "ruleCondition": "IS NOT NULL",
-                    "ruleCriterion": "IS NOT NULL",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Address",
-                    "ruleCondition": "IS NOT NULL",
-                    "ruleCriterion": "IS NOT NULL",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Bill_Method",
-                    "ruleCondition": "IS NOT NULL",
-                    "ruleCriterion": "IS NOT NULL",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Default_Copayment",
-                    "ruleCondition": "IS NOT NULL",
-                    "ruleCriterion": "IS NOT NULL",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "City",
-                    "ruleCondition": "IS NOT NULL",
-                    "ruleCriterion": "IS NOT NULL",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Effective_Date",
-                    "ruleCondition": "IS NOT NULL",
-                    "ruleCriterion": "IS NOT NULL",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Policy_Date",
-                    "ruleCondition": "IS NOT NULL",
-                    "ruleCriterion": "IS NOT NULL",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Policy_Number",
-                    "ruleCondition": "IS NOT NULL",
-                    "ruleCriterion": "IS NOT NULL",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Premium_Amount",
-                    "ruleCondition": "IS NOT NULL",
-                    "ruleCriterion": "IS NOT NULL",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Policy_Status",
-                    "ruleCondition": "IS NOT NULL",
-                    "ruleCriterion": "IS NOT NULL",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                }
-            ],
-            "validity": [
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Effective_Date",
-                    "ruleCondition": "Format",
-                    "ruleCriterion": "YYYY-MM-DD",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Bill_Method",
-                    "ruleCondition": "Contains",
-                    "ruleCriterion": "['agency bill','company bill']",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Coverage_Type",
-                    "ruleCondition": "Contains",
-                    "ruleCriterion": "['auto','health','home','life','travel']",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Policy_Number",
-                    "ruleCondition": "Length",
-                    "ruleCriterion": "<= 6",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                }
-            ],
-            "accuracy": [],
-            "uniqueness": [
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Effective_Date",
-                    "ruleCondition": "IS UNIQUE",
-                    "ruleCriterion": "IS UNIQUE",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                },
-                {
-                    "ruleName": "",
-                    "ruleDescription": "",
-                    "column_name": "Policy_Number",
-                    "ruleCondition": "IS UNIQUE",
-                    "ruleCriterion": "IS UNIQUE",
-                    "ruleErrorThreshold": 5,
-                    "weight": 1
-                }
-            ]
-        }
-    },
-    "sla": {
-        "availability": "99.9%",
-        "support": {
-            "source_owner_email": "jogesh.rajiyan@axa.com",
-            "tech_support_email": "jogesh.rajiyan@axa.com"
-        },
-        "slaProperties": {
-            "timeOfAvailability": "10:00 AM UTC",
-            "latency": "1h",
-            "frequency": "1d",
-            "retention": "2y"
-        }
-    },
-    "changes": "Initial version",
-    "contractCreationDate": "2026-02-27",
-    "contractLastUpdatedDate": "2026-02-27"
-}
 
-Now suggest me a way where I can fill in "dataGranularityDescription", properties["attributeName"], properties["description"],"ruleName", "ruleDescription" using ML models in Databricks 16.4 cluster
+def ask_llm(prompt: str, retries: int = 3) -> str:
+    """
+    Call the LLM endpoint with retry logic.
+    Returns raw text response from the model.
+    """
+    for attempt in range(retries):
+        try:
+            response = client.predict(
+                endpoint=MODEL_ENDPOINT,
+                inputs={
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a data governance and insurance domain expert. "
+                                "Always respond with ONLY a valid JSON object. "
+                                "No explanation, no markdown, no code blocks. Just raw JSON."
+                            )
+                        },
+                        {"role": "user", "content": prompt}
+                    ],
+                    "max_tokens": 300,
+                    "temperature": 0.1
+                }
+            )
+            return response["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            print(f"⚠️  Attempt {attempt+1} failed for prompt: {e}")
+            time.sleep(2)
+    return ""
+
+
+def parse_json_response(raw: str, field_name: str) -> dict:
+    """
+    Safely parse JSON from LLM response.
+    Strips markdown code fences if present.
+    """
+    try:
+        # Strip markdown code fences if model adds them
+        clean = raw.replace("```json", "").replace("```", "").strip()
+        return json.loads(clean)
+    except json.JSONDecodeError:
+        print(f"⚠️  JSON parse failed for [{field_name}]. Raw response:\n{raw}\n")
+        return {}
+
+
+print("✅ LLM helper functions ready")
+# ============================================================
+# Cell 5: Enrich dataGranularityDescription
+# ============================================================
+
+column_names = [p["physicalName"] for p in contract["dataset"]["schema"]["properties"]]
+
+prompt = f"""
+Dataset name       : {contract['dataset']['name']}
+Dataset description: {contract['dataset']['description']}
+Columns            : {', '.join(column_names)}
+
+Write a dataGranularityDescription explaining what ONE single row in this dataset represents.
+Keep it to 1-2 sentences. Be specific to motor insurance context.
+
+Return ONLY this JSON:
+{{
+  "dataGranularityDescription": "<your answer here>"
+}}
+"""
+
+raw = ask_llm(prompt)
+parsed = parse_json_response(raw, "dataGranularityDescription")
+
+if parsed.get("dataGranularityDescription"):
+    contract["dataset"]["dataGranularityDescription"] = parsed["dataGranularityDescription"]
+    print(f"✅ dataGranularityDescription:\n   {contract['dataset']['dataGranularityDescription']}")
+else:
+    print("⚠️  Could not enrich dataGranularityDescription")
+# ============================================================
+# Cell 6: Enrich attributeName & description for Each Column
+# ============================================================
+
+dataset_desc = contract["dataset"]["description"]
+schema_props = contract["dataset"]["schema"]["properties"]
+
+print(f"Enriching {len(schema_props)} columns...\n")
+
+for i, prop in enumerate(schema_props):
+    physical_name = prop["physicalName"]
+    data_type     = prop["dataType"]
+    fmt           = prop.get("format", "N/A")
+
+    prompt = f"""
+You are enriching a data contract for a motor insurance dataset.
+Dataset context: "{dataset_desc}"
+
+Column physical name : {physical_name}
+Data type            : {data_type}
+Format               : {fmt}
+
+Return ONLY this JSON (no extra text):
+{{
+  "attributeName": "<human-friendly display name, e.g. 'Policy Holder Name'>",
+  "description"  : "<1-2 sentence business description explaining what this field means in motor insurance context>"
+}}
+"""
+
+    raw    = ask_llm(prompt)
+    parsed = parse_json_response(raw, physical_name)
+
+    if parsed:
+        prop["attributeName"] = parsed.get("attributeName", "")
+        prop["description"]   = parsed.get("description", "")
+        print(f"  ✅ [{i+1}/{len(schema_props)}] {physical_name}")
+        print(f"       attributeName : {prop['attributeName']}")
+        print(f"       description   : {prop['description']}\n")
+    else:
+        print(f"  ❌ [{i+1}/{len(schema_props)}] {physical_name} — skipped\n")
+
+print("✅ Column enrichment complete")
+# ============================================================
+# Cell 7: Enrich ruleName & ruleDescription for Quality Rules
+# ============================================================
+
+def enrich_rules(rule_list: list, rule_type: str):
+    print(f"\n── Enriching [{rule_type.upper()}] rules ({len(rule_list)} rules) ──")
+    
+    for i, rule in enumerate(rule_list):
+        col       = rule["column_name"]
+        condition = rule["ruleCondition"]
+        criterion = rule["ruleCriterion"]
+
+        prompt = f"""
+You are a data quality engineer for a motor insurance dataset.
+
+Rule type      : {rule_type}
+Column         : {col}
+Rule condition : {condition}
+Rule criterion : {criterion}
+
+Return ONLY this JSON (no extra text):
+{{
+  "ruleName"        : "<short snake_case name, e.g. chk_policy_number_not_null>",
+  "ruleDescription" : "<1 sentence plain-English explanation of what this rule checks and why it matters>"
+}}
+"""
+
+        raw    = ask_llm(prompt)
+        parsed = parse_json_response(raw, f"{rule_type}_{col}")
+
+        if parsed:
+            rule["ruleName"]        = parsed.get("ruleName", "")
+            rule["ruleDescription"] = parsed.get("ruleDescription", "")
+            print(f"  ✅ [{i+1}] {col}")
+            print(f"       ruleName        : {rule['ruleName']}")
+            print(f"       ruleDescription : {rule['ruleDescription']}\n")
+        else:
+            print(f"  ❌ [{i+1}] {col} — skipped\n")
+
+
+enrich_rules(contract["quality"]["rules"]["completeness"], "completeness")
+enrich_rules(contract["quality"]["rules"]["validity"],     "validity")
+enrich_rules(contract["quality"]["rules"]["uniqueness"],   "uniqueness")
+
+print("\n✅ All quality rules enriched")
+# ============================================================
+# Cell 8: Validate Enrichment — Check for Any Empty Fields
+# ============================================================
+
+print("=" * 60)
+print("VALIDATION REPORT")
+print("=" * 60)
+
+issues = []
+
+# Check dataGranularityDescription
+if not contract["dataset"]["dataGranularityDescription"]:
+    issues.append("❌ dataGranularityDescription is still empty")
+else:
+    print("✅ dataGranularityDescription : OK")
+
+# Check columns
+for prop in contract["dataset"]["schema"]["properties"]:
+    name = prop["physicalName"]
+    if not prop.get("attributeName"):
+        issues.append(f"❌ Column [{name}] — attributeName is empty")
+    if not prop.get("description"):
+        issues.append(f"❌ Column [{name}] — description is empty")
+
+cols_ok = len([p for p in contract["dataset"]["schema"]["properties"] 
+               if p.get("attributeName") and p.get("description")])
+print(f"✅ Columns enriched          : {cols_ok}/{len(contract['dataset']['schema']['properties'])}")
+
+# Check rules
+for rule_type in ["completeness", "validity", "uniqueness"]:
+    rules = contract["quality"]["rules"][rule_type]
+    rules_ok = 0
+    for rule in rules:
+        if not rule.get("ruleName"):
+            issues.append(f"❌ [{rule_type}] rule for [{rule['column_name']}] — ruleName is empty")
+        elif not rule.get("ruleDescription"):
+            issues.append(f"❌ [{rule_type}] rule for [{rule['column_name']}] — ruleDescription is empty")
+        else:
+            rules_ok += 1
+    print(f"✅ {rule_type.capitalize()} rules OK  : {rules_ok}/{len(rules)}")
+
+if issues:
+    print("\n⚠️  Issues found:")
+    for issue in issues:
+        print(f"   {issue}")
+else:
+    print("\n🎉 All fields enriched successfully!")
+# ============================================================
+# Cell 9: Save Enriched Contract to DBFS / Volume
+# ============================================================
+
+import json
+
+output_path = "/dbfs/tmp/guidewire_motor_enriched_contract.json"
+
+with open(output_path, "w") as f:
+    json.dump(contract, f, indent=4)
+
+print(f"✅ Enriched contract saved to: {output_path}")
+
+# ── Preview the enriched contract ──
+print("\n── Preview (first 2 columns) ──")
+for prop in contract["dataset"]["schema"]["properties"][:2]:
+    print(json.dumps(prop, indent=4))
+
+print("\n── Preview (first completeness rule) ──")
+print(json.dumps(contract["quality"]["rules"]["completeness"][0], indent=4))
+# ============================================================
+# Cell 10 (Optional): Display Full Enriched Contract
+# ============================================================
+
+print(json.dumps(contract, indent=4))
