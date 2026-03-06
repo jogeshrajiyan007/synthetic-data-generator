@@ -1,55 +1,49 @@
-# Oracle Integration Monitoring — Dashboard Guide
+# Data Collect – Interface Monitoring
 
-**Source:** Oracle PaaS &nbsp;|&nbsp; **Coverage:** Weekly &nbsp;|&nbsp; **Last Refresh:** Thursday, February 26, 2026
+**Last Refreshed:** February 26, 2026 &nbsp;|&nbsp; **Coverage:** 08 Feb 2026 – 14 Feb 2026
 
 ---
 
-## 📊 What This Dashboard Tells You
+## 📊 What This Page Tells You
 
-This homepage gives you a **weekly snapshot** of how well HR data is being collected and processed from Oracle PaaS into the Group HR Data Factory. It surfaces data health at a glance — so you can quickly spot issues before they impact downstream reporting.
+This page gives you a **detailed view of data collection activity** across all AXA entities for the selected week. It tracks how many employee records and files were received, how many passed or failed initial checks, and how collection volumes trended day by day — helping you identify which entities are driving errors or rejections.
 
 ---
 
 ## 🔢 KPI Definitions
 
-### Data Collect Insights
-These metrics track the **volume and completeness** of data received this week.
-
 | KPI | What it means |
 |-----|--------------|
-| **Number of Employees** | Total distinct employee records loaded this week. Trend arrow shows change vs. prior week. |
-| **Files Loaded** | Number of data files successfully ingested from Oracle PaaS this week. |
-| **Overall Error Rate** | Percentage of all loaded records that contain at least one data quality issue. Lower is better. |
+| **Employees Number** | Total distinct employee records received from all entities this week. |
+| **Files Loaded** | Number of data files successfully ingested from Oracle PaaS interfaces this week. |
+| **Overall Error Rate** | Percentage of all loaded records containing at least one data quality issue. Lower is better. |
+| **Accepted Rows** | Records that passed initial validation checks and are cleared for downstream processing. |
+| **Rejected Rows** | Records that failed one or more validation rules and are held back pending resolution. |
 
-### Data Quality Insights
-These metrics measure the **quality and integrity** of the data that was loaded.
+---
 
-| KPI | What it means |
-|-----|--------------|
-| **Rows with DQ Errors** | Total number of rows flagged with at least one data quality rule violation this week. |
-| **Global DQ Score** | Overall data quality score across all loaded records, expressed as a percentage. Target is 100%. |
-| **Global DQ Dimension Score** | DQ score broken down by dimension — switch between **Completeness**, **Consistency**, and **Validity** to see where issues are concentrated. |
+## 📈 Visual Breakdown
 
-### Accepted vs. Rejected Rows
-| KPI | What it means |
-|-----|--------------|
-| **Accepted Rows** | Records that passed all DQ checks and are ready for downstream use. |
-| **Rejected Rows** | Records that failed one or more DQ rules and have been excluded from reporting until resolved. |
+### Entity Performance Overview
+A side-by-side bar chart showing **accepted (green) vs. rejected (red) rows per AXA entity** for the week. Use this to quickly spot which entities have high rejection volumes relative to their total load — for example, AXA UK and AXA Belgium show the largest absolute volumes, while AXA Ireland and AXA Morocco show disproportionately high rejection counts relative to their accepted rows.
+
+### Daily – Data Collect Trends
+A line chart tracking **daily record volumes** across the week (toggle between Weekly and Daily view). Use this to identify if a spike or drop in volumes is tied to a specific day's file submission — useful for diagnosing whether issues are systemic or isolated to a particular interface run.
+
+### Rejection Rate Trends – All Entities
+An area chart showing **daily rejection rate (%)** across all entities combined. This helps you see whether data quality is improving or deteriorating over the week. A rising trend (e.g. 39.72% → 69.69%) signals accumulating issues that need immediate investigation.
 
 ---
 
 ## 🧭 How to Navigate
 
-This dashboard is designed for **progressive exploration** — start at the summary and drill into details only when needed.
-
-- **Click "Data Collect Insights"** → Opens a detailed breakdown of file ingestion activity, employee record trends, and source-level loading stats.
-
-- **Click "Data Quality Insights"** → Opens a granular view of DQ rule failures, including which fields, entities, or countries are driving errors.
-
-- **Click "Investigate Errors"** → Takes you directly to a row-level error log where you can filter, sort, and identify specific records that need attention.
-
-- **Click "Review DQ Rules"** → Opens the DQ rule registry so you can understand the logic behind each validation check and assess whether rules need updating.
+- **Click "DQ Monitoring"** → Switches to the Data Quality Insights page for a deeper look at which rules are failing and why.
+- **Click "Review DQ Rules"** → Opens the rule registry to inspect or validate the logic behind each check.
+- **Click "Investigate Errors"** → Takes you to a row-level error log to identify and action specific failed records.
+- **Click "Home"** → Returns to the main summary dashboard.
+- **Click "Summary"** → Opens a consolidated weekly summary view across all metrics.
+- **Click "Support"** → Raises a support request or accesses documentation.
 
 ---
 
-> 💡 **Tip:** Use the **DQ Dimension toggle** (Completeness / Consistency / Validity) on the homepage to quickly identify which quality dimension needs the most attention before drilling in further.
+> 💡 **Tip:** Use the **entity bar chart** alongside the **rejection rate trend** together — if one entity dominates rejected rows AND the rejection rate is rising daily, that entity's interface likely has a systemic issue worth escalating.
