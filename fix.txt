@@ -1,0 +1,55 @@
+# Oracle Integration Monitoring — Dashboard Guide
+
+**Source:** Oracle PaaS &nbsp;|&nbsp; **Coverage:** Weekly &nbsp;|&nbsp; **Last Refresh:** Thursday, February 26, 2026
+
+---
+
+## 📊 What This Dashboard Tells You
+
+This homepage gives you a **weekly snapshot** of how well HR data is being collected and processed from Oracle PaaS into the Group HR Data Factory. It surfaces data health at a glance — so you can quickly spot issues before they impact downstream reporting.
+
+---
+
+## 🔢 KPI Definitions
+
+### Data Collect Insights
+These metrics track the **volume and completeness** of data received this week.
+
+| KPI | What it means |
+|-----|--------------|
+| **Number of Employees** | Total distinct employee records loaded this week. Trend arrow shows change vs. prior week. |
+| **Files Loaded** | Number of data files successfully ingested from Oracle PaaS this week. |
+| **Overall Error Rate** | Percentage of all loaded records that contain at least one data quality issue. Lower is better. |
+
+### Data Quality Insights
+These metrics measure the **quality and integrity** of the data that was loaded.
+
+| KPI | What it means |
+|-----|--------------|
+| **Rows with DQ Errors** | Total number of rows flagged with at least one data quality rule violation this week. |
+| **Global DQ Score** | Overall data quality score across all loaded records, expressed as a percentage. Target is 100%. |
+| **Global DQ Dimension Score** | DQ score broken down by dimension — switch between **Completeness**, **Consistency**, and **Validity** to see where issues are concentrated. |
+
+### Accepted vs. Rejected Rows
+| KPI | What it means |
+|-----|--------------|
+| **Accepted Rows** | Records that passed all DQ checks and are ready for downstream use. |
+| **Rejected Rows** | Records that failed one or more DQ rules and have been excluded from reporting until resolved. |
+
+---
+
+## 🧭 How to Navigate
+
+This dashboard is designed for **progressive exploration** — start at the summary and drill into details only when needed.
+
+- **Click "Data Collect Insights"** → Opens a detailed breakdown of file ingestion activity, employee record trends, and source-level loading stats.
+
+- **Click "Data Quality Insights"** → Opens a granular view of DQ rule failures, including which fields, entities, or countries are driving errors.
+
+- **Click "Investigate Errors"** → Takes you directly to a row-level error log where you can filter, sort, and identify specific records that need attention.
+
+- **Click "Review DQ Rules"** → Opens the DQ rule registry so you can understand the logic behind each validation check and assess whether rules need updating.
+
+---
+
+> 💡 **Tip:** Use the **DQ Dimension toggle** (Completeness / Consistency / Validity) on the homepage to quickly identify which quality dimension needs the most attention before drilling in further.
