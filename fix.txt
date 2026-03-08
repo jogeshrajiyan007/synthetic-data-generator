@@ -1,4 +1,4 @@
-# Data Collect – Interface Monitoring
+# Data Quality Monitoring
 
 **Last Refreshed:** February 26, 2026 &nbsp;|&nbsp; **Coverage:** 08 Feb 2026 – 14 Feb 2026
 
@@ -6,7 +6,7 @@
 
 ## 📊 What This Page Tells You
 
-This page gives you a **detailed view of data collection activity** across all AXA entities for the selected week. It tracks how many employee records and files were received, how many passed or failed initial checks, and how collection volumes trended day by day — helping you identify which entities are driving errors or rejections.
+This page gives you a **comprehensive view of data quality health** across all AXA entities and data fields. It breaks down quality scores by dimension (Completeness, Consistency, Validity) and by data category (Personal, Job, Compensation) — helping you pinpoint exactly where data quality issues are concentrated, down to the individual field level.
 
 ---
 
@@ -14,36 +14,44 @@ This page gives you a **detailed view of data collection activity** across all A
 
 | KPI | What it means |
 |-----|--------------|
-| **Employees Number** | Total distinct employee records received from all entities this week. |
-| **Files Loaded** | Number of data files successfully ingested from Oracle PaaS interfaces this week. |
-| **Overall Error Rate** | Percentage of all loaded records containing at least one data quality issue. Lower is better. |
-| **Accepted Rows** | Records that passed initial validation checks and are cleared for downstream processing. |
-| **Rejected Rows** | Records that failed one or more validation rules and are held back pending resolution. |
+| **Rows with DQ Errors** | Total number of records that failed at least one data quality rule this week. These are the rows driving all scores below 100%. |
+| **Completeness Score** | Percentage of expected fields that are actually populated (non-null). A score below 100% means mandatory fields are missing values. |
+| **Consistency Score** | Percentage of records where field values are logically consistent with each other (e.g. contract dates align with employment status). |
+| **Validity Score** | Percentage of records where field values conform to defined formats, allowed values, or business rules (e.g. valid country codes, date formats). |
+| **Data Quality Score** | The combined overall DQ score across all three dimensions — the single headline number representing data quality for the week. |
 
 ---
 
 ## 📈 Visual Breakdown
 
-### Entity Performance Overview
-A side-by-side bar chart showing **accepted (green) vs. rejected (red) rows per AXA entity** for the week. Use this to quickly spot which entities have high rejection volumes relative to their total load — for example, AXA UK and AXA Belgium show the largest absolute volumes, while AXA Ireland and AXA Morocco show disproportionately high rejection counts relative to their accepted rows.
+### DQ Score Details — All Entities (Table)
+A field-level breakdown of DQ scores organised by **data category** (Personal, Job) and **individual data point**. Each row shows the Completeness, Consistency, and Validity score for that specific field. Fields showing **"NA"** means that dimension is not applicable or not evaluated for that field. Use this table to:
+- Identify which specific fields are dragging down each dimension score
+- Distinguish between fields that are partially failing (e.g. EMP_CURR_CONTRACT_TYPE at 78.15% Completeness) vs. fields that are fully unchecked for a dimension
 
-### Daily – Data Collect Trends
-A line chart tracking **daily record volumes** across the week (toggle between Weekly and Daily view). Use this to identify if a spike or drop in volumes is tied to a specific day's file submission — useful for diagnosing whether issues are systemic or isolated to a particular interface run.
+### Data Quality Score by Entity (Bar Chart)
+A horizontal bar chart ranking all AXA entities by their overall DQ score for the week. Colour coding reflects score thresholds — green for healthy, yellow/amber for moderate, red for critical. This allows you to immediately see which entities need priority attention (e.g. AXA Ireland at 48.15%, AXA Spain at 55.56%) vs. those performing well (e.g. AXA Morocco at 96.30%, AXA UK at 94.64%).
 
-### Rejection Rate Trends – All Entities
-An area chart showing **daily rejection rate (%)** across all entities combined. This helps you see whether data quality is improving or deteriorating over the week. A rising trend (e.g. 39.72% → 69.69%) signals accumulating issues that need immediate investigation.
+> 💡 **Hover Interaction — Drill into Entity Details**
+> Hovering over any entity's bar reveals a **contextual tooltip panel** with three granular breakdowns:
+> - **Rejected Rows Per Dimension** — A donut chart showing how rejected rows are split between Completeness, Consistency, and Validity failures for that entity. For example, hovering over AXA Morocco shows 5 Completeness rejections vs. 36 Validity rejections, immediately telling you the dominant failure type.
+> - **DQ Score per Category** — A bar chart breaking the entity's score down by data category: **Compensation**, **Job**, and **Personal**. For AXA Morocco, Job scores 93.74% while Personal scores 98.59%, helping you target remediation at the right data category.
+> - This means you don't need to drill to another page to understand an entity's quality profile — a simple hover surfaces the full picture in place.
+
+### Rejected Rows Per Dimension (Donut — on hover)
+Shows the proportion of an entity's rejections attributable to each DQ dimension. A large Validity slice means the entity is sending data in wrong formats or with invalid values. A large Completeness slice means fields are simply missing.
 
 ---
 
 ## 🧭 How to Navigate
 
-- **Click "DQ Monitoring"** → Switches to the Data Quality Insights page for a deeper look at which rules are failing and why.
-- **Click "Review DQ Rules"** → Opens the rule registry to inspect or validate the logic behind each check.
-- **Click "Investigate Errors"** → Takes you to a row-level error log to identify and action specific failed records.
+- **Click "Data Collect – Interface Monitoring"** → Goes back to the collection volume and file ingestion view.
+- **Click "Review DQ Rules"** → Opens the rule registry to understand the logic behind each Completeness, Consistency, and Validity check.
+- **Click "Investigate Errors"** → Takes you to a row-level error log to find and action specific failing records.
 - **Click "Home"** → Returns to the main summary dashboard.
-- **Click "Summary"** → Opens a consolidated weekly summary view across all metrics.
+- **Click "Summary"** → Opens a consolidated weekly summary across all metrics.
 - **Click "Support"** → Raises a support request or accesses documentation.
 
 ---
 
-> 💡 **Tip:** Use the **entity bar chart** alongside the **rejection rate trend** together — if one entity dominates rejected rows AND the rejection rate is rising daily, that entity's interface likely has a systemic issue worth escalating.
+> 💡 **Tip:** Cross-reference the **field-level table** with the **entity hover panel** — if an entity has a high Validity rejection count (donut), look for fields in the table with low Validity scores in that same entity's data category. That intersection is where your remediation effort will have the most impact.
