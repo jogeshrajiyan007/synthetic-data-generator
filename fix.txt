@@ -1,12 +1,12 @@
-# Data Quality Monitoring
+# Data Quality Monitoring – List of DQ Rules
 
-**Last Refreshed:** February 26, 2026 &nbsp;|&nbsp; **Coverage:** 08 Feb 2026 – 14 Feb 2026
+**Last Refreshed:** February 26, 2026
 
 ---
 
 ## 📊 What This Page Tells You
 
-This page gives you a **comprehensive view of data quality health** across all AXA entities and data fields. It breaks down quality scores by dimension (Completeness, Consistency, Validity) and by data category (Personal, Job, Compensation) — helping you pinpoint exactly where data quality issues are concentrated, down to the individual field level.
+This page is the **rule registry** for the entire data quality framework. It gives you full transparency into every validation check applied to incoming HR data — what is being checked, against which field, under which category, and what happens when a record fails. Use this page to understand the logic behind DQ scores, validate that rules are correctly configured, and investigate why specific errors are being raised.
 
 ---
 
@@ -14,44 +14,38 @@ This page gives you a **comprehensive view of data quality health** across all A
 
 | KPI | What it means |
 |-----|--------------|
-| **Rows with DQ Errors** | Total number of records that failed at least one data quality rule this week. These are the rows driving all scores below 100%. |
-| **Completeness Score** | Percentage of expected fields that are actually populated (non-null). A score below 100% means mandatory fields are missing values. |
-| **Consistency Score** | Percentage of records where field values are logically consistent with each other (e.g. contract dates align with employment status). |
-| **Validity Score** | Percentage of records where field values conform to defined formats, allowed values, or business rules (e.g. valid country codes, date formats). |
-| **Data Quality Score** | The combined overall DQ score across all three dimensions — the single headline number representing data quality for the week. |
+| **Job Data Rules Applied** | Number of DQ rules actively evaluating **Job Data (JD)** fields — the largest rule set at 182 rules, covering fields like assignment category, career events, FTE, business unit, etc. |
+| **PI Data Rules Applied** | Number of rules evaluating **Personal Information (PI)** fields such as address, date of birth, and city — 43 rules in total. |
+| **CP Data Rules Applied** | Number of rules evaluating **Compensation (CP)** fields — 2 rules currently active. |
+| **Total DQ Rules Applied** | The combined count of all active rules across all data categories — **227 rules** in total running every week against incoming records. |
 
 ---
 
-## 📈 Visual Breakdown
+## 📋 Rule Table — Column Definitions
 
-### DQ Score Details — All Entities (Table)
-A field-level breakdown of DQ scores organised by **data category** (Personal, Job) and **individual data point**. Each row shows the Completeness, Consistency, and Validity score for that specific field. Fields showing **"NA"** means that dimension is not applicable or not evaluated for that field. Use this table to:
-- Identify which specific fields are dragging down each dimension score
-- Distinguish between fields that are partially failing (e.g. EMP_CURR_CONTRACT_TYPE at 78.15% Completeness) vs. fields that are fully unchecked for a dimension
+Each row in the table represents one individual DQ rule. Here is what each column means:
 
-### Data Quality Score by Entity (Bar Chart)
-A horizontal bar chart ranking all AXA entities by their overall DQ score for the week. Colour coding reflects score thresholds — green for healthy, yellow/amber for moderate, red for critical. This allows you to immediately see which entities need priority attention (e.g. AXA Ireland at 48.15%, AXA Spain at 55.56%) vs. those performing well (e.g. AXA Morocco at 96.30%, AXA UK at 94.64%).
-
-> 💡 **Hover Interaction — Drill into Entity Details**
-> Hovering over any entity's bar reveals a **contextual tooltip panel** with three granular breakdowns:
-> - **Rejected Rows Per Dimension** — A donut chart showing how rejected rows are split between Completeness, Consistency, and Validity failures for that entity. For example, hovering over AXA Morocco shows 5 Completeness rejections vs. 36 Validity rejections, immediately telling you the dominant failure type.
-> - **DQ Score per Category** — A bar chart breaking the entity's score down by data category: **Compensation**, **Job**, and **Personal**. For AXA Morocco, Job scores 93.74% while Personal scores 98.59%, helping you target remediation at the right data category.
-> - This means you don't need to drill to another page to understand an entity's quality profile — a simple hover surfaces the full picture in place.
-
-### Rejected Rows Per Dimension (Donut — on hover)
-Shows the proportion of an entity's rejections attributable to each DQ dimension. A large Validity slice means the entity is sending data in wrong formats or with invalid values. A large Completeness slice means fields are simply missing.
+| Column | What it means |
+|--------|--------------|
+| **Rule ID** | A sequential identifier for the rule within the dashboard. Used for reference when investigating errors. |
+| **Functional ID** | The unique business code for the rule (e.g. `DQ-VA-0001`, `DQ-CO-0016`). The prefix indicates the DQ dimension: **VA** = Validity, **CO** = Completeness. Use this ID to trace a rule back to its source definition or raise it in a support ticket. |
+| **DQ Dimension** | Which quality dimension this rule enforces — **Validity** (correct format or allowed value), **Completeness** (field must be filled), or **Consistency** (logical alignment between fields). |
+| **Datapoint** | The specific HR field being validated by this rule (e.g. Address, FTE, Assignment Category, Career Events). |
+| **File Category** | The source file type the rule applies to — **JD** (Job Data), **PI** (Personal Information), or **CP** (Compensation). |
+| **Data Category** | The data category classification of the field being checked — mirrors the File Category in most cases. |
+| **Log Type** | The system that logs the error when this rule fails — **MDM** (Master Data Management system) or **HDL** (HCM Data Loader). This tells you where to look when investigating a failure. |
+| **Error Code** | The specific error or warning code raised when this rule is violated. Key codes include: **ERROR** (hard failure, record rejected), **ERROR_MAP01** (value not in allowed mapping list), **ERROR_MDY01** (mandatory field missing), **WARNING_LEN01** (format length violation — warning only, record may still pass). |
+| **Description** | Plain-language explanation of exactly what the rule checks and what a valid record must look like. Always read this before raising a remediation request with a source entity. |
 
 ---
 
 ## 🧭 How to Navigate
 
-- **Click "Data Collect – Interface Monitoring"** → Goes back to the collection volume and file ingestion view.
-- **Click "Review DQ Rules"** → Opens the rule registry to understand the logic behind each Completeness, Consistency, and Validity check.
-- **Click "Investigate Errors"** → Takes you to a row-level error log to find and action specific failing records.
-- **Click "Home"** → Returns to the main summary dashboard.
-- **Click "Summary"** → Opens a consolidated weekly summary across all metrics.
-- **Click "Support"** → Raises a support request or accesses documentation.
+- **Click "Data Collect – Interface Monitoring"** → Returns to the data collection and file volume view.
+- **Click "DQ Monitoring"** → Goes to the DQ score dashboard to see how these rules are performing across entities.
+- **Click "Investigate Errors"** → Opens the row-level error log where you can match failed records to specific Rule IDs and Functional IDs from this page.
+- **Scroll the rule table** → The table lists all 227 rules in order. Use the Rule ID or Functional ID to locate a specific rule quickly.
 
 ---
 
-> 💡 **Tip:** Cross-reference the **field-level table** with the **entity hover panel** — if an entity has a high Validity rejection count (donut), look for fields in the table with low Validity scores in that same entity's data category. That intersection is where your remediation effort will have the most impact.
+> 💡 **Tip:** When an entity reports a data quality issue, start here — look up the **Functional ID** from the error log on the Investigate Errors page, find the matching row in this table, and read the **Description** column. This tells you exactly what the entity needs to fix in their source system before the next file submission.
