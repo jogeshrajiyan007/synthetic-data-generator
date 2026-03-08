@@ -1,12 +1,12 @@
-# Data Quality Monitoring – List of DQ Rules
+# Investigate Errors – Data Collect Rows with DQ Errors
 
-**Last Refreshed:** February 26, 2026
+**Last Refreshed:** February 26, 2026 &nbsp;|&nbsp; **Coverage:** 08 Feb 2026 – 14 Feb 2026
 
 ---
 
 ## 📊 What This Page Tells You
 
-This page is the **rule registry** for the entire data quality framework. It gives you full transparency into every validation check applied to incoming HR data — what is being checked, against which field, under which category, and what happens when a record fails. Use this page to understand the logic behind DQ scores, validate that rules are correctly configured, and investigate why specific errors are being raised.
+This is the **deepest level of investigation** in the dashboard. It exposes every individual employee record that was rejected due to a data quality rule failure — organised by date, entity, and employee ID — alongside the exact field values that caused the failure. Use this page when you need to go beyond scores and percentages and identify the specific rows and fields that need to be corrected at source.
 
 ---
 
@@ -14,38 +14,60 @@ This page is the **rule registry** for the entire data quality framework. It giv
 
 | KPI | What it means |
 |-----|--------------|
-| **Job Data Rules Applied** | Number of DQ rules actively evaluating **Job Data (JD)** fields — the largest rule set at 182 rules, covering fields like assignment category, career events, FTE, business unit, etc. |
-| **PI Data Rules Applied** | Number of rules evaluating **Personal Information (PI)** fields such as address, date of birth, and city — 43 rules in total. |
-| **CP Data Rules Applied** | Number of rules evaluating **Compensation (CP)** fields — 2 rules currently active. |
-| **Total DQ Rules Applied** | The combined count of all active rules across all data categories — **227 rules** in total running every week against incoming records. |
+| **Employees Number** | Total employee records processed this week across all entities. |
+| **Files Loaded** | Number of source files ingested from Oracle PaaS this week. |
+| **Overall Error Rate** | Percentage of all loaded records containing at least one DQ rule violation. At 64.79%, over half of all records have at least one issue this week. |
+| **Total DQ Rules Applied** | The total number of active validation rules (227) that were run against incoming records this week. |
+| **Rejected Rows** | Total number of records that failed one or more DQ rules and were excluded from downstream processing — 2,276 rows this week. |
 
 ---
 
-## 📋 Rule Table — Column Definitions
+## 📋 Visual Breakdown
 
-Each row in the table represents one individual DQ rule. Here is what each column means:
+### Employee Rows Rejected Due to DQ Rule Fails (Matrix Table)
+The core visual of this page — a **hierarchical matrix** that drills from date → entity → employee ID → file name, with each row's field values displayed as columns across the top (ADDR1, ADDR2, ADDR3, ADDR4, ALTERNATE_CHAR_NAME, ANNUAL_PERCENT_WORKED, ASSIGNMENT_CATEGORY, ASSIGNMENT_STATUS, and more).
 
-| Column | What it means |
-|--------|--------------|
-| **Rule ID** | A sequential identifier for the rule within the dashboard. Used for reference when investigating errors. |
-| **Functional ID** | The unique business code for the rule (e.g. `DQ-VA-0001`, `DQ-CO-0016`). The prefix indicates the DQ dimension: **VA** = Validity, **CO** = Completeness. Use this ID to trace a rule back to its source definition or raise it in a support ticket. |
-| **DQ Dimension** | Which quality dimension this rule enforces — **Validity** (correct format or allowed value), **Completeness** (field must be filled), or **Consistency** (logical alignment between fields). |
-| **Datapoint** | The specific HR field being validated by this rule (e.g. Address, FTE, Assignment Category, Career Events). |
-| **File Category** | The source file type the rule applies to — **JD** (Job Data), **PI** (Personal Information), or **CP** (Compensation). |
-| **Data Category** | The data category classification of the field being checked — mirrors the File Category in most cases. |
-| **Log Type** | The system that logs the error when this rule fails — **MDM** (Master Data Management system) or **HDL** (HCM Data Loader). This tells you where to look when investigating a failure. |
-| **Error Code** | The specific error or warning code raised when this rule is violated. Key codes include: **ERROR** (hard failure, record rejected), **ERROR_MAP01** (value not in allowed mapping list), **ERROR_MDY01** (mandatory field missing), **WARNING_LEN01** (format length violation — warning only, record may still pass). |
-| **Description** | Plain-language explanation of exactly what the rule checks and what a valid record must look like. Always read this before raising a remediation request with a source entity. |
+The hierarchy works as follows:
+- **Level 1 — Reported Date** (e.g. Monday, February 09, 2026): Groups all rejections by the date the file was processed.
+- **Level 2 — Entity** (e.g. AXA Belgium): Shows which AXA entity submitted the file containing the failed records.
+- **Level 3 — Employee ID** (e.g. 35196, 35643): The specific employee record that failed. Expand to see the file it came from.
+- **Level 4 — File Name** (e.g. IFF_BE01_202602091616): The exact source file that contained this employee's record.
+
+Cells with a **dark red / highlighted fill** indicate a field value that has failed a DQ rule for that employee. Cells with no fill are either passing or not applicable for that field.
+
+> 💡 **Hover Interaction — See the Exact Error**
+> Hovering over any **highlighted (red) cell** reveals a tooltip with the full DQ rule failure detail, including:
+> - **Which DQ Dimension failed** (e.g. "DQ Dimension Validity KO For ASSIGNMENT_CATEGORY")
+> - **The rule description** — the plain-language explanation of what the field must satisfy (e.g. "Assignment category must be valid — the value input must belong to the list of authorised values for this data point")
+> - **The specific error message** — the precise reason this record failed (e.g. "ERROR: These combinations of action code, worker type and assignment category are not managed")
+>
+> This means you do not need to cross-reference the rule registry manually — the exact failure reason is surfaced directly on the cell, making it fast to diagnose and communicate back to the source entity.
+
+---
+
+## 🎛️ Filters Panel (Right Side)
+The page includes four slicers to narrow down the error log quickly:
+
+| Filter | What it does |
+|--------|-------------|
+| **Reported Date** | Filter rejections to a specific day or date range within the week. |
+| **Entity** | Isolate errors for a specific AXA entity (e.g. view only AXA Belgium records). |
+| **Employee** | Search for a specific employee ID to check their individual rejection history. |
+| **File Name** | Filter to a specific source file submission to investigate a particular interface run. |
+
+These filters work together — combine Entity + Reported Date to quickly scope down to a single entity's problematic file run.
 
 ---
 
 ## 🧭 How to Navigate
 
-- **Click "Data Collect – Interface Monitoring"** → Returns to the data collection and file volume view.
-- **Click "DQ Monitoring"** → Goes to the DQ score dashboard to see how these rules are performing across entities.
-- **Click "Investigate Errors"** → Opens the row-level error log where you can match failed records to specific Rule IDs and Functional IDs from this page.
-- **Scroll the rule table** → The table lists all 227 rules in order. Use the Rule ID or Functional ID to locate a specific rule quickly.
+- **Click "Data Collect – Interface Monitoring"** → Returns to the collection volume summary.
+- **Click "DQ Monitoring"** → Goes back to the entity-level DQ score view.
+- **Click "Review DQ Rules"** → Opens the full rule registry to look up the Functional ID behind any error you find here.
+- **Click "Home"** → Returns to the main summary dashboard.
+- **Click "Summary"** → Opens the consolidated weekly summary view.
+- **Click "Support"** → Raises a support request or accesses documentation.
 
 ---
 
-> 💡 **Tip:** When an entity reports a data quality issue, start here — look up the **Functional ID** from the error log on the Investigate Errors page, find the matching row in this table, and read the **Description** column. This tells you exactly what the entity needs to fix in their source system before the next file submission.
+> 💡 **Tip:** The fastest investigation workflow is: **filter by Entity → expand to Employee level → hover over red cells to read the exact error → cross-check Functional ID in Review DQ Rules → communicate the specific fix needed to the entity's data team.** This page has everything needed to go from "something failed" to "here is exactly what needs to change" without leaving the dashboard.
