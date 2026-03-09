@@ -1,97 +1,273 @@
-fn_GetFactDetails = (StartDate as text, EndDate as text) =>
-let
-  pageSize = 10000,
-  baseUrl = "https://ofa-acm-prd.axa.com/ords/",
-  schemaPath = "ax_dq_logs/ax_dq/fact_details",
-  // Function to fetch each page with date filters passed to API
-  GetPage = (pgOffset as number) =>
-        let
-            response = Json.Document(
-                Web.Contents(baseUrl, [
-                    RelativePath = schemaPath,
-                    Query = [
-                        limit       = Text.From(pageSize),
-                        offset      = Text.From(pgOffset),
-                        start_date  = StartDate,
-                        end_date    = EndDate
-                    ]
-                ])
-            ),
-            items = response[items]
-        in
-            items,
-  // Paginate through all pages
-  AllPages = List.Generate(
-        ()    => [pgOffset = 0, page = GetPage(0)],
-        each  List.Count([page]) > 0,
-        each  [page = GetPage([pgOffset] + pageSize), pgOffset = [pgOffset] + pageSize],
-        each  [page]
-    ),
-  Combined = List.Combine(AllPages),
-  // ✅ Handle empty response — define all expected columns explicitly
-  EmptyTable = #table(
-        {
-            "row_number", "data_point", "value", "row_id",
-            "dim_date_id", "dim_person_id", "dim_category_id",
-            "dim_entity_id", "line_status_code", "ax_filename",
-            "ax_filename_date", "dim_rule_id", "error_message"
-        },
-        {}
-    ),
-  // ✅ If API returns empty, use EmptyTable to preserve schema
-  Final = if List.IsEmpty(Combined)
-            then EmptyTable
-            else Table.FromRecords(Combined),
-  #"Type modifié" = Table.TransformColumnTypes(Final, {{"dim_person_id", type text}, {"row_id", type text}}),
-  #"Fractionner la colonne par délimiteur" = Table.SplitColumn(#"Type modifié", "dim_date_id", Splitter.SplitTextByDelimiter("T", QuoteStyle.Csv), {"dim_date_id.1", "dim_date_id.2"}),
-  #"Type modifié1" = Table.TransformColumnTypes(#"Fractionner la colonne par délimiteur", {{"dim_date_id.1", type date}, {"dim_date_id.2", type time}}),
-  #"Colonnes renommées" = Table.RenameColumns(#"Type modifié1", {{"dim_date_id.1", "dim_date_id"}}),
-  #"Colonnes supprimées" = Table.RemoveColumns(#"Colonnes renommées", {"dim_date_id.2"}),
-  #"Type modifié2" = Table.TransformColumnTypes(#"Colonnes supprimées", {{"dim_person_id", type text}, {"row_id", type text}}),
-  #"Replaced Value" = Table.ReplaceValue(#"Type modifié2", null, "", Replacer.ReplaceValue, {"value"}),
-  #"Changed Type" = Table.TransformColumnTypes(#"Replaced Value", {{"ax_filename_date", type text}}),
-  Custom1 = Table.SelectRows(#"Changed Type", each true),
-  #"Transform columns" = Table.TransformColumnTypes(Custom1, {{"row_number", type text}, {"data_point", type text}, {"value", type text}, {"dim_category_id", type text}, {"dim_entity_id", type text}, {"line_status_code", type text}, {"ax_filename", type text}, {"dim_rule_id", type text}, {"error_message", type text}}),
-  #"Replace errors" = Table.ReplaceErrorValues(#"Transform columns", {{"row_number", null}, {"data_point", null}, {"value", null}, {"dim_category_id", null}, {"dim_entity_id", null}, {"line_status_code", null}, {"ax_filename", null}, {"dim_rule_id", null}, {"error_message", null}}),
-  #"Duplicated column" = Table.DuplicateColumn(#"Replace errors", "dim_date_id", "dim_date_id - Copy"),
-  #"Renamed columns" = Table.RenameColumns(#"Duplicated column", {{"dim_date_id - Copy", "reported_timestamp"}}),
-  #"Changed column type" = Table.TransformColumnTypes(#"Renamed columns", {{"reported_timestamp", type datetime}})
-in
-  #"Changed column type"
-
-Month_list = let
-  StartDate = #date(2026,1,1),
-  EndDate = #date(2026,2,28),
-
-  MonthList = List.Generate(
-  ()=> StartDate,
-  each _ <= EndDate,
-  each Date.AddMonths(_,1)
-  ),
-
-  TableMonths = Table.FromList(
-  MonthList, Splitter.SplitByNothing(),{"Start"}
-  ),
-
-  AddEndDate = Table.AddColumn(TableMonths, "End", each Date.EndOfMonth([Start])),
-
-  ConvertText = Table.TransformColumns(
-  AddEndDate,
-  {
-    {"Start", each Date.ToText(_, "MM/dd/yyyy")},
-    {"End", each Date.ToText(_, "MM/dd/yyyy")}
-  }
-  ),
-  #"Invoked custom function" = Table.AddColumn(ConvertText, "Invoked custom function", each fn_GetFactDetails([Start], [End]))
-
-in 
-  #"Invoked custom function"
-
-AX_DQ_FACT_DETAILS_HISTORICAL = let
-  Source = Month_list,
-  #"Expanded Invoked custom function" = Table.ExpandTableColumn(Source, "Invoked custom function", {"row_number", "data_point", "value", "row_id", "dim_date_id", "dim_person_id", "dim_category_id", "dim_entity_id", "line_status_code", "ax_filename", "ax_filename_date", "dim_rule_id", "error_message", "reported_timestamp"}, {"row_number", "data_point", "value", "row_id", "dim_date_id", "dim_person_id", "dim_category_id", "dim_entity_id", "line_status_code", "ax_filename", "ax_filename_date", "dim_rule_id", "error_message", "reported_timestamp"}),
-  #"Removed columns" = Table.RemoveColumns(#"Expanded Invoked custom function", {"Start", "End"}),
-  #"Transform columns" = Table.TransformColumnTypes(#"Removed columns", {{"row_number", type text}, {"data_point", type text}, {"value", type text}, {"row_id", type text}, {"dim_date_id", type text}, {"dim_person_id", type text}, {"dim_category_id", type text}, {"dim_entity_id", type text}, {"line_status_code", type text}, {"ax_filename", type text}, {"ax_filename_date", type text}, {"dim_rule_id", type text}, {"error_message", type text}, {"reported_timestamp", type text}}),
-  #"Replace errors" = Table.ReplaceErrorValues(#"Transform columns", {{"row_number", null}, {"data_point", null}, {"value", null}, {"row_id", null}, {"dim_date_id", null}, {"dim_person_id", null}, {"dim_category_id", null}, {"dim_entity_id", null}, {"line_status_code", null}, {"ax_filename", null}, {"ax_filename_date", null}, {"dim_rule_id", null}, {"error_message", null}, {"reported_timestamp", null}})
-in
-  #"Replace errors"
+--Creation script
+DROP MATERIALIZED VIEW AX_DQ_LOGS.AX_DQ_FACT_DETAILS_MTVW;
+ALTER SESSION SET QUERY_REWRITE_ENABLED = TRUE;
+CREATE MATERIALIZED VIEW AX_DQ_LOGS.AX_DQ_FACT_DETAILS_MTVW
+PARALLEL 16
+BUILD IMMEDIATE
+REFRESH COMPLETE ON DEMAND
+AS
+--Begin View code
+WITH
+FACT_DETAILS_QUERY
+AS
+(
+    SELECT
+        DLR_Pivoted.col AS data_point
+      , DLR_Pivoted.colvalue AS value
+      , DLR_Pivoted.row_id
+      , DLR_Pivoted.DIM_DATE_ID
+      , DLR_Pivoted.DIM_PERSON_ID
+      , DLR_Pivoted.DIM_CATEGORY_ID
+      , DLR_Pivoted.DIM_ENTITY_ID
+      , DLR_Pivoted.LINE_STATUS_CODE
+      , DLR_Pivoted.AX_FILENAME
+      , DLR_Pivoted.AX_FILENAME_DATE
+      , DLR_Pivoted.DIM_RULE_ID
+      , DLR_Pivoted.ERROR_MESSAGE
+    FROM (
+      SELECT
+          DISTINCT	
+          row_id
+        , DIM_DATE_ID
+        , DIM_PERSON_ID
+        , DIM_CATEGORY_ID
+        , DIM_ENTITY_ID
+        , LINE_STATUS_CODE
+        , AX_FILENAME
+        , AX_FILENAME_DATE
+        , DIM_RULE_ID
+        , ERROR_MESSAGE
+        -- Begin columns to be unpivoted:
+        , PAYROLL_COUNTRY
+        , LOCAL_ID
+        , EFFECTIVE_DATE
+        , PERSON_INTEREST_TYPE
+        , LAST_NAME
+        , FIRST_NAME
+        , GENDER
+        , DATE_OF_BIRTH
+        , COUNTRY
+        , ADDR1
+        , ADDR2
+        , ADDR3
+        , ADDR4
+        , CITY
+        , ZIP_CODE
+        , TAX_RESIDENCE_COUNTRY
+        , GROUP_PSOFT_ID
+        , PREFIX
+        , ALTERNATE_CHAR_NAME
+        , SECOND_LAST_NAME
+        , MIDDLE_NAME
+        , NAME_SUFFIX
+        , NATIONALITY
+        , STATE
+        , MARITAL_STATUS
+        , LANGUAGE_CODE
+        , BIRTH_COUNTRY
+        , BIRTH_STATE
+        , BIRTH_LOCATION
+        , DATE_OF_DEATH
+        , EMAIL
+        , PHONE_NUMBER
+        , NID_COUNTRY
+        , NATIONAL_ID_TYPE
+        , NATIONAL_ID
+        , HIGHEST_EDUC_LEVEL
+        , PREFERRED_NAME
+        , NATIONALITY_COUNTRY1
+        , NATIONALITY_COUNTRY2
+        , TAX_ADDR1
+        , TAX_ADDR2
+        , TAX_ADDR3
+        , TAX_ADDR4
+        , TAX_ZIP_CODE
+        , PREVIOUS_LAST_NAME
+        , CAREER_EVENT
+        , COMPANY_CODE
+        , COMPANY_ORIG
+        , LOCATION
+        , DEPARTMENT
+        , GLOBAL_EMP_CAT
+        , GLOBAL_GRADE
+        , EMP_CURR_CONTRACT_TYPE
+        , START_DATE_CURR_CONTRACT
+        , HIRE_DATE_ORIG
+        , ANNUAL_PERCENT_WORKED
+        , JOB_CODE
+        , BUSINESS_TITLE
+        , EMP_LOCAL_CLASS
+        , MANAGER_LOCAL_ID
+        , SEC_MANAGER_LOCAL_ID
+        , WORKING_AS_MANAGER
+        , COST_CENTER
+        , SAL_ADMIN_PLAN
+        , SAL_GRADE
+        , STEP
+        , EFFECTIVE_SEQ
+        , BUSINESS_TITLE_ENG
+        , BUSINESS_LINE
+        , CONTRACT_END_DATE
+        , ASSIGNMENT_CATEGORY
+        , ASSIGNMENT_STATUS
+        , POSITION
+        , POSITION_OVERRIDE_FLAG
+        , CANDIDATE_ID
+        , PENSION_CPN_CATEGORY
+        , BARGAINING_UNIT
+        , REGION
+        , TRAINING_COST_CENTER_ID
+        , TRAINING_COST_CENTER_NAME
+        , PROBATION_END_DATE
+        , OHC_BUSINESS_UNIT
+        , CAREER_EVENT_REASON
+        , EXTRAFIELD9
+        , EXTRAFIELD10
+        , COMP_RATE_CODE
+        , CURRENCY_CODE
+        , TOT_AMOUNT
+        , EXTRAFIELD1
+        , EXTRAFIELD2
+        , EXTRAFIELD3
+        , EXTRAFIELD4
+        , EXTRAFIELD5
+        , EXTRAFIELD6
+        , EXTRAFIELD7
+        , EXTRAFIELD8
+      FROM 
+        AX_DQ_LOGS.AX_DQ_DATA_LOGS_RULES_MTVW
+      WHERE LINE_STATUS_CODE = 3 
+        AND DIM_RULE_ID IS NOT NULL
+    )
+    UNPIVOT INCLUDE NULLS (
+      colvalue FOR col IN (
+          PAYROLL_COUNTRY
+        , LOCAL_ID
+        , EFFECTIVE_DATE
+        , PERSON_INTEREST_TYPE
+        , LAST_NAME
+        , FIRST_NAME
+        , GENDER
+        , DATE_OF_BIRTH
+        , COUNTRY
+        , ADDR1
+        , ADDR2
+        , ADDR3
+        , ADDR4
+        , CITY
+        , ZIP_CODE
+        , TAX_RESIDENCE_COUNTRY
+        , GROUP_PSOFT_ID
+        , PREFIX
+        , ALTERNATE_CHAR_NAME
+        , SECOND_LAST_NAME
+        , MIDDLE_NAME
+        , NAME_SUFFIX
+        , NATIONALITY
+        , STATE
+        , MARITAL_STATUS
+        , LANGUAGE_CODE
+        , BIRTH_COUNTRY
+        , BIRTH_STATE
+        , BIRTH_LOCATION
+        , DATE_OF_DEATH
+        , EMAIL
+        , PHONE_NUMBER
+        , NID_COUNTRY
+        , NATIONAL_ID_TYPE
+        , NATIONAL_ID
+        , HIGHEST_EDUC_LEVEL
+        , PREFERRED_NAME
+        , NATIONALITY_COUNTRY1
+        , NATIONALITY_COUNTRY2
+        , TAX_ADDR1
+        , TAX_ADDR2
+        , TAX_ADDR3
+        , TAX_ADDR4
+        , TAX_ZIP_CODE
+        , PREVIOUS_LAST_NAME
+        , CAREER_EVENT
+        , COMPANY_CODE
+        , COMPANY_ORIG
+        , LOCATION
+        , DEPARTMENT
+        , GLOBAL_EMP_CAT
+        , GLOBAL_GRADE
+        , EMP_CURR_CONTRACT_TYPE
+        , START_DATE_CURR_CONTRACT
+        , HIRE_DATE_ORIG
+        , ANNUAL_PERCENT_WORKED
+        , JOB_CODE
+        , BUSINESS_TITLE
+        , EMP_LOCAL_CLASS
+        , MANAGER_LOCAL_ID
+        , SEC_MANAGER_LOCAL_ID
+        , WORKING_AS_MANAGER
+        , COST_CENTER
+        , SAL_ADMIN_PLAN
+        , SAL_GRADE
+        , STEP
+        , EFFECTIVE_SEQ
+        , BUSINESS_TITLE_ENG
+        , BUSINESS_LINE
+        , CONTRACT_END_DATE
+        , ASSIGNMENT_CATEGORY
+        , ASSIGNMENT_STATUS
+        , POSITION
+        , POSITION_OVERRIDE_FLAG
+        , CANDIDATE_ID
+        , PENSION_CPN_CATEGORY
+        , BARGAINING_UNIT
+        , REGION
+        , TRAINING_COST_CENTER_ID
+        , TRAINING_COST_CENTER_NAME
+        , PROBATION_END_DATE
+        , OHC_BUSINESS_UNIT
+        , CAREER_EVENT_REASON
+        , EXTRAFIELD9
+        , EXTRAFIELD10
+        , COMP_RATE_CODE
+        , CURRENCY_CODE
+        , TOT_AMOUNT
+        , EXTRAFIELD1
+        , EXTRAFIELD2
+        , EXTRAFIELD3
+        , EXTRAFIELD4
+        , EXTRAFIELD5
+        , EXTRAFIELD6
+        , EXTRAFIELD7
+        , EXTRAFIELD8
+      )
+    ) DLR_Pivoted
+)
+SELECT
+    ROW_NUMBER() OVER ( ORDER BY FDQ.row_id ) AS ROW_NUMBER,
+    FDQ.*
+FROM
+    FACT_DETAILS_QUERY FDQ
+;
+/
+DROP INDEX IDX_FD_ROW_NUMBER ;
+/
+-- Refresh Script : would take 11 minutes for 3 moving months
+SET SERVEROUTPUT ON;
+DECLARE
+  v_start_time  TIMESTAMP;
+  v_end_time    TIMESTAMP;
+BEGIN
+    v_start_time := SYSTIMESTAMP;
+    DBMS_OUTPUT.PUT_LINE('Refresh started at ' || v_start_time);
+    DBMS_MVIEW.REFRESH
+        (
+        list            => 'AX_DQ_LOGS.AX_DQ_FACT_DETAILS_MTVW',
+        method          => 'C', -- 'C' = Complete
+        atomic_refresh  => FALSE, -- Ensures the refresh is all-or-nothing (safer)
+        parallelism     => 16     -- Parallelism (test values like 2, 4, 8 depending on system load)
+        );
+    v_end_time := SYSTIMESTAMP;
+    DBMS_OUTPUT.PUT_LINE('Refresh ended at ' || v_end_time);
+END;
+/
+CREATE UNIQUE INDEX IDX_FD_ROW_NUMBER ON AX_DQ_LOGS.AX_DQ_FACT_DETAILS_MTVW (ROW_NUMBER);
+--DROP MATERIALIZED VIEW AX_DQ_LOGS.AX_DQ_FACT_DETAILS_MTVW
+SELECT * FROM AX_DQ_LOGS.AX_DQ_FACT_DETAILS_MTVW order by row_number;
