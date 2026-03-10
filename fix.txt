@@ -1,292 +1,95 @@
---Creation script
-DROP MATERIALIZED VIEW AX_DQ_LOGS.AX_DQ_FACT_DETAILS_MTVW;
-ALTER SESSION SET QUERY_REWRITE_ENABLED = TRUE;
-CREATE MATERIALIZED VIEW AX_DQ_LOGS.AX_DQ_FACT_DETAILS_MTVW
-PARALLEL 16
-BUILD IMMEDIATE
-REFRESH COMPLETE ON DEMAND
-AS
---Begin View code
-WITH
-FACT_DETAILS_QUERY
-AS
-(
-    SELECT
-        DLR_Pivoted.col AS data_point
-      , DLR_Pivoted.colvalue AS value
-      , DLR_Pivoted.row_id
-      , DLR_Pivoted.DIM_DATE_ID
-      , DLR_Pivoted.DIM_PERSON_ID
-      , DLR_Pivoted.DIM_CATEGORY_ID
-      , DLR_Pivoted.DIM_ENTITY_ID
-      , DLR_Pivoted.LINE_STATUS_CODE
-      , DLR_Pivoted.AX_FILENAME
-      , DLR_Pivoted.AX_FILENAME_DATE
-      , DLR_Pivoted.DIM_RULE_ID
-      , DLR_Pivoted.ERROR_MESSAGE
-    FROM (
-      SELECT
-          DISTINCT	
-          row_id
-        , DIM_DATE_ID
-        , DIM_PERSON_ID
-        , DIM_CATEGORY_ID
-        , DIM_ENTITY_ID
-        , LINE_STATUS_CODE
-        , AX_FILENAME
-        , AX_FILENAME_DATE
-        , DIM_RULE_ID
-        , ERROR_MESSAGE
-        -- Begin columns to be unpivoted:
-        , PAYROLL_COUNTRY
-        , LOCAL_ID
-        , EFFECTIVE_DATE
-        , PERSON_INTEREST_TYPE
-        , LAST_NAME
-        , FIRST_NAME
-        , GENDER
-        , DATE_OF_BIRTH
-        , COUNTRY
-        , ADDR1
-        , ADDR2
-        , ADDR3
-        , ADDR4
-        , CITY
-        , ZIP_CODE
-        , TAX_RESIDENCE_COUNTRY
-        , GROUP_PSOFT_ID
-        , PREFIX
-        , ALTERNATE_CHAR_NAME
-        , SECOND_LAST_NAME
-        , MIDDLE_NAME
-        , NAME_SUFFIX
-        , NATIONALITY
-        , STATE
-        , MARITAL_STATUS
-        , LANGUAGE_CODE
-        , BIRTH_COUNTRY
-        , BIRTH_STATE
-        , BIRTH_LOCATION
-        , DATE_OF_DEATH
-        , EMAIL
-        , PHONE_NUMBER
-        , NID_COUNTRY
-        , NATIONAL_ID_TYPE
-        , NATIONAL_ID
-        , HIGHEST_EDUC_LEVEL
-        , PREFERRED_NAME
-        , NATIONALITY_COUNTRY1
-        , NATIONALITY_COUNTRY2
-        , TAX_ADDR1
-        , TAX_ADDR2
-        , TAX_ADDR3
-        , TAX_ADDR4
-        , TAX_ZIP_CODE
-        , PREVIOUS_LAST_NAME
-        , CAREER_EVENT
-        , COMPANY_CODE
-        , COMPANY_ORIG
-        , LOCATION
-        , DEPARTMENT
-        , GLOBAL_EMP_CAT
-        , GLOBAL_GRADE
-        , EMP_CURR_CONTRACT_TYPE
-        , START_DATE_CURR_CONTRACT
-        , HIRE_DATE_ORIG
-        , ANNUAL_PERCENT_WORKED
-        , JOB_CODE
-        , BUSINESS_TITLE
-        , EMP_LOCAL_CLASS
-        , MANAGER_LOCAL_ID
-        , SEC_MANAGER_LOCAL_ID
-        , WORKING_AS_MANAGER
-        , COST_CENTER
-        , SAL_ADMIN_PLAN
-        , SAL_GRADE
-        , STEP
-        , EFFECTIVE_SEQ
-        , BUSINESS_TITLE_ENG
-        , BUSINESS_LINE
-        , CONTRACT_END_DATE
-        , ASSIGNMENT_CATEGORY
-        , ASSIGNMENT_STATUS
-        , POSITION
-        , POSITION_OVERRIDE_FLAG
-        , CANDIDATE_ID
-        , PENSION_CPN_CATEGORY
-        , BARGAINING_UNIT
-        , REGION
-        , TRAINING_COST_CENTER_ID
-        , TRAINING_COST_CENTER_NAME
-        , PROBATION_END_DATE
-        , OHC_BUSINESS_UNIT
-        , CAREER_EVENT_REASON
-        , EXTRAFIELD9
-        , EXTRAFIELD10
-        , COMP_RATE_CODE
-        , CURRENCY_CODE
-        , TOT_AMOUNT
-        , EXTRAFIELD1
-        , EXTRAFIELD2
-        , EXTRAFIELD3
-        , EXTRAFIELD4
-        , EXTRAFIELD5
-        , EXTRAFIELD6
-        , EXTRAFIELD7
-        , EXTRAFIELD8
-      FROM 
-        AX_DQ_LOGS.AX_DQ_DATA_LOGS_RULES_MTVW
-      WHERE LINE_STATUS_CODE = 3 
-        AND DIM_RULE_ID IS NOT NULL
-    )
-    UNPIVOT INCLUDE NULLS (
-      colvalue FOR col IN (
-          PAYROLL_COUNTRY
-        , LOCAL_ID
-        , EFFECTIVE_DATE
-        , PERSON_INTEREST_TYPE
-        , LAST_NAME
-        , FIRST_NAME
-        , GENDER
-        , DATE_OF_BIRTH
-        , COUNTRY
-        , ADDR1
-        , ADDR2
-        , ADDR3
-        , ADDR4
-        , CITY
-        , ZIP_CODE
-        , TAX_RESIDENCE_COUNTRY
-        , GROUP_PSOFT_ID
-        , PREFIX
-        , ALTERNATE_CHAR_NAME
-        , SECOND_LAST_NAME
-        , MIDDLE_NAME
-        , NAME_SUFFIX
-        , NATIONALITY
-        , STATE
-        , MARITAL_STATUS
-        , LANGUAGE_CODE
-        , BIRTH_COUNTRY
-        , BIRTH_STATE
-        , BIRTH_LOCATION
-        , DATE_OF_DEATH
-        , EMAIL
-        , PHONE_NUMBER
-        , NID_COUNTRY
-        , NATIONAL_ID_TYPE
-        , NATIONAL_ID
-        , HIGHEST_EDUC_LEVEL
-        , PREFERRED_NAME
-        , NATIONALITY_COUNTRY1
-        , NATIONALITY_COUNTRY2
-        , TAX_ADDR1
-        , TAX_ADDR2
-        , TAX_ADDR3
-        , TAX_ADDR4
-        , TAX_ZIP_CODE
-        , PREVIOUS_LAST_NAME
-        , CAREER_EVENT
-        , COMPANY_CODE
-        , COMPANY_ORIG
-        , LOCATION
-        , DEPARTMENT
-        , GLOBAL_EMP_CAT
-        , GLOBAL_GRADE
-        , EMP_CURR_CONTRACT_TYPE
-        , START_DATE_CURR_CONTRACT
-        , HIRE_DATE_ORIG
-        , ANNUAL_PERCENT_WORKED
-        , JOB_CODE
-        , BUSINESS_TITLE
-        , EMP_LOCAL_CLASS
-        , MANAGER_LOCAL_ID
-        , SEC_MANAGER_LOCAL_ID
-        , WORKING_AS_MANAGER
-        , COST_CENTER
-        , SAL_ADMIN_PLAN
-        , SAL_GRADE
-        , STEP
-        , EFFECTIVE_SEQ
-        , BUSINESS_TITLE_ENG
-        , BUSINESS_LINE
-        , CONTRACT_END_DATE
-        , ASSIGNMENT_CATEGORY
-        , ASSIGNMENT_STATUS
-        , POSITION
-        , POSITION_OVERRIDE_FLAG
-        , CANDIDATE_ID
-        , PENSION_CPN_CATEGORY
-        , BARGAINING_UNIT
-        , REGION
-        , TRAINING_COST_CENTER_ID
-        , TRAINING_COST_CENTER_NAME
-        , PROBATION_END_DATE
-        , OHC_BUSINESS_UNIT
-        , CAREER_EVENT_REASON
-        , EXTRAFIELD9
-        , EXTRAFIELD10
-        , COMP_RATE_CODE
-        , CURRENCY_CODE
-        , TOT_AMOUNT
-        , EXTRAFIELD1
-        , EXTRAFIELD2
-        , EXTRAFIELD3
-        , EXTRAFIELD4
-        , EXTRAFIELD5
-        , EXTRAFIELD6
-        , EXTRAFIELD7
-        , EXTRAFIELD8
-      )
-    ) DLR_Pivoted
+import os
+from dotenv import load_dotenv
+from pydantic import Extra
+import requests
+import json 
+from typing import Any, List, Mapping, Optional
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_core.prompts.chat import (
+    ChatPromptTemplate,
+    HumanMessagePromptTemplate,
+    MessagesPlaceholder,
 )
-SELECT
-    ROW_NUMBER() OVER ( ORDER BY FDQ.row_id ) AS ROW_NUMBER,
-    FDQ.*
-FROM
-    FACT_DETAILS_QUERY FDQ
-;
-/
-DROP INDEX IDX_FD_ROW_NUMBER ;
-/
--- Refresh Script : would take 11 minutes for 3 moving months
-SET SERVEROUTPUT ON;
-DECLARE
-  v_start_time  TIMESTAMP;
-  v_end_time    TIMESTAMP;
-BEGIN
-    v_start_time := SYSTIMESTAMP;
-    DBMS_OUTPUT.PUT_LINE('Refresh started at ' || v_start_time);
-    DBMS_MVIEW.REFRESH
-        (
-        list            => 'AX_DQ_LOGS.AX_DQ_FACT_DETAILS_MTVW',
-        method          => 'C', -- 'C' = Complete
-        atomic_refresh  => FALSE, -- Ensures the refresh is all-or-nothing (safer)
-        parallelism     => 16     -- Parallelism (test values like 2, 4, 8 depending on system load)
-        );
-    v_end_time := SYSTIMESTAMP;
-    DBMS_OUTPUT.PUT_LINE('Refresh ended at ' || v_end_time);
-END;
-/
-CREATE UNIQUE INDEX IDX_FD_ROW_NUMBER ON AX_DQ_LOGS.AX_DQ_FACT_DETAILS_MTVW (ROW_NUMBER);
---DROP MATERIALIZED VIEW AX_DQ_LOGS.AX_DQ_FACT_DETAILS_MTVW
-SELECT * FROM AX_DQ_LOGS.AX_DQ_FACT_DETAILS_MTVW order by row_number;
+from langchain_classic.chains import LLMChain
+import json
+import pandas as pd
+from langchain_openai import AzureChatOpenAI
+import httpx
+from datetime import datetime, timedelta
+from pydantic import Extra
+import requests
+from typing import Any, List, Mapping, Optional
+from langchain_classic.callbacks.manager import CallbackManagerForLLMRun
+import time
+import socket
+import tiktoken
 
+def get_token():
+    global client_id, client_secret, api_token_url
+ 
+    url = api_token_url
+    headersList = {"Content-Type": "application/x-www-form-urlencoded"}
+    payload = f"grant_type=client_credentials&client_id={client_id}&client_secret={client_secret}&scope=urn:grp:chatgpt"
+    print(f"PAYLOAD: {payload}")
+    response = requests.request(method='POST', url=url, data=payload, headers=headersList)
+    if response.status_code != 200:
+        raise Exception(f'Request failed with status {response.status_code}, {response.text}')
+    # return response.json()["access_token"]
+     # Parse the response
+    token_info = response.json()
+    access_token = token_info['access_token']
+    #expires_in = token_info.get('expires_in', 2700)  # Default to 1 hour if not provided
+    #token_expiration = datetime.now() + timedelta(seconds=expires_in)
+    print(f"access_token:{access_token}")
+    return access_token
 
+class SecureGPTChat(AzureChatOpenAI):
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        temperature: float | None = None,
+    ) -> None:
+        super().__init__(
+            model= "gpt-4o-2024-05-13",#"gpt-35-turbo-0301",
+            api_key=api_key,
+            api_version="2024-10-21",
+            base_url = base_url,
+            validate_base_url=False,
+            http_client = httpx.Client(verify=False),
+            temperature=0,
+            top_p = 0.2,
+ 
+        )
+tk = get_token()
+print("token has generated")
+gpt4o_llm = SecureGPTChat(api_key=tk,base_url=api_base_url)
+print(f"gpt4o_instance:{gpt4o_llm}")
 
-Record count:
-
-1	2025	796992
-1	2026	12522144
-2	2025	818784
-2	2026	2619648
-3	2025	1925760
-4	2025	17715936
-5	2025	8345088
-6	2025	3670560
-7	2025	3123264
-8	2025	2619264
-9	2025	3249120
-10	2025	3230688
-11	2025	4678176
-12	2025	3980544
+def query_llm(user_prompt, gpt4o_llm):
+    try:
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    "You are a helpful assistant and an expert in Data Governance.",
+                ),
+                ("human", "{input}"),
+            ]
+        )
+ 
+        chain = prompt | gpt4o_llm
+        response = chain.invoke(
+            {
+                "input": user_prompt,
+            }
+        )
+        return response
+        
+    except Exception as e:
+        print(str(e))
+        return f"Error while calling LLM: {str(e)}"
+ 
+response = query_llm("What is PII Data?",gpt4o_llm)
+print(response)
