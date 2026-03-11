@@ -1,117 +1,179 @@
-# Frequently Asked Questions (FAQ)
-## AXA Group – Oracle Integration Monitoring Dashboard
+# Microsoft Form — Support & Feedback
+## AXA Group HR Data Factory | Oracle Integration Monitoring Dashboard
 
 ---
 
-## 🔍 How to Use Filters
-
-Filters let you narrow the dashboard to a specific time period, entity, employee, or data category. Each page has its own set of filters tailored to what you can investigate there. All filters work together — applying multiple filters at once further narrows your results.
-
----
-
-### 📄 Data Collect – Interface Monitoring Filters
-
-| Filter | Options / Behaviour | What it does |
-|--------|-------------------|-------------|
-| **Date Range** | 3/1/2026 – 3/7/2026 (date picker) | Limits all visuals to records reported within the selected date window. Adjust both start and end dates to zoom into a specific week or day range. |
-| **Entity** | Dropdown — defaults to "All" | Filters all KPIs and charts to a single AXA entity (e.g. AXA Belgium, AXA UK). Select "All" to see the consolidated view. |
-| **Is Executive** | Toggle — No / Yes | Filters records by whether the employee is flagged as an executive in the source system. Use this to assess whether executive-level records have different error patterns. |
-| **Log Type** | Checkboxes — FUNCTIONAL / HDL / MDM | Filters records by the system that logged the interface event. **HDL** = HCM Data Loader, **MDM** = Master Data Management, **FUNCTIONAL** = functional-level processing logs. |
-| **Data Category** | Checkboxes — (Blank) / Compensation / Job / Personal | Filters records by data category. Useful for isolating collection issues to a specific HR data domain. |
+> **Form Instructions (shown at top of form):**
+> Use this form to report a technical issue, raise a data quality concern, request a new feature, or share general feedback about the Oracle Integration Monitoring Dashboard. Our team will review your submission and respond within 2 business days.
 
 ---
 
-### 📄 DQ Monitoring Filters
+## SECTION 1 — Your Details
 
-| Filter | Options / Behaviour | What it does |
-|--------|-------------------|-------------|
-| **Date Range** | 3/1/2026 – 3/7/2026 (date picker) | Scopes DQ scores and the field-level table to records processed within the selected dates. |
-| **Entity** | Dropdown — defaults to "All" | Filters DQ scores, the entity bar chart, and the field-level detail table to a single AXA entity. |
-| **Is Executive** | Toggle — No / Yes | Isolates DQ analysis to executive or non-executive employees, useful for understanding if quality issues are concentrated in a specific workforce segment. |
-| **DQ Dimension** | Checkboxes — Completeness / Validity | Filters the field-level DQ table and score visuals to only the selected quality dimension(s). Use this to focus on one type of failure at a time. Note: Consistency may appear separately depending on active rule coverage. |
-| **Data Category** | Checkboxes — (Blank) / Compensation / Job / Personal | Filters the DQ detail table and entity scores to records within the selected data category, helping you isolate whether quality issues are in Job, Personal, or Compensation fields. |
+**Q1. Full Name** *(Short answer — Required)*
+> Enter your full name.
 
----
+**Q2. Work Email Address** *(Short answer — Required)*
+> Enter your AXA work email address (e.g. firstname.lastname@axa.com).
+> *Validation: Must contain "@axa" to ensure only AXA addresses are accepted.*
 
-### 📄 Investigate Errors Filters
+**Q3. AXA Entity** *(Dropdown — Required)*
+> Select the AXA entity you represent.
+- AXA Belgium
+- AXA France
+- AXA Germany
+- AXA Ireland
+- AXA Morocco
+- AXA Spain
+- AXA Switzerland
+- AXA UK
+- AXA Group / Central Team
+- Other
 
-| Filter | Options / Behaviour | What it does |
-|--------|-------------------|-------------|
-| **Date Range** | 2/1/2026 – 2/28/2026 (date picker) | Limits the rejected rows matrix to records reported on dates within the selected range. Use this to focus on a specific day's file submission. |
-| **Entity** | Dropdown — defaults to "All" | Filters the error matrix to only show rejected rows from the selected AXA entity. |
-| **Is Executive** | Toggle — No / Yes | Filters rejected records to executive or non-executive employees. |
-| **Functional ID** | Dropdown — defaults to "All" | Filters rejected rows to records that failed a specific DQ rule, identified by its Functional ID (e.g. DQ-VA-0001). Use this to scope the matrix to one specific rule violation across all entities. Cross-reference with the Review DQ Rules page to understand the rule logic. |
-| **Data Category** | Checkboxes — (Blank) / Compensation / Job / Personal | Narrows the error matrix to rejected rows within a specific data category. Combine with Functional ID to pinpoint exactly which rule is failing for which data type. |
-
----
-
-## ❓ General Questions
-
-**Q: What does the dashboard cover?**
-The dashboard monitors the weekly data collection and quality processing of HR employee records sent by AXA entities to the Group HR Data Factory via Oracle PaaS interfaces. It tracks what was received, what passed or failed validation, and why.
+**Q4. Your Role / Job Title** *(Short answer — Optional)*
+> Enter your role or job title (e.g. HR Data Analyst, Data Steward, HR Operations Manager).
 
 ---
 
-**Q: How often is the data refreshed?**
-The dashboard refreshes on a scheduled basis. The last refresh date is displayed at the top of every page. Always check this date before drawing conclusions from the numbers shown.
+## SECTION 2 — Request Type
+
+**Q5. What type of request is this?** *(Single choice — Required)*
+> Select the option that best describes your request. Your answer will determine the questions shown next.
+- 🐛 Technical Issue / Bug Report
+- 📊 Data Quality Concern
+- 💡 Feature Request or Improvement
+- 💬 General Feedback
+- ❓ General Enquiry
+
+**Q6. Priority / Urgency** *(Single choice — Required)*
+> How urgently does this need to be addressed?
+- 🔴 Critical — This is blocking my work or impacting live reporting
+- 🟠 High — Needs attention within 1–2 business days
+- 🟡 Medium — Important but not time-sensitive
+- 🟢 Low — Minor issue or suggestion, no immediate impact
 
 ---
 
-**Q: What is the difference between Accepted Rows and Rejected Rows?**
-- **Accepted Rows** passed all DQ validation rules and are available for downstream HR reporting and analytics.
-- **Rejected Rows** failed one or more DQ rules and are held back. They are not included in Group HR reporting until the source entity corrects and resubmits them.
+## SECTION 3A — Technical Issue / Bug Report
+*(Show this section only if Q5 = "Technical Issue / Bug Report")*
+
+**Q7. Which dashboard page are you experiencing the issue on?** *(Multiple choice — Required)*
+- Home
+- Data Collect – Interface Monitoring
+- DQ Monitoring
+- Review DQ Rules
+- Investigate Errors
+- FAQ
+- Applies to all pages
+
+**Q8. What were you doing when the issue occurred?** *(Long answer — Required)*
+> Describe the steps you took before the issue appeared (e.g. "I applied the Entity filter for AXA Belgium and the bar chart stopped loading").
+
+**Q9. What did you expect to happen?** *(Long answer — Required)*
+> Describe what the dashboard should have done.
+
+**Q10. What actually happened?** *(Long answer — Required)*
+> Describe the incorrect behaviour, error message, or unexpected result you observed.
+
+**Q11. Which filters were active when the issue occurred?** *(Multiple choice — Optional)*
+- Date Range
+- Entity
+- Log Type
+- DQ Dimension
+- Data Category
+- Functional ID
+- Is Executive
+- No filters were applied
+
+**Q12. Can you attach a screenshot of the issue?** *(File upload — Optional)*
+> Attach a screenshot or screen recording to help us reproduce the issue. Accepted formats: PNG, JPG, MP4, GIF.
 
 ---
 
-**Q: What do the three DQ Dimensions mean?**
-- **Completeness** — A mandatory field is empty or missing. The record was submitted but key data was not included.
-- **Consistency** — Field values are present but logically contradict each other (e.g. incompatible combinations of action code, worker type, and assignment category).
-- **Validity** — A field value does not match the allowed list of values or the required format for that data point.
+## SECTION 3B — Data Quality Concern
+*(Show this section only if Q5 = "Data Quality Concern")*
+
+**Q13. Which reporting week does this concern relate to?** *(Date — Required)*
+> Select the start date of the week in question.
+
+**Q14. Which data point or field is affected?** *(Short answer — Required)*
+> Enter the field name (e.g. ASSIGNMENT_CATEGORY, FTE, DATE_OF_BIRTH).
+
+**Q15. Which DQ Dimension does this relate to?** *(Multiple choice — Required)*
+- Completeness
+- Consistency
+- Validity
+- Not sure
+
+**Q16. Which Functional ID is linked to this concern?** *(Short answer — Optional)*
+> If known, enter the Functional ID from the Review DQ Rules page (e.g. DQ-VA-0001). Leave blank if unsure.
+
+**Q17. How many records are impacted?** *(Single choice — Required)*
+- 1–10 records
+- 11–50 records
+- 51–200 records
+- More than 200 records
+- Unknown
+
+**Q18. Please describe the data quality concern in detail** *(Long answer — Required)*
+> Include any relevant employee IDs, file names, error messages, or patterns you have observed.
 
 ---
 
-**Q: What is the difference between HDL and MDM Log Types?**
-- **HDL (HCM Data Loader)** — Errors logged during the file loading stage into Oracle HCM. These typically relate to format or structural issues in the submitted file.
-- **MDM (Master Data Management)** — Errors logged during the data validation and mapping stage. These relate to values that don't match reference data or business rules managed centrally.
-- **FUNCTIONAL** — Errors raised at a higher processing level, typically related to business logic that spans multiple fields or entities.
+## SECTION 3C — Feature Request or Improvement
+*(Show this section only if Q5 = "Feature Request or Improvement")*
+
+**Q19. Which page does your request relate to?** *(Multiple choice — Optional)*
+- Home
+- Data Collect – Interface Monitoring
+- DQ Monitoring
+- Review DQ Rules
+- Investigate Errors
+- FAQ / Support
+- New page / Not yet in dashboard
+
+**Q20. Describe the feature or improvement you are requesting** *(Long answer — Required)*
+> Be as specific as possible. Include what you would like to see, where it should appear, and how it would help your work.
+
+**Q21. What problem would this feature solve for you?** *(Long answer — Required)*
+> Help us understand the business need behind your request.
 
 ---
 
-**Q: What does a Functional ID mean (e.g. DQ-VA-0001)?**
-The Functional ID is the unique code for a specific DQ rule. The prefix tells you the dimension:
-- **DQ-VA-** = Validity rule
-- **DQ-CO-** = Completeness rule
-- **DQ-CS-** = Consistency rule
+## SECTION 3D — General Feedback
+*(Show this section only if Q5 = "General Feedback")*
 
-Go to the **Review DQ Rules** page and search for the Functional ID to read the exact rule description and understand what needs to be fixed.
+**Q22. How would you rate your overall experience with the dashboard?** *(Rating — Required)*
+> Rate from 1 (Very Poor) to 5 (Excellent).
+⭐ 1 — ⭐⭐ 2 — ⭐⭐⭐ 3 — ⭐⭐⭐⭐ 4 — ⭐⭐⭐⭐⭐ 5
 
----
+**Q23. What is working well?** *(Long answer — Optional)*
+> Tell us what you find most useful or valuable about the dashboard.
 
-**Q: A cell is highlighted red in the Investigate Errors page — what do I do?**
-Hover over the red cell to see the exact DQ rule that failed, the dimension it belongs to, and the specific error message. Note the **Functional ID**, then go to **Review DQ Rules** to read the full rule definition. Use this information to advise the relevant entity's data team on what needs to be corrected in their source system before the next file submission.
-
----
-
-**Q: Why does a field show "NA" in the DQ Score Details table?**
-"NA" means that particular DQ dimension (Completeness, Consistency, or Validity) is **not evaluated** for that specific field. Not every field is checked against every dimension — the applicable rules depend on the business logic defined for that data point.
+**Q24. What could be improved?** *(Long answer — Optional)*
+> Share anything you find confusing, missing, or frustrating.
 
 ---
 
-**Q: Why is my Overall Error Rate high even though my DQ Score looks acceptable?**
-The Overall Error Rate reflects the percentage of rows with **at least one error** across any dimension, while the DQ Score reflects the average quality level across all evaluated rules. A record can have one minor Validity warning and still count toward the error rate, even if 95% of its fields are clean.
+## SECTION 3E — General Enquiry
+*(Show this section only if Q5 = "General Enquiry")*
+
+**Q25. What is your question or enquiry?** *(Long answer — Required)*
+> Describe your question in as much detail as possible so we can respond accurately.
 
 ---
 
-**Q: Can I filter across multiple entities at once?**
-The Entity filter currently supports selecting one entity at a time from the dropdown. To view all entities together, select "All" from the dropdown, which is the default state.
+## SECTION 4 — Closing
+
+**Q26. How would you prefer to be contacted?** *(Single choice — Required)*
+- Email (at the address provided above)
+- Microsoft Teams message
+- Either is fine
+
+**Q27. Is there anything else you would like to add?** *(Long answer — Optional)*
+> Any additional context, comments, or attachments that may help us assist you.
 
 ---
 
-**Q: What is the "Is Executive" filter used for?**
-This filter separates executive-level employees from the general workforce population. It allows HR leadership and governance teams to assess whether data quality issues are evenly distributed or disproportionately affecting a specific workforce tier.
-
----
-
-## 📬 Need More Help?
-
-Click **Support** at the bottom of any page to raise a request or access additional documentation. For questions about specific DQ rules or source data corrections, contact the Group HR Data Factory team directly.
+> **Confirmation message (shown after submission):**
+> ✅ Thank you for reaching out. Your submission has been received and a member of the Group HR Data Factory team will respond to you within 2 business days. For urgent issues, please also flag your submission directly to your data team contact.
