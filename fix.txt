@@ -1,179 +1,333 @@
-# Microsoft Form — Support & Feedback
-## AXA Group HR Data Factory | Oracle Integration Monitoring Dashboard
+kpi_count_distinct_person = DISTINCTCOUNT(AX_DQ_FACT_LOG[dim_person_id])
+kpi_number_file_loaded = CALCULATE(DISTINCTCOUNT(AX_DQ_FACT_LOG[ax_filename])) 
+kpi_row_rejection_rate = DIVIDE([kpi_number_rejected_row_person],[kpi_distinct_rows],0)
+kpi_number_rejected_row_person = 
+VAR SelectedCategory =
+    VALUES(AX_DQ_DIM_CATEGORY[dim_category_id]) -- captures the current filter from slicer
 
----
+VAR GroupedErrorCounts =
+    ADDCOLUMNS(
+        SUMMARIZE(
+            AX_DQ_FACT_LOG,
+            AX_DQ_FACT_LOG[row_id],
+            AX_DQ_DIM_PERSON[dim_person_id]
+        ),
+        "ErrorCount",
+        CALCULATE(
+            COUNTROWS(AX_DQ_FACT_LOG),
+            AX_DQ_FACT_LOG[line_status] = "Error",
+            AX_DQ_FACT_LOG[row_id] = EARLIER(AX_DQ_FACT_LOG[row_id]),
+            -- Ensure the group also respects the category filter
+           AX_DQ_FACT_LOG[functional_category_id] IN SelectedCategory
+        )
+    )
 
-> **Form Instructions (shown at top of form):**
-> Use this form to report a technical issue, raise a data quality concern, request a new feature, or share general feedback about the Oracle Integration Monitoring Dashboard. Our team will review your submission and respond within 2 business days.
+-- Find the maximum error count in the filtered context
+VAR MaxErrorCount =
+    MAXX(GroupedErrorCounts, [ErrorCount])
 
----
+-- Filter groups with errors or maximum errors, respecting the category filter
+VAR SelectedGroups =
+    FILTER(
+        GroupedErrorCounts,
+        [ErrorCount] > 0 || [ErrorCount] = MaxErrorCount
+    )
 
-## SECTION 1 — Your Details
+-- Count distinct row IDs with errors in these filtered groups
+RETURN
+    CALCULATE(
+        DISTINCTCOUNT(AX_DQ_FACT_LOG[row_id]),
+        AX_DQ_FACT_LOG[line_status] = "Error",
+        TREATAS(
+            SELECTCOLUMNS(
+                SelectedGroups,
+                "row_id", [row_id],
+                "dim_person_id", [dim_person_id]
+            ),
+            AX_DQ_FACT_LOG[row_id],
+            AX_DQ_DIM_PERSON[dim_person_id]
+        ),
+        -- Respect the category filter
+        AX_DQ_FACT_LOG[functional_category_id] IN SelectedCategory
+    )
+kpi_distinct_rows = CALCULATE(DISTINCTCOUNT(AX_DQ_FACT_LOG[row_id]))
+kpi_dq_score_without_weight = 
 
-**Q1. Full Name** *(Short answer — Required)*
-> Enter your full name.
+VAR AllControls =
+    SUMX (
+        VALUES ( AX_DQ_DIM_CATEGORY[dim_category_id] ),
+        VAR currentCategoryId = AX_DQ_DIM_CATEGORY[dim_category_id]
+        VAR currentTechCategory =
+            LOOKUPVALUE (
+                AX_DQ_DIM_CATEGORY[technical_category],
+                AX_DQ_DIM_CATEGORY[dim_category_id], currentCategoryId
+            )
+        VAR RulesCount =
+            CALCULATE (
+                DISTINCTCOUNT ( AX_DQ_DIM_RULES[dim_rule_id] ),
+                AX_DQ_DIM_RULES[category] = currentTechCategory
+            )
+        VAR RowCount =
+            CALCULATE (
+                DISTINCTCOUNT ( AX_DQ_FACT_LOG[row_id] ),
+                AX_DQ_FACT_LOG[dim_category_id] = currentCategoryId
+            )
+        RETURN
+            RulesCount * RowCount
+    )
 
-**Q2. Work Email Address** *(Short answer — Required)*
-> Enter your AXA work email address (e.g. firstname.lastname@axa.com).
-> *Validation: Must contain "@axa" to ensure only AXA addresses are accepted.*
+VAR TotalErrors =
+    CALCULATE (
+        COUNTROWS ( AX_DQ_FACT_LOG ),
+        NOT ( ISBLANK ( AX_DQ_FACT_LOG[dim_rule_id] ) )
+    )
 
-**Q3. AXA Entity** *(Dropdown — Required)*
-> Select the AXA entity you represent.
-- AXA Belgium
-- AXA France
-- AXA Germany
-- AXA Ireland
-- AXA Morocco
-- AXA Spain
-- AXA Switzerland
-- AXA UK
-- AXA Group / Central Team
-- Other
+RETURN
+    IF (
+        AllControls = 0,
+        "NA",
+        1 - DIVIDE ( TotalErrors, AllControls )
+    )
+kpi_dq_score_completeness = 
+VAR Result =
+CALCULATE(
+    [kpi_dq_score_without_weight],
+    AX_DQ_DIM_RULES[dq_dimension] = "Completeness"
+)
+RETURN
+IF(
+    Result = "NA" || ISBLANK(Result),0, Result
+)
+kpi_dq_score_consistency = 
+VAR Result = 
+CALCULATE(
+    [kpi_dq_score_without_weight],
+    AX_DQ_DIM_RULES[dq_dimension] = "Consistency"
+)
+RETURN
+IF(
+   Result = "NA" || ISBLANK(Result),0, Result
+)
+kpi_dq_score_validity = 
+VAR Result =
+CALCULATE(
+    [kpi_dq_score_without_weight],
+    AX_DQ_DIM_RULES[dq_dimension] = "Validity"
+)
+RETURN
+IF(
+    Result = "NA" || ISBLANK(Result),0, Result
+)
+kpi_number_accepted_row_person = 
+VAR TotalRows = [kpi_distinct_rows]
+VAR RejectedRows = [kpi_number_rejected_row_person]
+VAR WarningRows = [kpi_number_warning_row_person]
+VAR OkRows = [kpi_number_ok_row_person]
+VAR SelectedStatuses = VALUES('AX_DQ_DIM_LINE_STATUS'[line_status])
+VAR StatusCount = COUNTROWS(SelectedStatuses)
+VAR ErrorSelected = CONTAINS(SelectedStatuses, 'AX_DQ_DIM_LINE_STATUS'[line_status], "Error")
+VAR OkSelected = CONTAINS(SelectedStatuses, 'AX_DQ_DIM_LINE_STATUS'[line_status], "OK")
+VAR WarningSelected = CONTAINS(SelectedStatuses, 'AX_DQ_DIM_LINE_STATUS'[line_status], "Warning")
+ 
+RETURN
+SWITCH(
+    TRUE(),
+    -- When all statuses are selected
+    StatusCount = 3,
+        -- Calculate based on your original logic
+        SWITCH(
+            TRUE(),
+            ErrorSelected && OkSelected && WarningSelected,
+                -- Error + Ok + Warning: Sum OkRows + WarningRows
+                OkRows + WarningRows,
+            ErrorSelected && OkSelected,
+                -- Error + Ok: Sum OkRows + WarningRows
+                OkRows + WarningRows,
+            OkSelected && WarningSelected,
+                -- Ok + Warning: Sum OkRows + WarningRows
+                OkRows + WarningRows,
+            -- Default fallback if other combinations
+            TotalRows - RejectedRows
+        ),
+    -- When specific statuses are selected
+    ErrorSelected && OkSelected,
+        -- Error + Ok: Sum OkRows + WarningRows
+        OkRows + WarningRows,
+    ErrorSelected && WarningSelected,
+        -- Error + Warning: Sum OkRows + WarningRows
+        OkRows + WarningRows,
+    OkSelected && WarningSelected,
+        -- Ok + Warning: Sum OkRows + WarningRows
+        OkRows + WarningRows,
+    ErrorSelected,
+        -- Only Error selected
+        0,
+    OkSelected,
+        -- Only OK selected
+        OkRows,
+    WarningSelected,
+        -- Only Warning selected
+        WarningRows,
+    -- Fallback
+    TotalRows - RejectedRows
+)
+kpi_number_ok_row_person = 
+VAR SelectedCategory =
+    VALUES(AX_DQ_DIM_CATEGORY[dim_category_id]) -- Capture current category filter
 
-**Q4. Your Role / Job Title** *(Short answer — Optional)*
-> Enter your role or job title (e.g. HR Data Analyst, Data Steward, HR Operations Manager).
+VAR AllGroups =
+    ADDCOLUMNS(
+        SUMMARIZE(
+            AX_DQ_FACT_LOG,
+            AX_DQ_FACT_LOG[row_id],
+            AX_DQ_DIM_PERSON[dim_person_id]
+        ),
+        "HasWarning",
+        CALCULATE(
+            MAXX(
+                FILTER(AX_DQ_FACT_LOG, AX_DQ_FACT_LOG[line_status] = "Warning"),
+                1
+            ),
+            ALLEXCEPT(
+                AX_DQ_FACT_LOG,
+                AX_DQ_FACT_LOG[row_id],
+                AX_DQ_DIM_PERSON[dim_person_id]
+            ),
+            -- Respect category filter
+            AX_DQ_FACT_LOG[functional_category_id] IN SelectedCategory
+        ),
+        "HasError",
+        CALCULATE(
+            MAXX(
+                FILTER(AX_DQ_FACT_LOG, AX_DQ_FACT_LOG[line_status] = "Error"),
+                1
+            ),
+            ALLEXCEPT(
+                AX_DQ_FACT_LOG,
+                AX_DQ_FACT_LOG[row_id],
+                AX_DQ_DIM_PERSON[dim_person_id]
+            ),
+            -- Respect category filter
+            AX_DQ_FACT_LOG[functional_category_id] IN SelectedCategory
+        )
+    )
 
----
+// Filter to groups where all records are OK (no Warning, no Error) within selected category
+VAR AllOKGroups =
+    FILTER(
+        AllGroups,
+        [HasWarning] = 0 && [HasError] = 0
+    )
 
-## SECTION 2 — Request Type
+// Count total rows in these OK groups, respecting category filter
+RETURN
+    CALCULATE(
+        COUNTROWS(AX_DQ_FACT_LOG),
+        TREATAS(
+            SELECTCOLUMNS(
+                AllOKGroups,
+                "row_id", [row_id],
+                "dim_person_id", [dim_person_id]
+            ),
+            AX_DQ_FACT_LOG[row_id],
+            AX_DQ_DIM_PERSON[dim_person_id]
+        ),
+        -- Ensure the category filter is respected
+        AX_DQ_FACT_LOG[functional_category_id] IN SelectedCategory
+    )
+kpi_number_warning_row_person = 
+VAR SelectedCategory =
+    VALUES(AX_DQ_DIM_CATEGORY[dim_category_id]) -- Capture current category filter
 
-**Q5. What type of request is this?** *(Single choice — Required)*
-> Select the option that best describes your request. Your answer will determine the questions shown next.
-- 🐛 Technical Issue / Bug Report
-- 📊 Data Quality Concern
-- 💡 Feature Request or Improvement
-- 💬 General Feedback
-- ❓ General Enquiry
+VAR GroupsWithWarningNoError =
+    ADDCOLUMNS(
+        SUMMARIZE(
+            AX_DQ_FACT_LOG,
+            AX_DQ_FACT_LOG[row_id],
+            AX_DQ_DIM_PERSON[dim_person_id]
+        ),
+        "HasWarning",
+        CALCULATE(
+            MAXX(
+                FILTER(AX_DQ_FACT_LOG, AX_DQ_FACT_LOG[line_status] = "Warning"),
+                1
+            ),
+            ALLEXCEPT(
+                AX_DQ_FACT_LOG,
+                AX_DQ_FACT_LOG[row_id],
+                AX_DQ_DIM_PERSON[dim_person_id]
+            ),
+            -- Respect category filter
+            AX_DQ_FACT_LOG[functional_category_id] IN SelectedCategory
+        ),
+        "HasError",
+        CALCULATE(
+            MAXX(
+                FILTER(AX_DQ_FACT_LOG, AX_DQ_FACT_LOG[line_status] = "Error"),
+                1
+            ),
+            ALLEXCEPT(
+                AX_DQ_FACT_LOG,
+                AX_DQ_FACT_LOG[row_id],
+                AX_DQ_DIM_PERSON[dim_person_id]
+            ),
+            -- Respect category filter
+            AX_DQ_FACT_LOG[functional_category_id] IN SelectedCategory
+        )
+    )
 
-**Q6. Priority / Urgency** *(Single choice — Required)*
-> How urgently does this need to be addressed?
-- 🔴 Critical — This is blocking my work or impacting live reporting
-- 🟠 High — Needs attention within 1–2 business days
-- 🟡 Medium — Important but not time-sensitive
-- 🟢 Low — Minor issue or suggestion, no immediate impact
+// Filter to only groups with at least one warning and no errors within selected category
+VAR WarningNoErrorGroups =
+    FILTER(
+        GroupsWithWarningNoError,
+        [HasWarning] = 1 && [HasError] = 0
+    )
 
----
+// Count distinct row_ids in these groups
+RETURN
+    CALCULATE(
+        DISTINCTCOUNT(AX_DQ_FACT_LOG[row_id]),
+        AX_DQ_FACT_LOG[line_status] = "Warning",
+        TREATAS(
+            SELECTCOLUMNS(
+                WarningNoErrorGroups,
+                "row_id", [row_id],
+                "dim_person_id", [dim_person_id]
+            ),
+            AX_DQ_FACT_LOG[row_id],
+            AX_DQ_DIM_PERSON[dim_person_id]
+        ),
+        -- Ensure the category filter is respected
+        AX_DQ_FACT_LOG[functional_category_id] IN SelectedCategory
+    )
+kpi_nbr_dq_rules = 
 
-## SECTION 3A — Technical Issue / Bug Report
-*(Show this section only if Q5 = "Technical Issue / Bug Report")*
+CALCULATE(
+    DISTINCTCOUNT(AX_DQ_DIM_RULES[dim_rule_id]))
+kpi_nbr_dq_rules_per_category_CP = 
 
-**Q7. Which dashboard page are you experiencing the issue on?** *(Multiple choice — Required)*
-- Home
-- Data Collect – Interface Monitoring
-- DQ Monitoring
-- Review DQ Rules
-- Investigate Errors
-- FAQ
-- Applies to all pages
+CALCULATE(
+    DISTINCTCOUNT(AX_DQ_DIM_RULES[dim_rule_id]),
+    FILTER(
+        AX_DQ_DIM_RULES,
+        AX_DQ_DIM_RULES[functional_category] = "CP" 
+    )
+)
+kpi_nbr_dq_rules_per_category_JD = 
 
-**Q8. What were you doing when the issue occurred?** *(Long answer — Required)*
-> Describe the steps you took before the issue appeared (e.g. "I applied the Entity filter for AXA Belgium and the bar chart stopped loading").
+CALCULATE(
+    DISTINCTCOUNT(AX_DQ_DIM_RULES[dim_rule_id]),
+    FILTER(
+        AX_DQ_DIM_RULES,
+        AX_DQ_DIM_RULES[functional_category] = "JD" 
+    )
+)
+kpi_nbr_dq_rules_per_category_PI = 
 
-**Q9. What did you expect to happen?** *(Long answer — Required)*
-> Describe what the dashboard should have done.
-
-**Q10. What actually happened?** *(Long answer — Required)*
-> Describe the incorrect behaviour, error message, or unexpected result you observed.
-
-**Q11. Which filters were active when the issue occurred?** *(Multiple choice — Optional)*
-- Date Range
-- Entity
-- Log Type
-- DQ Dimension
-- Data Category
-- Functional ID
-- Is Executive
-- No filters were applied
-
-**Q12. Can you attach a screenshot of the issue?** *(File upload — Optional)*
-> Attach a screenshot or screen recording to help us reproduce the issue. Accepted formats: PNG, JPG, MP4, GIF.
-
----
-
-## SECTION 3B — Data Quality Concern
-*(Show this section only if Q5 = "Data Quality Concern")*
-
-**Q13. Which reporting week does this concern relate to?** *(Date — Required)*
-> Select the start date of the week in question.
-
-**Q14. Which data point or field is affected?** *(Short answer — Required)*
-> Enter the field name (e.g. ASSIGNMENT_CATEGORY, FTE, DATE_OF_BIRTH).
-
-**Q15. Which DQ Dimension does this relate to?** *(Multiple choice — Required)*
-- Completeness
-- Consistency
-- Validity
-- Not sure
-
-**Q16. Which Functional ID is linked to this concern?** *(Short answer — Optional)*
-> If known, enter the Functional ID from the Review DQ Rules page (e.g. DQ-VA-0001). Leave blank if unsure.
-
-**Q17. How many records are impacted?** *(Single choice — Required)*
-- 1–10 records
-- 11–50 records
-- 51–200 records
-- More than 200 records
-- Unknown
-
-**Q18. Please describe the data quality concern in detail** *(Long answer — Required)*
-> Include any relevant employee IDs, file names, error messages, or patterns you have observed.
-
----
-
-## SECTION 3C — Feature Request or Improvement
-*(Show this section only if Q5 = "Feature Request or Improvement")*
-
-**Q19. Which page does your request relate to?** *(Multiple choice — Optional)*
-- Home
-- Data Collect – Interface Monitoring
-- DQ Monitoring
-- Review DQ Rules
-- Investigate Errors
-- FAQ / Support
-- New page / Not yet in dashboard
-
-**Q20. Describe the feature or improvement you are requesting** *(Long answer — Required)*
-> Be as specific as possible. Include what you would like to see, where it should appear, and how it would help your work.
-
-**Q21. What problem would this feature solve for you?** *(Long answer — Required)*
-> Help us understand the business need behind your request.
-
----
-
-## SECTION 3D — General Feedback
-*(Show this section only if Q5 = "General Feedback")*
-
-**Q22. How would you rate your overall experience with the dashboard?** *(Rating — Required)*
-> Rate from 1 (Very Poor) to 5 (Excellent).
-⭐ 1 — ⭐⭐ 2 — ⭐⭐⭐ 3 — ⭐⭐⭐⭐ 4 — ⭐⭐⭐⭐⭐ 5
-
-**Q23. What is working well?** *(Long answer — Optional)*
-> Tell us what you find most useful or valuable about the dashboard.
-
-**Q24. What could be improved?** *(Long answer — Optional)*
-> Share anything you find confusing, missing, or frustrating.
-
----
-
-## SECTION 3E — General Enquiry
-*(Show this section only if Q5 = "General Enquiry")*
-
-**Q25. What is your question or enquiry?** *(Long answer — Required)*
-> Describe your question in as much detail as possible so we can respond accurately.
-
----
-
-## SECTION 4 — Closing
-
-**Q26. How would you prefer to be contacted?** *(Single choice — Required)*
-- Email (at the address provided above)
-- Microsoft Teams message
-- Either is fine
-
-**Q27. Is there anything else you would like to add?** *(Long answer — Optional)*
-> Any additional context, comments, or attachments that may help us assist you.
-
----
-
-> **Confirmation message (shown after submission):**
-> ✅ Thank you for reaching out. Your submission has been received and a member of the Group HR Data Factory team will respond to you within 2 business days. For urgent issues, please also flag your submission directly to your data team contact.
+CALCULATE(
+    DISTINCTCOUNT(AX_DQ_DIM_RULES[dim_rule_id]),
+    FILTER(
+        AX_DQ_DIM_RULES,
+        AX_DQ_DIM_RULES[functional_category] = "PI" 
+    )
+)
