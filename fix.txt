@@ -1,333 +1,95 @@
-kpi_count_distinct_person = DISTINCTCOUNT(AX_DQ_FACT_LOG[dim_person_id])
-kpi_number_file_loaded = CALCULATE(DISTINCTCOUNT(AX_DQ_FACT_LOG[ax_filename])) 
-kpi_row_rejection_rate = DIVIDE([kpi_number_rejected_row_person],[kpi_distinct_rows],0)
-kpi_number_rejected_row_person = 
-VAR SelectedCategory =
-    VALUES(AX_DQ_DIM_CATEGORY[dim_category_id]) -- captures the current filter from slicer
-
-VAR GroupedErrorCounts =
-    ADDCOLUMNS(
-        SUMMARIZE(
-            AX_DQ_FACT_LOG,
-            AX_DQ_FACT_LOG[row_id],
-            AX_DQ_DIM_PERSON[dim_person_id]
-        ),
-        "ErrorCount",
-        CALCULATE(
-            COUNTROWS(AX_DQ_FACT_LOG),
-            AX_DQ_FACT_LOG[line_status] = "Error",
-            AX_DQ_FACT_LOG[row_id] = EARLIER(AX_DQ_FACT_LOG[row_id]),
-            -- Ensure the group also respects the category filter
-           AX_DQ_FACT_LOG[functional_category_id] IN SelectedCategory
-        )
-    )
-
--- Find the maximum error count in the filtered context
-VAR MaxErrorCount =
-    MAXX(GroupedErrorCounts, [ErrorCount])
-
--- Filter groups with errors or maximum errors, respecting the category filter
-VAR SelectedGroups =
-    FILTER(
-        GroupedErrorCounts,
-        [ErrorCount] > 0 || [ErrorCount] = MaxErrorCount
-    )
-
--- Count distinct row IDs with errors in these filtered groups
-RETURN
-    CALCULATE(
-        DISTINCTCOUNT(AX_DQ_FACT_LOG[row_id]),
-        AX_DQ_FACT_LOG[line_status] = "Error",
-        TREATAS(
-            SELECTCOLUMNS(
-                SelectedGroups,
-                "row_id", [row_id],
-                "dim_person_id", [dim_person_id]
-            ),
-            AX_DQ_FACT_LOG[row_id],
-            AX_DQ_DIM_PERSON[dim_person_id]
-        ),
-        -- Respect the category filter
-        AX_DQ_FACT_LOG[functional_category_id] IN SelectedCategory
-    )
-kpi_distinct_rows = CALCULATE(DISTINCTCOUNT(AX_DQ_FACT_LOG[row_id]))
-kpi_dq_score_without_weight = 
-
-VAR AllControls =
-    SUMX (
-        VALUES ( AX_DQ_DIM_CATEGORY[dim_category_id] ),
-        VAR currentCategoryId = AX_DQ_DIM_CATEGORY[dim_category_id]
-        VAR currentTechCategory =
-            LOOKUPVALUE (
-                AX_DQ_DIM_CATEGORY[technical_category],
-                AX_DQ_DIM_CATEGORY[dim_category_id], currentCategoryId
-            )
-        VAR RulesCount =
-            CALCULATE (
-                DISTINCTCOUNT ( AX_DQ_DIM_RULES[dim_rule_id] ),
-                AX_DQ_DIM_RULES[category] = currentTechCategory
-            )
-        VAR RowCount =
-            CALCULATE (
-                DISTINCTCOUNT ( AX_DQ_FACT_LOG[row_id] ),
-                AX_DQ_FACT_LOG[dim_category_id] = currentCategoryId
-            )
-        RETURN
-            RulesCount * RowCount
-    )
-
-VAR TotalErrors =
-    CALCULATE (
-        COUNTROWS ( AX_DQ_FACT_LOG ),
-        NOT ( ISBLANK ( AX_DQ_FACT_LOG[dim_rule_id] ) )
-    )
-
-RETURN
-    IF (
-        AllControls = 0,
-        "NA",
-        1 - DIVIDE ( TotalErrors, AllControls )
-    )
-kpi_dq_score_completeness = 
-VAR Result =
-CALCULATE(
-    [kpi_dq_score_without_weight],
-    AX_DQ_DIM_RULES[dq_dimension] = "Completeness"
+import os
+from dotenv import load_dotenv
+from pydantic import Extra
+import requests
+import json 
+from typing import Any, List, Mapping, Optional
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_core.prompts.chat import (
+    ChatPromptTemplate,
+    HumanMessagePromptTemplate,
+    MessagesPlaceholder,
 )
-RETURN
-IF(
-    Result = "NA" || ISBLANK(Result),0, Result
-)
-kpi_dq_score_consistency = 
-VAR Result = 
-CALCULATE(
-    [kpi_dq_score_without_weight],
-    AX_DQ_DIM_RULES[dq_dimension] = "Consistency"
-)
-RETURN
-IF(
-   Result = "NA" || ISBLANK(Result),0, Result
-)
-kpi_dq_score_validity = 
-VAR Result =
-CALCULATE(
-    [kpi_dq_score_without_weight],
-    AX_DQ_DIM_RULES[dq_dimension] = "Validity"
-)
-RETURN
-IF(
-    Result = "NA" || ISBLANK(Result),0, Result
-)
-kpi_number_accepted_row_person = 
-VAR TotalRows = [kpi_distinct_rows]
-VAR RejectedRows = [kpi_number_rejected_row_person]
-VAR WarningRows = [kpi_number_warning_row_person]
-VAR OkRows = [kpi_number_ok_row_person]
-VAR SelectedStatuses = VALUES('AX_DQ_DIM_LINE_STATUS'[line_status])
-VAR StatusCount = COUNTROWS(SelectedStatuses)
-VAR ErrorSelected = CONTAINS(SelectedStatuses, 'AX_DQ_DIM_LINE_STATUS'[line_status], "Error")
-VAR OkSelected = CONTAINS(SelectedStatuses, 'AX_DQ_DIM_LINE_STATUS'[line_status], "OK")
-VAR WarningSelected = CONTAINS(SelectedStatuses, 'AX_DQ_DIM_LINE_STATUS'[line_status], "Warning")
+from langchain_classic.chains import LLMChain
+import json
+import pandas as pd
+from langchain_openai import AzureChatOpenAI
+import httpx
+from datetime import datetime, timedelta
+from pydantic import Extra
+import requests
+from typing import Any, List, Mapping, Optional
+from langchain_classic.callbacks.manager import CallbackManagerForLLMRun
+import time
+import socket
+import tiktoken
+
+def get_token():
+    global client_id, client_secret, api_token_url
  
-RETURN
-SWITCH(
-    TRUE(),
-    -- When all statuses are selected
-    StatusCount = 3,
-        -- Calculate based on your original logic
-        SWITCH(
-            TRUE(),
-            ErrorSelected && OkSelected && WarningSelected,
-                -- Error + Ok + Warning: Sum OkRows + WarningRows
-                OkRows + WarningRows,
-            ErrorSelected && OkSelected,
-                -- Error + Ok: Sum OkRows + WarningRows
-                OkRows + WarningRows,
-            OkSelected && WarningSelected,
-                -- Ok + Warning: Sum OkRows + WarningRows
-                OkRows + WarningRows,
-            -- Default fallback if other combinations
-            TotalRows - RejectedRows
-        ),
-    -- When specific statuses are selected
-    ErrorSelected && OkSelected,
-        -- Error + Ok: Sum OkRows + WarningRows
-        OkRows + WarningRows,
-    ErrorSelected && WarningSelected,
-        -- Error + Warning: Sum OkRows + WarningRows
-        OkRows + WarningRows,
-    OkSelected && WarningSelected,
-        -- Ok + Warning: Sum OkRows + WarningRows
-        OkRows + WarningRows,
-    ErrorSelected,
-        -- Only Error selected
-        0,
-    OkSelected,
-        -- Only OK selected
-        OkRows,
-    WarningSelected,
-        -- Only Warning selected
-        WarningRows,
-    -- Fallback
-    TotalRows - RejectedRows
-)
-kpi_number_ok_row_person = 
-VAR SelectedCategory =
-    VALUES(AX_DQ_DIM_CATEGORY[dim_category_id]) -- Capture current category filter
+    url = api_token_url
+    headersList = {"Content-Type": "application/x-www-form-urlencoded"}
+    payload = f"grant_type=client_credentials&client_id={client_id}&client_secret={client_secret}&scope=urn:grp:chatgpt"
+    print(f"PAYLOAD: {payload}")
+    response = requests.request(method='POST', url=url, data=payload, headers=headersList)
+    if response.status_code != 200:
+        raise Exception(f'Request failed with status {response.status_code}, {response.text}')
+    # return response.json()["access_token"]
+     # Parse the response
+    token_info = response.json()
+    access_token = token_info['access_token']
+    #expires_in = token_info.get('expires_in', 2700)  # Default to 1 hour if not provided
+    #token_expiration = datetime.now() + timedelta(seconds=expires_in)
+    print(f"access_token:{access_token}")
+    return access_token
 
-VAR AllGroups =
-    ADDCOLUMNS(
-        SUMMARIZE(
-            AX_DQ_FACT_LOG,
-            AX_DQ_FACT_LOG[row_id],
-            AX_DQ_DIM_PERSON[dim_person_id]
-        ),
-        "HasWarning",
-        CALCULATE(
-            MAXX(
-                FILTER(AX_DQ_FACT_LOG, AX_DQ_FACT_LOG[line_status] = "Warning"),
-                1
-            ),
-            ALLEXCEPT(
-                AX_DQ_FACT_LOG,
-                AX_DQ_FACT_LOG[row_id],
-                AX_DQ_DIM_PERSON[dim_person_id]
-            ),
-            -- Respect category filter
-            AX_DQ_FACT_LOG[functional_category_id] IN SelectedCategory
-        ),
-        "HasError",
-        CALCULATE(
-            MAXX(
-                FILTER(AX_DQ_FACT_LOG, AX_DQ_FACT_LOG[line_status] = "Error"),
-                1
-            ),
-            ALLEXCEPT(
-                AX_DQ_FACT_LOG,
-                AX_DQ_FACT_LOG[row_id],
-                AX_DQ_DIM_PERSON[dim_person_id]
-            ),
-            -- Respect category filter
-            AX_DQ_FACT_LOG[functional_category_id] IN SelectedCategory
+class SecureGPTChat(AzureChatOpenAI):
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        temperature: float | None = None,
+    ) -> None:
+        super().__init__(
+            model= "gpt-4o-2024-05-13",#"gpt-35-turbo-0301",
+            api_key=api_key,
+            api_version="2024-10-21",
+            base_url = base_url,
+            validate_base_url=False,
+            http_client = httpx.Client(verify=False),
+            temperature=0,
+            top_p = 0.2,
+ 
         )
-    )
+tk = get_token()
+print("token has generated")
+gpt4o_llm = SecureGPTChat(api_key=tk,base_url=api_base_url)
+print(f"gpt4o_instance:{gpt4o_llm}")
 
-// Filter to groups where all records are OK (no Warning, no Error) within selected category
-VAR AllOKGroups =
-    FILTER(
-        AllGroups,
-        [HasWarning] = 0 && [HasError] = 0
-    )
-
-// Count total rows in these OK groups, respecting category filter
-RETURN
-    CALCULATE(
-        COUNTROWS(AX_DQ_FACT_LOG),
-        TREATAS(
-            SELECTCOLUMNS(
-                AllOKGroups,
-                "row_id", [row_id],
-                "dim_person_id", [dim_person_id]
-            ),
-            AX_DQ_FACT_LOG[row_id],
-            AX_DQ_DIM_PERSON[dim_person_id]
-        ),
-        -- Ensure the category filter is respected
-        AX_DQ_FACT_LOG[functional_category_id] IN SelectedCategory
-    )
-kpi_number_warning_row_person = 
-VAR SelectedCategory =
-    VALUES(AX_DQ_DIM_CATEGORY[dim_category_id]) -- Capture current category filter
-
-VAR GroupsWithWarningNoError =
-    ADDCOLUMNS(
-        SUMMARIZE(
-            AX_DQ_FACT_LOG,
-            AX_DQ_FACT_LOG[row_id],
-            AX_DQ_DIM_PERSON[dim_person_id]
-        ),
-        "HasWarning",
-        CALCULATE(
-            MAXX(
-                FILTER(AX_DQ_FACT_LOG, AX_DQ_FACT_LOG[line_status] = "Warning"),
-                1
-            ),
-            ALLEXCEPT(
-                AX_DQ_FACT_LOG,
-                AX_DQ_FACT_LOG[row_id],
-                AX_DQ_DIM_PERSON[dim_person_id]
-            ),
-            -- Respect category filter
-            AX_DQ_FACT_LOG[functional_category_id] IN SelectedCategory
-        ),
-        "HasError",
-        CALCULATE(
-            MAXX(
-                FILTER(AX_DQ_FACT_LOG, AX_DQ_FACT_LOG[line_status] = "Error"),
-                1
-            ),
-            ALLEXCEPT(
-                AX_DQ_FACT_LOG,
-                AX_DQ_FACT_LOG[row_id],
-                AX_DQ_DIM_PERSON[dim_person_id]
-            ),
-            -- Respect category filter
-            AX_DQ_FACT_LOG[functional_category_id] IN SelectedCategory
+def query_llm(user_prompt, gpt4o_llm):
+    try:
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    "You are a helpful assistant and an expert in Data Governance.",
+                ),
+                ("human", "{input}"),
+            ]
         )
-    )
-
-// Filter to only groups with at least one warning and no errors within selected category
-VAR WarningNoErrorGroups =
-    FILTER(
-        GroupsWithWarningNoError,
-        [HasWarning] = 1 && [HasError] = 0
-    )
-
-// Count distinct row_ids in these groups
-RETURN
-    CALCULATE(
-        DISTINCTCOUNT(AX_DQ_FACT_LOG[row_id]),
-        AX_DQ_FACT_LOG[line_status] = "Warning",
-        TREATAS(
-            SELECTCOLUMNS(
-                WarningNoErrorGroups,
-                "row_id", [row_id],
-                "dim_person_id", [dim_person_id]
-            ),
-            AX_DQ_FACT_LOG[row_id],
-            AX_DQ_DIM_PERSON[dim_person_id]
-        ),
-        -- Ensure the category filter is respected
-        AX_DQ_FACT_LOG[functional_category_id] IN SelectedCategory
-    )
-kpi_nbr_dq_rules = 
-
-CALCULATE(
-    DISTINCTCOUNT(AX_DQ_DIM_RULES[dim_rule_id]))
-kpi_nbr_dq_rules_per_category_CP = 
-
-CALCULATE(
-    DISTINCTCOUNT(AX_DQ_DIM_RULES[dim_rule_id]),
-    FILTER(
-        AX_DQ_DIM_RULES,
-        AX_DQ_DIM_RULES[functional_category] = "CP" 
-    )
-)
-kpi_nbr_dq_rules_per_category_JD = 
-
-CALCULATE(
-    DISTINCTCOUNT(AX_DQ_DIM_RULES[dim_rule_id]),
-    FILTER(
-        AX_DQ_DIM_RULES,
-        AX_DQ_DIM_RULES[functional_category] = "JD" 
-    )
-)
-kpi_nbr_dq_rules_per_category_PI = 
-
-CALCULATE(
-    DISTINCTCOUNT(AX_DQ_DIM_RULES[dim_rule_id]),
-    FILTER(
-        AX_DQ_DIM_RULES,
-        AX_DQ_DIM_RULES[functional_category] = "PI" 
-    )
-)
+ 
+        chain = prompt | gpt4o_llm
+        response = chain.invoke(
+            {
+                "input": user_prompt,
+            }
+        )
+        return response
+        
+    except Exception as e:
+        print(str(e))
+        return f"Error while calling LLM: {str(e)}"
+ 
+response = query_llm("What is PII Data?",gpt4o_llm)
+print(response)
