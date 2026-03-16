@@ -1,95 +1,72 @@
-import os
-from dotenv import load_dotenv
-from pydantic import Extra
-import requests
-import json 
-from typing import Any, List, Mapping, Optional
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_core.prompts.chat import (
-    ChatPromptTemplate,
-    HumanMessagePromptTemplate,
-    MessagesPlaceholder,
-)
-from langchain_classic.chains import LLMChain
-import json
-import pandas as pd
-from langchain_openai import AzureChatOpenAI
-import httpx
-from datetime import datetime, timedelta
-from pydantic import Extra
-import requests
-from typing import Any, List, Mapping, Optional
-from langchain_classic.callbacks.manager import CallbackManagerForLLMRun
-import time
-import socket
-import tiktoken
-
-def get_token():
-    global client_id, client_secret, api_token_url
- 
-    url = api_token_url
-    headersList = {"Content-Type": "application/x-www-form-urlencoded"}
-    payload = f"grant_type=client_credentials&client_id={client_id}&client_secret={client_secret}&scope=urn:grp:chatgpt"
-    print(f"PAYLOAD: {payload}")
-    response = requests.request(method='POST', url=url, data=payload, headers=headersList)
-    if response.status_code != 200:
-        raise Exception(f'Request failed with status {response.status_code}, {response.text}')
-    # return response.json()["access_token"]
-     # Parse the response
-    token_info = response.json()
-    access_token = token_info['access_token']
-    #expires_in = token_info.get('expires_in', 2700)  # Default to 1 hour if not provided
-    #token_expiration = datetime.now() + timedelta(seconds=expires_in)
-    print(f"access_token:{access_token}")
-    return access_token
-
-class SecureGPTChat(AzureChatOpenAI):
-    def __init__(
-        self,
-        *,
-        api_key: str | None = None,
-        base_url: str | None = None,
-        temperature: float | None = None,
-    ) -> None:
-        super().__init__(
-            model= "gpt-4o-2024-05-13",#"gpt-35-turbo-0301",
-            api_key=api_key,
-            api_version="2024-10-21",
-            base_url = base_url,
-            validate_base_url=False,
-            http_client = httpx.Client(verify=False),
-            temperature=0,
-            top_p = 0.2,
- 
-        )
-tk = get_token()
-print("token has generated")
-gpt4o_llm = SecureGPTChat(api_key=tk,base_url=api_base_url)
-print(f"gpt4o_instance:{gpt4o_llm}")
-
-def query_llm(user_prompt, gpt4o_llm):
-    try:
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    "You are a helpful assistant and an expert in Data Governance.",
-                ),
-                ("human", "{input}"),
-            ]
-        )
- 
-        chain = prompt | gpt4o_llm
-        response = chain.invoke(
-            {
-                "input": user_prompt,
-            }
-        )
-        return response
-        
-    except Exception as e:
-        print(str(e))
-        return f"Error while calling LLM: {str(e)}"
- 
-response = query_llm("What is PII Data?",gpt4o_llm)
-print(response)
+let
+    pageSize = 5000,
+    baseUrl = "https://ofa-acm-prd.axa.com/ords/",
+    schemaPath = "ax_dq_logs/ax_dq/fact_details",
+    // Format RangeStart and RangeEnd for API
+    AdjustedStart = DateTime.From(Date.StartOfWeek(Date.AddDays(DateTime.Date(RangeStart),-14),Day.Sunday)),
+    AdjustedEnd = DateTime.From(Date.EndOfWeek(Date.AddDays(DateTime.Date(RangeEnd), -14), Day.Sunday)),
+    StartDate = DateTime.ToText(AdjustedStart, "MM/dd/yyyy"),
+    EndDate = DateTime.ToText(AdjustedEnd, "MM/dd/yyyy"),
+    // Function to fetch each page with date filters passed to API
+    GetPage = (offset as number) =>
+    let
+    result = try
+    let
+    response = Json.Document(
+    Web.Contents(baseUrl, [
+    RelativePath = schemaPath,
+    Query = [
+    limit       = Text.From(pageSize),
+    offset      = Text.From(offset),
+    start_date  = StartDate,
+    end_date    = EndDate
+    ],
+    Timeout = #duration(0,0,15,0)
+    ])
+    )
+in
+    response[items]
+    otherwise
+    {},
+    items = if result is list then result else {}
+in
+    items,
+    // Paginate through all pages
+    AllPages = List.Generate(
+    ()    => [offset = 0, page = GetPage(0)],
+    each  List.Count([page]) > 0,
+    each  [page = GetPage([offset] + pageSize), offset = [offset] + pageSize],
+    each  [page]
+    ),
+    Combined = List.Combine(AllPages),
+    // ✅ Handle empty response — define all expected columns explicitly
+    EmptyTable = #table(
+    {
+    "row_number", "data_point", "value", "row_id",
+    "dim_date_id", "dim_person_id", "dim_category_id",
+    "dim_entity_id", "line_status_code", "ax_filename",
+    "ax_filename_date", "dim_rule_id", "error_message"
+    },
+    {}
+    ),
+    // ✅ If API returns empty, use EmptyTable to preserve schema
+    Final = if List.IsEmpty(Combined)
+    then EmptyTable
+    else Table.FromRecords(Combined),
+    #"Type modifié" = Table.TransformColumnTypes(Final, {{"dim_person_id", type text}, {"row_id", type text}}),
+    #"Fractionner la colonne par délimiteur" = Table.SplitColumn(#"Type modifié", "dim_date_id", Splitter.SplitTextByDelimiter("T", QuoteStyle.Csv), {"dim_date_id.1", "dim_date_id.2"}),
+    #"Type modifié1" = Table.TransformColumnTypes(#"Fractionner la colonne par délimiteur", {{"dim_date_id.1", type date}, {"dim_date_id.2", type time}}),
+    #"Colonnes renommées" = Table.RenameColumns(#"Type modifié1", {{"dim_date_id.1", "dim_date_id"}}),
+    #"Colonnes supprimées" = Table.RemoveColumns(#"Colonnes renommées", {"dim_date_id.2"}),
+    #"Type modifié2" = Table.TransformColumnTypes(#"Colonnes supprimées", {{"dim_person_id", type text}, {"row_id", type text}}),
+    #"Replaced Value" = Table.ReplaceValue(#"Type modifié2", null, "", Replacer.ReplaceValue, {"value"}),
+    #"Changed Type" = Table.TransformColumnTypes(#"Replaced Value", {{"ax_filename_date", type text}}),
+    Custom1 = Table.SelectRows(#"Changed Type", each true),
+    #"Added WeekIndex" = Table.AddColumn(Custom1, "WeekIndex", each null, Int64.Type),
+    #"Reordered columns" = Table.ReorderColumns(#"Added WeekIndex", {"WeekIndex", "row_number", "data_point", "value", "row_id", "dim_date_id", "dim_person_id", "dim_category_id", "dim_entity_id", "line_status_code", "ax_filename", "ax_filename_date", "dim_rule_id", "error_message"}),
+    #"Transform columns" = Table.TransformColumnTypes(#"Reordered columns", {{"row_number", type text}, {"data_point", type text}, {"value", type text}, {"dim_category_id", type text}, {"dim_entity_id", type text}, {"line_status_code", type text}, {"ax_filename", type text}, {"dim_rule_id", type text}, {"error_message", type text}}),
+    #"Replace errors" = Table.ReplaceErrorValues(#"Transform columns", {{"row_number", null}, {"data_point", null}, {"value", null}, {"dim_category_id", null}, {"dim_entity_id", null}, {"line_status_code", null}, {"ax_filename", null}, {"dim_rule_id", null}, {"error_message", null}}),
+    #"Changed column type" = Table.TransformColumnTypes(#"Replace errors", {{"dim_date_id", type datetime}}),
+    #"AX_DQ_FACT_DETAILS_CURRENT-64696D5F646174655F6964-autogenerated_for_incremental_refresh" = Table.SelectRows(#"Changed column type", each DateTime.From([dim_date_id]) >= RangeStart and DateTime.From([dim_date_id]) < RangeEnd)
+in
+    #"AX_DQ_FACT_DETAILS_CURRENT-64696D5F646174655F6964-autogenerated_for_incremental_refresh"
