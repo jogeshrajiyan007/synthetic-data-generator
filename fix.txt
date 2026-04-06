@@ -59,20 +59,20 @@ def query_llm(user_prompt, gpt4o_llm):
         )
  
         chain = prompt | gpt4o_llm
-        llm_response_txt = chain.invoke(
+        llm_response = chain.invoke(
             {
                 "input": user_prompt,
             }
         )
 
         # Check if response is an object with a 'content' attribute (like AIMessage)
-        if hasattr(response, 'content'):
-            response_text = response.content
+        if hasattr(llm_response, 'content'):
+            llm_response_text = llm_response.content
         else:
-            response_text = response  # assume it's a string
+            llm_response_text = llm_response  # assume it's a string
 
         # Parse the response as JSON
-        response_json = json.loads(response_text)
+        response_json = json.loads(llm_response_text)
         return response_json
         
     except json.JSONDecodeError:
@@ -84,6 +84,3 @@ def query_llm(user_prompt, gpt4o_llm):
  
 response = query_llm("hi",gpt4o_llm)
 print(response)
-
-Response is not valid JSON: Error while calling LLM: the JSON object must be str, bytes or bytearray, not AIMessage
-{'error': 'Invalid JSON response from the model.'}
