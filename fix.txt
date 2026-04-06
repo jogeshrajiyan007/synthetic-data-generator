@@ -1,24 +1,89 @@
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import AzureChatOpenAI
+import json
+import httpx
+import requests
+from typing import List, Optional, Any
+ 
+client_id = "kGzjDDe6"
+client_secret = "E1aXr1osV0nT5oV8Q3m68HShEp3kYL4ucfjO2b3ex9SUswJIqUGNwVD31PoGoc1w"
+api_token_url = "https://onelogin.stg.axa.com/as/token.oauth2"
+api_base_url = "https://api-int.se.axa-go.applications.services.axa-tech.intraxa/ago-m365-securegpt-hub-v1-vrs/providers/openai/"
+ 
+def get_token():
+    global client_id, client_secret, api_token_url
+ 
+    url = api_token_url
+    headersList = {"Content-Type": "application/x-www-form-urlencoded"}
+    payload = f"grant_type=client_credentials&client_id={client_id}&client_secret={client_secret}&scope=urn:grp:chatgpt"
+    response = requests.request(method='POST', url=url, data=payload, headers=headersList)
+    if response.status_code != 200:
+        raise Exception(f'Request failed with status {response.status_code}, {response.text}')
+    token_info = response.json()
+    access_token = token_info['access_token']
+    return access_token
+ 
+class SecureGPTChat(AzureChatOpenAI):
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        temperature: float | None = None,
+    ) -> None:
+        super().__init__(
+            model= "gpt-4o-2024-05-13",#"gpt-35-turbo-0301",
+            api_key=api_key,
+            api_version="2024-10-21",
+            base_url = base_url,
+            validate_base_url=False,
+            http_client = httpx.Client(verify=False),
+            temperature=0,
+            top_p = 0.2,
+ 
+        )
+        
+tk = get_token()
+gpt4o_llm = SecureGPTChat(api_key=tk,base_url=api_base_url)
 
-DIM_DATE_ID
-03/01/2026
-03/02/2026
-03/03/2026
-03/04/2026
-03/05/2026
-03/06/2026
-03/07/2026
-03/08/2026
-03/09/2026
-03/10/2026
-03/11/2026
-03/12/2026
-03/13/2026
-03/14/2026
-03/16/2026
-03/17/2026
-03/18/2026
-03/19/2026
-03/20/2026
-03/21/2026
-09/03/2026
-21 rows returned in 55.00 seconds	        	Download
+def query_llm(user_prompt, gpt4o_llm):
+    try:
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    "You are a helpful assistant. Please respond only with a JSON object. The JSON should contain relevant information based on the user's request.",
+                ),
+                ("human", "{input}"),
+            ]
+        )
+ 
+        chain = prompt | gpt4o_llm
+        llm_response_txt = chain.invoke(
+            {
+                "input": user_prompt,
+            }
+        )
+
+        # Check if response is an object with a 'content' attribute (like AIMessage)
+        if hasattr(response, 'content'):
+            response_text = response.content
+        else:
+            response_text = response  # assume it's a string
+
+        # Parse the response as JSON
+        response_json = json.loads(response_text)
+        return response_json
+        
+    except json.JSONDecodeError:
+        print("Response is not valid JSON:", response_text)
+        return {"error": "Invalid JSON response from the model."}
+    except Exception as e:
+        print(str(e))
+        return f"Error while calling LLM: {str(e)}"
+ 
+response = query_llm("hi",gpt4o_llm)
+print(response)
+
+Response is not valid JSON: Error while calling LLM: the JSON object must be str, bytes or bytearray, not AIMessage
+{'error': 'Invalid JSON response from the model.'}
