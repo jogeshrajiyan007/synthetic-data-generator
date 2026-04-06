@@ -3,6 +3,8 @@ from langchain_openai import AzureChatOpenAI
 import json
 import httpx
 import requests
+import sqlite3
+from datetime import datetime
 from typing import List, Optional, Any
  
 client_id = "kGzjDDe6"
@@ -65,13 +67,6 @@ def query_llm(user_prompt, gpt4o_llm):
             }
         )
 
-        # Check if response is an object with a 'content' attribute (like AIMessage)
-        # if hasattr(llm_response, 'content'):
-        #     llm_response_text = llm_response.content
-        # else:
-        #     llm_response_text = llm_response  # assume it's a string
-
-        # Parse the response as JSON
         response_json = {
             "content": llm_response.content,
             "model": llm_response.response_metadata.get("model_name"),
@@ -95,3 +90,224 @@ def query_llm(user_prompt, gpt4o_llm):
     except Exception as e:
         print(str(e))
         return f"Error while calling LLM: {str(e)}"
+
+
+def init_db():
+    conn = sqlite3.connect("llm_logs.db")
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS llm_responses (
+    id TEXT PRIMARY KEY,
+    content TEXT,
+    model TEXT,
+    provider TEXT,
+    finish_reason TEXT,
+    prompt_input_tokens INTEGER,
+    completion_output_tokens INTEGER,
+    total_tokens INTEGER,
+    content_filter_hate TEXT,
+    content_filter_hate_severity TEXT,
+    content_filter_self_harm TEXT,
+    content_filter_self_harm_severity TEXT,
+    content_filter_sexual TEXT,
+    content_filter_sexual_severity TEXT,
+    content_filter_violence TEXT,
+    content_filter_violence_severity TEXT,
+    additional_args_refusal TEXT,
+    created_at TEXT
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+def save_to_db(response_json):
+    conn = sqlite3.connect("llm_logs.db")
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    INSERT INTO llm_responses VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        response_json["run_id"],
+        response_json["content"],
+        response_json["model"],
+        response_json["model_provider"],
+        response_json["finish_reason"],
+        response_json["usage"]["prompt_tokens"],
+        response_json["usage"]["completion_tokens"],
+        response_json["usage"]["total_tokens"],
+        response_json["content_filter_results"]["hate"]["filtered"],
+        response_json["content_filter_results"]["hate"]["severity"],
+        response_json["content_filter_results"]["self_harm"]["filtered"],
+        response_json["content_filter_results"]["self_harm"]["severity"],
+        response_json["content_filter_results"]["sexual"]["filtered"],
+        response_json["content_filter_results"]["sexual"]["severity"],
+        response_json["content_filter_results"]["violence"]["filtered"],
+        response_json["content_filter_results"]["violence"]["severity"],
+        response_json["additional_kwargs"]["refusal"],
+        datetime.now().isoformat()
+    ))
+
+    conn.commit()
+    conn.close()
+
+def init_db_doc_chunks():
+
+    conn = sqlite3.connect("llm_logs.db")
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS document_chunks (
+    doc_id TEXT,
+    chunk_id INTEGER,
+    source TEXT,
+    file_type TEXT,
+    section TEXT,
+    department TEXT,
+    owner TEXT,
+    keywords TEXT,
+    sensitivity TEXT,
+    contains_pii BOOLEAN,
+    created_at TEXT
+    ingested_at TEXT
+    language TEXT
+    )
+    """)
+    
+    conn.commit()
+    conn.close()
+
+def store_chunk_metadata(chunks):
+    conn = sqlite3.connect("llm_logs.db")
+    cursor = conn.cursor()
+
+    for chunk in chunks:
+        m = chunk.metadata
+        cursor.execute(
+            """
+            INSERT INTO document_chunks VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                m["doc_id"],
+                m["chunk_id"],
+                m["source"],
+                m["file_type"],
+                m["section"],
+                m["department"],
+                m["owner"],
+                m["keywords"],
+                m["sensititvity"],
+                m["contains_pii"],
+                m["created_at"],
+                m["ingested_at"],
+                m["language"]
+            )
+        )
+
+    conn.commit()
+    conn.close()
+
+init_db()
+response = query_llm("Explain data governance", gpt4o_llm)
+save_to_db(response)
+print(json.dumps(response,indent = 4))
+
+from langchain_community.document_loaders import (
+PyPDFLoader,
+TextLoader,
+UnstructuredWordDocumentLoader,
+CSVLoader
+)
+
+def load_document(file_path):
+    if file_path.endswith(".pdf"):
+        loader = PyPDFLoader(file_path)
+    elif file_path.endswith(".docx"):
+        loader = UnstructuredWordDocumentLoader(file_path)
+    elif file_path.endswith(".csv"):
+        loader = CSVLoader(file_path)
+    elif file_path.endswith(".txt"):
+        loader = TextLoader(file_path)
+    else:
+        raise ValueError("Unsupported file type")
+
+    return loader.load()
+
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+import uuid
+import re
+
+def extract_advanced_metadata(chunk, file_name, doc_type="policy"):
+    text = chunk.page_content.lower()
+
+    keywords = list(set(re.findall(r"\b\w+\b", text)))[:5]
+
+    section = "Unknown"
+
+    lines = chunk.page_content.split("\n")
+    if len(lines) > 0:
+        section = lines[0][:100]
+
+    sensitive_words = ["ssn", "aadhar", "password", "bank"]
+
+    contains_pii = any(word in text for word in sensitive_words)
+
+    sensitivity = "Confidential" if contains_pii else "Internal"
+
+    return {
+        "doc_id": str(uuid.uuid4()),
+        "source": file_name,
+        "file_type": file_name.split(".")[-1],
+        "chunk_id": None,
+        "section": section,
+        "heading_level": "H2",
+        "department": "Claims",
+        "owner": "DAAS DMG",
+        "sensitivity": sensitivity,
+        "contains_pii": contains_pii,
+        "keywords": keywords,
+        "summary": chunk.page_content[:150],
+        "created_date": "2023-01-01",
+        "ingested_at": datetime.now().isoformat(),
+        "language": "en"
+    }
+
+
+def split_documents(documents, file_name):
+    splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
+    chunks = splitter.split_documents(documents)
+    enriched_chunks = []
+
+    for i,chunk in enumerate(chunks):
+        metadata = extract_advanced_metadata(chunk,file_name)
+        metadata["chunk_id"] = i
+        metadata.update(chunk.metadata)
+        chunk.metadata = metadata
+        enriched_chunks.append(chunk)
+    return enriched_chunks
+
+from langchain_openai import OpenAIEmbeddings
+
+def get_embeddings():
+    return OpenAIEmbeddings(
+        model = "text-embedding-3-small",
+        api_key = tk,
+        base_url = api_base_url,
+        default_headers = {
+            "Authorization": f"Bearer {tk}"
+        }
+    )
+
+from langchain_community.vectorstores import Chroma
+
+def create_vector_store(chunks):
+    embedding = get_embeddings()
+
+    vectordb = Chroma.from_documents(
+        documents = chunks,
+        embedding = embedding,
+        persist_directory = "./chroma_db"
+    )
+
+    vectordb.persist()
+    return vectordb
+
