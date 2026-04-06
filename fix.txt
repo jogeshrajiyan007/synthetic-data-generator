@@ -65,8 +65,28 @@ def query_llm(user_prompt, gpt4o_llm):
             }
         )
 
+        # Check if response is an object with a 'content' attribute (like AIMessage)
+        # if hasattr(llm_response, 'content'):
+        #     llm_response_text = llm_response.content
+        # else:
+        #     llm_response_text = llm_response  # assume it's a string
+
         # Parse the response as JSON
-        response_json = json.loads(llm_response.content)
+        response_json = {
+            "content": llm_response.content,
+            "model": llm_response.response_metadata.get("model_name"),
+            "model_provider": llm_response.response_metadata.get("model_provider"),
+            "finish_reason": llm_response.response_metadata.get("finish_reason"),
+            "run_id": llm_response.id,
+            "usage": {
+                "prompt_tokens": llm_response.usage_metadata.get("input_tokens"),
+                "completion_tokens": llm_response.usage_metadata.get("output_tokens"),
+                "total_tokens": llm_response.usage_metadata.get("total_tokens"),
+            },
+            "content_filter_results": llm_response.response_metadata.get("content_filter_results"),
+            "tool_calls": llm_response.tool_calls,
+            "additional_kwargs": llm_response.additional_kwargs,
+        }
         return response_json
         
     except json.JSONDecodeError:
@@ -75,11 +95,3 @@ def query_llm(user_prompt, gpt4o_llm):
     except Exception as e:
         print(str(e))
         return f"Error while calling LLM: {str(e)}"
- 
-response = query_llm("hi",gpt4o_llm)
-print(response)
-
-Error:
-
-Response is not valid JSON: content='Hello! How can I assist you today?' additional_kwargs={'refusal': None} response_metadata={'token_usage': {'completion_tokens': 10, 'prompt_tokens': 18, 'total_tokens': 28, 'completion_tokens_details': {'accepted_prediction_tokens': 0, 'audio_tokens': 0, 'reasoning_tokens': 0, 'rejected_prediction_tokens': 0}, 'prompt_tokens_details': {'audio_tokens': 0, 'cached_tokens': 0}}, 'model_provider': 'openai', 'model_name': 'gpt-4o-2024-05-13', 'system_fingerprint': 'fp_6b65be4bba', 'id': 'chatcmpl-DRa9l4pu8oCL7bBPP9PsYOoER4xyx', 'prompt_filter_results': [{'prompt_index': 0, 'content_filter_results': {'hate': {'filtered': False, 'severity': 'safe'}, 'jailbreak': {'detected': False, 'filtered': False}, 'self_harm': {'filtered': False, 'severity': 'safe'}, 'sexual': {'filtered': False, 'severity': 'safe'}, 'violence': {'filtered': False, 'severity': 'safe'}}}], 'finish_reason': 'stop', 'logprobs': None, 'content_filter_results': {'hate': {'filtered': False, 'severity': 'safe'}, 'self_harm': {'filtered': False, 'severity': 'safe'}, 'sexual': {'filtered': False, 'severity': 'safe'}, 'violence': {'filtered': False, 'severity': 'safe'}}} id='lc_run--019d6208-69d2-7791-b235-70da768f48c8-0' tool_calls=[] invalid_tool_calls=[] usage_metadata={'input_tokens': 18, 'output_tokens': 10, 'total_tokens': 28, 'input_token_details': {'audio': 0, 'cache_read': 0}, 'output_token_details': {'audio': 0, 'reasoning': 0}}
-{'error': 'Invalid JSON response from the model.'}
