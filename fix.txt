@@ -1,34 +1,33 @@
+'[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain (_ssl.c:1010)' thrown while requesting HEAD https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/./modules.json
+Retrying in 1s [Retry 1/5].
+No sentence-transformers model found with name sentence-transformers/all-MiniLM-L6-v2. Creating a new one with mean pooling.
+'[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain (_ssl.c:1010)' thrown while requesting HEAD https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/adapter_config.json
+Retrying in 1s [Retry 1/5].
+
+
 ---------------------------------------------------------------------------
 RuntimeError                              Traceback (most recent call last)
-Cell In[21], line 51
-     49 TOKEN       = get_token()
-     50 llm         = SecureGPTChat(api_key=TOKEN, base_url=API_BASE_URL)
----> 51 embeddings  = get_embeddings()
-     52 print("✅ LLM and Embeddings ready.")
+Cell In[24], line 58
+     56 TOKEN       = get_token()
+     57 llm         = SecureGPTChat(api_key=TOKEN, base_url=API_BASE_URL)
+---> 58 embeddings  = get_embeddings()
+     59 print("✅ LLM and Embeddings ready.")
 
-Cell In[21], line 41, in get_embeddings(api_key)
-     39 def get_embeddings(api_key: str=None) -> HuggingFaceEmbeddings:
-     40     """Return an embeddings client using the same SecureGPT endpoint."""
----> 41     return HuggingFaceEmbeddings(
-     42         model_name=EMBED_MODEL,
-     43         model_kwargs ={"device": "cpu"},
-     44         encode_kwargs = {"normalize_embeddings":True}
-     45     )
+Cell In[24], line 48, in get_embeddings(api_key)
+     45 os.environ["REQUESTS_CA_BUNDLE"] = ""
+     46 os.environ["HF_HUB_DISABLE_SSL_VERIFICATION"] = "1"
+---> 48 return HuggingFaceEmbeddings(
+     49     model_name=EMBED_MODEL,
+     50     model_kwargs ={"device": "cpu"},
+     51     encode_kwargs = {"normalize_embeddings":True}
+     52 )
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\langchain_core\_api\deprecation.py:238, in deprecated.<locals>.deprecate.<locals>.finalize.<locals>.warn_if_direct_instance(self, *args, **kwargs)
-    236     warned = True
-    237     emit_warning()
---> 238 return wrapped(self, *args, **kwargs)
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\langchain_community\embeddings\huggingface.py:92, in HuggingFaceEmbeddings.__init__(self, **kwargs)
-     86 except ImportError as exc:
-     87     raise ImportError(
-     88         "Could not import sentence_transformers python package. "
-     89         "Please install it with `pip install sentence-transformers`."
-     90     ) from exc
----> 92 self.client = sentence_transformers.SentenceTransformer(
-     93     self.model_name, cache_folder=self.cache_folder, **self.model_kwargs
-     94 )
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\langchain_huggingface\embeddings\huggingface.py:97, in HuggingFaceEmbeddings.__init__(self, **kwargs)
+     94 else:
+     95     model_cls = sentence_transformers.SentenceTransformer
+---> 97 self._client = model_cls(
+     98     self.model_name, cache_folder=self.cache_folder, **self.model_kwargs
+     99 )
 
 File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\sentence_transformers\SentenceTransformer.py:339, in SentenceTransformer.__init__(self, model_name_or_path, modules, device, prompts, default_prompt_name, similarity_fn_name, cache_folder, trust_remote_code, revision, local_files_only, token, use_auth_token, truncate_dim, model_kwargs, tokenizer_kwargs, config_kwargs, model_card_data, backend)
     327         modules, self.module_kwargs = self._load_sbert_model(
