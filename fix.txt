@@ -1,307 +1,149 @@
-'[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain (_ssl.c:1010)' thrown while requesting HEAD https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/./modules.json
-Retrying in 1s [Retry 1/5].
-No sentence-transformers model found with name sentence-transformers/all-MiniLM-L6-v2. Creating a new one with mean pooling.
-'[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain (_ssl.c:1010)' thrown while requesting HEAD https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/adapter_config.json
-Retrying in 1s [Retry 1/5].
+################ SSL PATCH ########################
 
+import ssl
+import httpx
+import certifi
 
+ssl._create_default_https_context = ssl._create_unverified_context
+
+import huggingface_hub.utils._http as _hf_http
+_hf_http._CLIENT = httpx.Client(verify=False)
+
+print("SSL Patch applied.")
+
+from huggingface_hub import snapshot_download
+
+snapshot_download(
+    repo_id = f"sentence-transformers/{EMBED_MODEL}",
+    local_dir = f"./models/{EMBED_MODEL}",
+    ignore_patterns = ["*.msgpack","*.h5","flax_model*"]
+)
+
+print(f"Model downloaded to ./models/{EMBED_MODEL}")
+
+Output:
+SSL Patch applied.
 ---------------------------------------------------------------------------
-RuntimeError                              Traceback (most recent call last)
-Cell In[24], line 58
-     56 TOKEN       = get_token()
-     57 llm         = SecureGPTChat(api_key=TOKEN, base_url=API_BASE_URL)
----> 58 embeddings  = get_embeddings()
-     59 print("✅ LLM and Embeddings ready.")
+ConnectError                              Traceback (most recent call last)
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_transports\default.py:101, in map_httpcore_exceptions()
+    100 try:
+--> 101     yield
+    102 except Exception as exc:
 
-Cell In[24], line 48, in get_embeddings(api_key)
-     45 os.environ["REQUESTS_CA_BUNDLE"] = ""
-     46 os.environ["HF_HUB_DISABLE_SSL_VERIFICATION"] = "1"
----> 48 return HuggingFaceEmbeddings(
-     49     model_name=EMBED_MODEL,
-     50     model_kwargs ={"device": "cpu"},
-     51     encode_kwargs = {"normalize_embeddings":True}
-     52 )
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_transports\default.py:250, in HTTPTransport.handle_request(self, request)
+    249 with map_httpcore_exceptions():
+--> 250     resp = self._pool.handle_request(req)
+    252 assert isinstance(resp.stream, typing.Iterable)
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\langchain_huggingface\embeddings\huggingface.py:97, in HuggingFaceEmbeddings.__init__(self, **kwargs)
-     94 else:
-     95     model_cls = sentence_transformers.SentenceTransformer
----> 97 self._client = model_cls(
-     98     self.model_name, cache_folder=self.cache_folder, **self.model_kwargs
-     99 )
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_sync\connection_pool.py:256, in ConnectionPool.handle_request(self, request)
+    255     self._close_connections(closing)
+--> 256     raise exc from None
+    258 # Return the response. Note that in this case we still have to manage
+    259 # the point at which the response is closed.
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\sentence_transformers\SentenceTransformer.py:339, in SentenceTransformer.__init__(self, model_name_or_path, modules, device, prompts, default_prompt_name, similarity_fn_name, cache_folder, trust_remote_code, revision, local_files_only, token, use_auth_token, truncate_dim, model_kwargs, tokenizer_kwargs, config_kwargs, model_card_data, backend)
-    327         modules, self.module_kwargs = self._load_sbert_model(
-    328             model_name_or_path,
-    329             token=token,
-   (...)    336             config_kwargs=config_kwargs,
-    337         )
-    338     else:
---> 339         modules = self._load_auto_model(
-    340             model_name_or_path,
-    341             token=token,
-    342             cache_folder=cache_folder,
-    343             revision=revision,
-    344             trust_remote_code=trust_remote_code,
-    345             local_files_only=local_files_only,
-    346             model_kwargs=model_kwargs,
-    347             tokenizer_kwargs=tokenizer_kwargs,
-    348             config_kwargs=config_kwargs,
-    349             has_modules=has_modules,
-    350         )
-    352 if modules is not None and not isinstance(modules, OrderedDict):
-    353     modules = OrderedDict([(str(idx), module) for idx, module in enumerate(modules)])
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_sync\connection_pool.py:236, in ConnectionPool.handle_request(self, request)
+    234 try:
+    235     # Send the request on the assigned connection.
+--> 236     response = connection.handle_request(
+    237         pool_request.request
+    238     )
+    239 except ConnectionNotAvailable:
+    240     # In some cases a connection may initially be available to
+    241     # handle a request, but then become unavailable.
+    242     #
+    243     # In this case we clear the connection and try again.
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\sentence_transformers\SentenceTransformer.py:2130, in SentenceTransformer._load_auto_model(self, model_name_or_path, token, cache_folder, revision, trust_remote_code, local_files_only, model_kwargs, tokenizer_kwargs, config_kwargs, has_modules)
-   2127 tokenizer_kwargs = shared_kwargs if tokenizer_kwargs is None else {**shared_kwargs, **tokenizer_kwargs}
-   2128 config_kwargs = shared_kwargs if config_kwargs is None else {**shared_kwargs, **config_kwargs}
--> 2130 transformer_model = Transformer(
-   2131     model_name_or_path,
-   2132     cache_dir=cache_folder,
-   2133     model_args=model_kwargs,
-   2134     tokenizer_args=tokenizer_kwargs,
-   2135     config_args=config_kwargs,
-   2136     backend=self.backend,
-   2137 )
-   2138 pooling_model = Pooling(transformer_model.get_word_embedding_dimension(), "mean")
-   2139 if not local_files_only:
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_sync\connection.py:101, in HTTPConnection.handle_request(self, request)
+    100     self._connect_failed = True
+--> 101     raise exc
+    103 return self._connection.handle_request(request)
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\sentence_transformers\models\Transformer.py:120, in Transformer.__init__(self, model_name_or_path, max_seq_length, model_args, tokenizer_args, config_args, cache_dir, do_lower_case, tokenizer_name_or_path, backend)
-    117 if config_args is None:
-    118     config_args = {}
---> 120 config, is_peft_model = self._load_config(model_name_or_path, cache_dir, backend, config_args)
-    121 self._load_model(model_name_or_path, config, cache_dir, backend, is_peft_model, **model_args)
-    123 # Get the signature of the auto_model's forward method to pass only the expected arguments from `features`,
-    124 # plus some common values like "input_ids", "attention_mask", etc.
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_sync\connection.py:78, in HTTPConnection.handle_request(self, request)
+     77 if self._connection is None:
+---> 78     stream = self._connect(request)
+     80     ssl_object = stream.get_extra_info("ssl_object")
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\sentence_transformers\models\Transformer.py:171, in Transformer._load_config(self, model_name_or_path, cache_dir, backend, config_args)
-    155 def _load_config(
-    156     self, model_name_or_path: str, cache_dir: str | None, backend: str, config_args: dict[str, Any]
-    157 ) -> tuple[PeftConfig | PretrainedConfig, bool]:
-    158     """Loads the transformers or PEFT configuration
-    159 
-    160     Args:
-   (...)    168         tuple[PretrainedConfig, bool]: The model configuration and a boolean indicating whether the model is a PEFT model.
-    169     """
-    170     if (
---> 171         find_adapter_config_file(
-    172             model_name_or_path,
-    173             cache_dir=cache_dir,
-    174             token=config_args.get("token"),
-    175             revision=config_args.get("revision"),
-    176             local_files_only=config_args.get("local_files_only", False),
-    177         )
-    178         is not None
-    179     ):
-    180         if not is_peft_available():
-    181             raise Exception(
-    182                 "Loading a PEFT model requires installing the `peft` package. You can install it via `pip install peft`."
-    183             )
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_sync\connection.py:156, in HTTPConnection._connect(self, request)
+    155 with Trace("start_tls", logger, request, kwargs) as trace:
+--> 156     stream = stream.start_tls(**kwargs)
+    157     trace.return_value = stream
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\transformers\utils\peft_utils.py:84, in find_adapter_config_file(model_id, cache_dir, force_download, proxies, token, revision, local_files_only, subfolder, _commit_hash)
-     82         adapter_cached_filename = os.path.join(model_id, ADAPTER_CONFIG_NAME)
-     83 else:
----> 84     adapter_cached_filename = cached_file(
-     85         model_id,
-     86         ADAPTER_CONFIG_NAME,
-     87         cache_dir=cache_dir,
-     88         force_download=force_download,
-     89         proxies=proxies,
-     90         token=token,
-     91         revision=revision,
-     92         local_files_only=local_files_only,
-     93         subfolder=subfolder,
-     94         _commit_hash=_commit_hash,
-     95         _raise_exceptions_for_gated_repo=False,
-     96         _raise_exceptions_for_missing_entries=False,
-     97         _raise_exceptions_for_connection_errors=False,
-     98     )
-    100 return adapter_cached_filename
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_backends\sync.py:154, in SyncStream.start_tls(self, ssl_context, server_hostname, timeout)
+    150 exc_map: ExceptionMapping = {
+    151     socket.timeout: ConnectTimeout,
+    152     OSError: ConnectError,
+    153 }
+--> 154 with map_exceptions(exc_map):
+    155     try:
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\transformers\utils\hub.py:278, in cached_file(path_or_repo_id, filename, **kwargs)
-    223 def cached_file(
-    224     path_or_repo_id: str | os.PathLike,
-    225     filename: str,
-    226     **kwargs,
-    227 ) -> str | None:
-    228     """
-    229     Tries to locate a file in a local folder and repo, downloads and cache it if necessary.
-    230 
-   (...)    276     ```
-    277     """
---> 278     file = cached_files(path_or_repo_id=path_or_repo_id, filenames=[filename], **kwargs)
-    279     file = file[0] if file is not None else file
-    280     return file
+File C:\ProgramData\miniforge3\Lib\contextlib.py:158, in _GeneratorContextManager.__exit__(self, typ, value, traceback)
+    157 try:
+--> 158     self.gen.throw(value)
+    159 except StopIteration as exc:
+    160     # Suppress StopIteration *unless* it's the same exception that
+    161     # was passed to throw().  This prevents a StopIteration
+    162     # raised inside the "with" statement from being suppressed.
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\transformers\utils\hub.py:512, in cached_files(path_or_repo_id, filenames, cache_dir, force_download, proxies, token, revision, local_files_only, subfolder, repo_type, user_agent, _raise_exceptions_for_gated_repo, _raise_exceptions_for_missing_entries, _raise_exceptions_for_connection_errors, _commit_hash, tqdm_class, **deprecated_kwargs)
-    509     # Any other Exception type should now be re-raised, in order to provide helpful error messages and break the execution flow
-    510     # (EntryNotFoundError will be treated outside this block and correctly re-raised if needed)
-    511     elif not isinstance(e, EntryNotFoundError):
---> 512         raise e
-    514 resolved_files = [
-    515     _get_cache_file_to_return(path_or_repo_id, filename, cache_dir, revision) for filename in full_filenames
-    516 ]
-    517 # If there are any missing file and the flag is active, raise
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_exceptions.py:14, in map_exceptions(map)
+     13     if isinstance(exc, from_exc):
+---> 14         raise to_exc(exc) from exc
+     15 raise
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\transformers\utils\hub.py:422, in cached_files(path_or_repo_id, filenames, cache_dir, force_download, proxies, token, revision, local_files_only, subfolder, repo_type, user_agent, _raise_exceptions_for_gated_repo, _raise_exceptions_for_missing_entries, _raise_exceptions_for_connection_errors, _commit_hash, tqdm_class, **deprecated_kwargs)
-    419 try:
-    420     if len(full_filenames) == 1:
-    421         # This is slightly better for only 1 file
---> 422         hf_hub_download(
-    423             path_or_repo_id,
-    424             filenames[0],
-    425             subfolder=None if len(subfolder) == 0 else subfolder,
-    426             repo_type=repo_type,
-    427             revision=revision,
-    428             cache_dir=cache_dir,
-    429             user_agent=user_agent,
-    430             force_download=force_download,
-    431             proxies=proxies,
-    432             token=token,
-    433             local_files_only=local_files_only,
-    434             tqdm_class=tqdm_class,
-    435         )
-    436     else:
-    437         snapshot_download(
-    438             path_or_repo_id,
-    439             allow_patterns=full_filenames,
-   (...)    448             tqdm_class=tqdm_class,
-    449         )
+ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain (_ssl.c:1010)
+
+The above exception was the direct cause of the following exception:
+
+ConnectError                              Traceback (most recent call last)
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\_snapshot_download.py:241, in snapshot_download(repo_id, repo_type, revision, cache_dir, local_dir, library_name, library_version, user_agent, etag_timeout, force_download, token, local_files_only, allow_patterns, ignore_patterns, max_workers, tqdm_class, headers, endpoint, dry_run)
+    239 try:
+    240     # if we have internet connection we want to list files to download
+--> 241     repo_info = api.repo_info(repo_id=repo_id, repo_type=repo_type, revision=revision)
+    242 except httpx.ProxyError:
+    243     # Actually raise on proxy error
 
 File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\utils\_validators.py:88, in validate_hf_hub_args.<locals>._inner_fn(*args, **kwargs)
-     84         validate_repo_id(arg_value)
      86 kwargs = smoothly_deprecate_legacy_arguments(fn_name=fn.__name__, kwargs=kwargs)
 ---> 88 return fn(*args, **kwargs)
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\file_download.py:995, in hf_hub_download(repo_id, filename, subfolder, repo_type, revision, library_name, library_version, cache_dir, local_dir, user_agent, force_download, etag_timeout, token, local_files_only, headers, endpoint, tqdm_class, dry_run)
-    974     return _hf_hub_download_to_local_dir(
-    975         # Destination
-    976         local_dir=local_dir,
-   (...)    992         dry_run=dry_run,
-    993     )
-    994 else:
---> 995     return _hf_hub_download_to_cache_dir(
-    996         # Destination
-    997         cache_dir=cache_dir,
-    998         # File info
-    999         repo_id=repo_id,
-   1000         filename=filename,
-   1001         repo_type=repo_type,
-   1002         revision=revision,
-   1003         # HTTP info
-   1004         endpoint=endpoint,
-   1005         etag_timeout=etag_timeout,
-   1006         headers=hf_headers,
-   1007         token=token,
-   1008         # Additional options
-   1009         local_files_only=local_files_only,
-   1010         force_download=force_download,
-   1011         tqdm_class=tqdm_class,
-   1012         dry_run=dry_run,
-   1013     )
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\file_download.py:1128, in _hf_hub_download_to_cache_dir(cache_dir, repo_id, filename, repo_type, revision, endpoint, etag_timeout, headers, token, local_files_only, force_download, tqdm_class, dry_run)
-   1122     if isinstance(head_call_error, _DEFAULT_RETRY_ON_EXCEPTIONS) or (
-   1123         isinstance(head_call_error, HfHubHTTPError)
-   1124         and head_call_error.response.status_code in _DEFAULT_RETRY_ON_STATUS_CODES
-   1125     ):
-   1126         logger.info("No local file found. Retrying..")
-   1127         (url_to_download, etag, commit_hash, expected_size, xet_file_data, head_call_error) = (
--> 1128             _get_metadata_or_catch_error(
-   1129                 repo_id=repo_id,
-   1130                 filename=filename,
-   1131                 repo_type=repo_type,
-   1132                 revision=revision,
-   1133                 endpoint=endpoint,
-   1134                 etag_timeout=_ETAG_RETRY_TIMEOUT,
-   1135                 headers=headers,
-   1136                 token=token,
-   1137                 local_files_only=local_files_only,
-   1138                 storage_folder=storage_folder,
-   1139                 relative_filename=relative_filename,
-   1140                 retry_on_errors=True,
-   1141             )
-   1142         )
-   1144 # If still error, raise
-   1145 if head_call_error is not None:
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\file_download.py:1665, in _get_metadata_or_catch_error(repo_id, filename, repo_type, revision, endpoint, etag_timeout, headers, token, local_files_only, relative_filename, storage_folder, retry_on_errors)
-   1663 try:
-   1664     try:
--> 1665         metadata = get_hf_file_metadata(
-   1666             url=url,
-   1667             timeout=etag_timeout,
-   1668             headers=headers,
-   1669             token=token,
-   1670             endpoint=endpoint,
-   1671             retry_on_errors=retry_on_errors,
-   1672         )
-   1673     except RemoteEntryNotFoundError as http_error:
-   1674         if storage_folder is not None and relative_filename is not None:
-   1675             # Cache the non-existence of the file
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\hf_api.py:3280, in HfApi.repo_info(self, repo_id, revision, repo_type, timeout, files_metadata, expand, token)
+   3279         raise ValueError("Unsupported repo type.")
+-> 3280 return method(
+   3281     repo_id,
+   3282     revision=revision,
+   3283     token=token,
+   3284     timeout=timeout,
+   3285     expand=expand,  # type: ignore
+   3286     files_metadata=files_metadata,
+   3287 )
 
 File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\utils\_validators.py:88, in validate_hf_hub_args.<locals>._inner_fn(*args, **kwargs)
-     84         validate_repo_id(arg_value)
      86 kwargs = smoothly_deprecate_legacy_arguments(fn_name=fn.__name__, kwargs=kwargs)
 ---> 88 return fn(*args, **kwargs)
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\file_download.py:1587, in get_hf_file_metadata(url, token, timeout, library_name, library_version, user_agent, headers, endpoint, retry_on_errors)
-   1584 hf_headers["Accept-Encoding"] = "identity"  # prevent any compression => we want to know the real size of the file
-   1586 # Retrieve metadata
--> 1587 response = _httpx_follow_relative_redirects_with_backoff(
-   1588     method="HEAD", url=url, headers=hf_headers, timeout=timeout, retry_on_errors=retry_on_errors
-   1589 )
-   1590 hf_raise_for_status(response)
-   1592 # Return
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\hf_api.py:3014, in HfApi.model_info(self, repo_id, revision, timeout, securityStatus, files_metadata, expand, token)
+   3013     params["expand"] = expand
+-> 3014 r = get_session().get(path, headers=headers, timeout=timeout, params=params)
+   3015 hf_raise_for_status(r)
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\utils\_http.py:685, in _httpx_follow_relative_redirects_with_backoff(method, url, retry_on_errors, **httpx_kwargs)
-    680 no_retry_kwargs: dict[str, Any] = (
-    681     {} if retry_on_errors else {"retry_on_exceptions": (), "retry_on_status_codes": ()}
-    682 )
-    684 while True:
---> 685     response = http_backoff(
-    686         method=method,
-    687         url=url,
-    688         **httpx_kwargs,
-    689         follow_redirects=False,
-    690         **no_retry_kwargs,
-    691     )
-    692     hf_raise_for_status(response)
-    694     # Check if response is a relative redirect
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\utils\_http.py:559, in http_backoff(method, url, max_retries, base_wait_time, max_wait_time, retry_on_exceptions, retry_on_status_codes, **kwargs)
-    494 def http_backoff(
-    495     method: HTTP_METHOD_T,
-    496     url: str,
-   (...)    503     **kwargs,
-    504 ) -> httpx.Response:
-    505     """Wrapper around httpx to retry calls on an endpoint, with exponential backoff.
-    506 
-    507     Endpoint call is retried on exceptions (ex: connection timeout, proxy error,...)
-   (...)    557     > issue on [Github](https://github.com/huggingface/huggingface_hub).
-    558     """
---> 559     return next(
-    560         _http_backoff_base(
-    561             method=method,
-    562             url=url,
-    563             max_retries=max_retries,
-    564             base_wait_time=base_wait_time,
-    565             max_wait_time=max_wait_time,
-    566             retry_on_exceptions=retry_on_exceptions,
-    567             retry_on_status_codes=retry_on_status_codes,
-    568             stream=False,
-    569             **kwargs,
-    570         )
-    571     )
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\utils\_http.py:467, in _http_backoff_base(method, url, max_retries, base_wait_time, max_wait_time, retry_on_exceptions, retry_on_status_codes, stream, **kwargs)
-    465             return
-    466 else:
---> 467     response = client.request(method=method, url=url, **kwargs)
-    468     if not _should_retry(response):
-    469         yield response
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:1053, in Client.get(self, url, params, headers, cookies, auth, follow_redirects, timeout, extensions)
+   1048 """
+   1049 Send a `GET` request.
+   1050 
+   1051 **Parameters**: See `httpx.request`.
+   1052 """
+-> 1053 return self.request(
+   1054     "GET",
+   1055     url,
+   1056     params=params,
+   1057     headers=headers,
+   1058     cookies=cookies,
+   1059     auth=auth,
+   1060     follow_redirects=follow_redirects,
+   1061     timeout=timeout,
+   1062     extensions=extensions,
+   1063 )
 
 File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:825, in Client.request(self, method, url, content, data, files, json, params, headers, cookies, auth, follow_redirects, timeout, extensions)
-    810     warnings.warn(message, DeprecationWarning, stacklevel=2)
     812 request = self.build_request(
     813     method=method,
     814     url=url,
@@ -309,19 +151,89 @@ File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.
     824 )
 --> 825 return self.send(request, auth=auth, follow_redirects=follow_redirects)
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:901, in Client.send(self, request, stream, auth, follow_redirects)
-    887 """
-    888 Send a request.
-    889 
-   (...)    898 [0]: /advanced/clients/#request-instances
-    899 """
-    900 if self._state == ClientState.CLOSED:
---> 901     raise RuntimeError("Cannot send a request, as the client has been closed.")
-    903 self._state = ClientState.OPENED
-    904 follow_redirects = (
-    905     self.follow_redirects
-    906     if isinstance(follow_redirects, UseClientDefault)
-    907     else follow_redirects
-    908 )
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:914, in Client.send(self, request, stream, auth, follow_redirects)
+    912 auth = self._build_request_auth(request, auth)
+--> 914 response = self._send_handling_auth(
+    915     request,
+    916     auth=auth,
+    917     follow_redirects=follow_redirects,
+    918     history=[],
+    919 )
+    920 try:
 
-RuntimeError: Cannot send a request, as the client has been closed.
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:942, in Client._send_handling_auth(self, request, auth, follow_redirects, history)
+    941 while True:
+--> 942     response = self._send_handling_redirects(
+    943         request,
+    944         follow_redirects=follow_redirects,
+    945         history=history,
+    946     )
+    947     try:
+
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:979, in Client._send_handling_redirects(self, request, follow_redirects, history)
+    977     hook(request)
+--> 979 response = self._send_single_request(request)
+    980 try:
+
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:1014, in Client._send_single_request(self, request)
+   1013 with request_context(request=request):
+-> 1014     response = transport.handle_request(request)
+   1016 assert isinstance(response.stream, SyncByteStream)
+
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_transports\default.py:249, in HTTPTransport.handle_request(self, request)
+    237 req = httpcore.Request(
+    238     method=request.method,
+    239     url=httpcore.URL(
+   (...)    247     extensions=request.extensions,
+    248 )
+--> 249 with map_httpcore_exceptions():
+    250     resp = self._pool.handle_request(req)
+
+File C:\ProgramData\miniforge3\Lib\contextlib.py:158, in _GeneratorContextManager.__exit__(self, typ, value, traceback)
+    157 try:
+--> 158     self.gen.throw(value)
+    159 except StopIteration as exc:
+    160     # Suppress StopIteration *unless* it's the same exception that
+    161     # was passed to throw().  This prevents a StopIteration
+    162     # raised inside the "with" statement from being suppressed.
+
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_transports\default.py:118, in map_httpcore_exceptions()
+    117 message = str(exc)
+--> 118 raise mapped_exc(message) from exc
+
+ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain (_ssl.c:1010)
+
+The above exception was the direct cause of the following exception:
+
+LocalEntryNotFoundError                   Traceback (most recent call last)
+Cell In[26], line 16
+     12 print("SSL Patch applied.")
+     14 from huggingface_hub import snapshot_download
+---> 16 snapshot_download(
+     17     repo_id = f"sentence-transformers/{EMBED_MODEL}",
+     18     local_dir = f"./models/{EMBED_MODEL}",
+     19     ignore_patterns = ["*.msgpack","*.h5","flax_model*"]
+     20 )
+     22 print(f"Model downloaded to ./models/{EMBED_MODEL}")
+
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\utils\_validators.py:88, in validate_hf_hub_args.<locals>._inner_fn(*args, **kwargs)
+     84         validate_repo_id(arg_value)
+     86 kwargs = smoothly_deprecate_legacy_arguments(fn_name=fn.__name__, kwargs=kwargs)
+---> 88 return fn(*args, **kwargs)
+
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\_snapshot_download.py:325, in snapshot_download(repo_id, repo_type, revision, cache_dir, local_dir, library_name, library_version, user_agent, etag_timeout, force_download, token, local_files_only, allow_patterns, ignore_patterns, max_workers, tqdm_class, headers, endpoint, dry_run)
+    322         raise api_call_error
+    323     else:
+    324         # Otherwise: most likely a connection issue or Hub downtime => let's warn the user
+--> 325         raise LocalEntryNotFoundError(
+    326             f"Got: {api_call_error.__class__.__name__}: {api_call_error}"
+    327             "\nAn error happened while trying to locate the files on the Hub and we cannot find the appropriate"
+    328             " snapshot folder for the specified revision on the local disk. Please check your internet connection"
+    329             " and try again."
+    330         ) from api_call_error
+    332 # At this stage, internet connection is up and running
+    333 # => let's download the files!
+    334 assert repo_info.sha is not None, "Repo info returned from server must have a revision sha."
+
+LocalEntryNotFoundError: Got: ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain (_ssl.c:1010)
+An error happened while trying to locate the files on the Hub and we cannot find the appropriate snapshot folder for the specified revision on the local disk. Please check your internet connection and try again.
