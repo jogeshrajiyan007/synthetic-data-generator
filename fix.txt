@@ -1,313 +1,256 @@
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import AzureChatOpenAI
-import json
-import httpx
-import requests
-import sqlite3
-from datetime import datetime
-from typing import List, Optional, Any
- 
-client_id = "kGzjDDe6"
-client_secret = "E1aXr1osV0nT5oV8Q3m68HShEp3kYL4ucfjO2b3ex9SUswJIqUGNwVD31PoGoc1w"
-api_token_url = "https://onelogin.stg.axa.com/as/token.oauth2"
-api_base_url = "https://api-int.se.axa-go.applications.services.axa-tech.intraxa/ago-m365-securegpt-hub-v1-vrs/providers/openai/"
- 
-def get_token():
-    global client_id, client_secret, api_token_url
- 
-    url = api_token_url
-    headersList = {"Content-Type": "application/x-www-form-urlencoded"}
-    payload = f"grant_type=client_credentials&client_id={client_id}&client_secret={client_secret}&scope=urn:grp:chatgpt"
-    response = requests.request(method='POST', url=url, data=payload, headers=headersList)
-    if response.status_code != 200:
-        raise Exception(f'Request failed with status {response.status_code}, {response.text}')
-    token_info = response.json()
-    access_token = token_info['access_token']
-    return access_token
- 
-class SecureGPTChat(AzureChatOpenAI):
-    def __init__(
-        self,
-        *,
-        api_key: str | None = None,
-        base_url: str | None = None,
-        temperature: float | None = None,
-    ) -> None:
-        super().__init__(
-            model= "gpt-4o-2024-05-13",#"gpt-35-turbo-0301",
-            api_key=api_key,
-            api_version="2024-10-21",
-            base_url = base_url,
-            validate_base_url=False,
-            http_client = httpx.Client(verify=False),
-            temperature=0,
-            top_p = 0.2,
- 
-        )
-        
-tk = get_token()
-gpt4o_llm = SecureGPTChat(api_key=tk,base_url=api_base_url)
+---------------------------------------------------------------------------
+ConnectError                              Traceback (most recent call last)
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_transports\default.py:101, in map_httpcore_exceptions()
+    100 try:
+--> 101     yield
+    102 except Exception as exc:
 
-def query_llm(user_prompt, gpt4o_llm):
-    try:
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    "You are a helpful assistant.",
-                ),
-                ("human", "{input}"),
-            ]
-        )
- 
-        chain = prompt | gpt4o_llm
-        llm_response = chain.invoke(
-            {
-                "input": user_prompt,
-            }
-        )
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_transports\default.py:250, in HTTPTransport.handle_request(self, request)
+    249 with map_httpcore_exceptions():
+--> 250     resp = self._pool.handle_request(req)
+    252 assert isinstance(resp.stream, typing.Iterable)
 
-        response_json = {
-            "content": llm_response.content,
-            "model": llm_response.response_metadata.get("model_name"),
-            "model_provider": llm_response.response_metadata.get("model_provider"),
-            "finish_reason": llm_response.response_metadata.get("finish_reason"),
-            "run_id": llm_response.id,
-            "usage": {
-                "prompt_tokens": llm_response.usage_metadata.get("input_tokens"),
-                "completion_tokens": llm_response.usage_metadata.get("output_tokens"),
-                "total_tokens": llm_response.usage_metadata.get("total_tokens"),
-            },
-            "content_filter_results": llm_response.response_metadata.get("content_filter_results"),
-            "tool_calls": llm_response.tool_calls,
-            "additional_kwargs": llm_response.additional_kwargs,
-        }
-        return response_json
-        
-    except json.JSONDecodeError:
-        print("Response is not valid JSON:", llm_response)
-        return {"error": "Invalid JSON response from the model."}
-    except Exception as e:
-        print(str(e))
-        return f"Error while calling LLM: {str(e)}"
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_sync\connection_pool.py:256, in ConnectionPool.handle_request(self, request)
+    255     self._close_connections(closing)
+--> 256     raise exc from None
+    258 # Return the response. Note that in this case we still have to manage
+    259 # the point at which the response is closed.
 
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_sync\connection_pool.py:236, in ConnectionPool.handle_request(self, request)
+    234 try:
+    235     # Send the request on the assigned connection.
+--> 236     response = connection.handle_request(
+    237         pool_request.request
+    238     )
+    239 except ConnectionNotAvailable:
+    240     # In some cases a connection may initially be available to
+    241     # handle a request, but then become unavailable.
+    242     #
+    243     # In this case we clear the connection and try again.
 
-def init_db():
-    conn = sqlite3.connect("llm_logs.db")
-    cursor = conn.cursor()
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_sync\connection.py:101, in HTTPConnection.handle_request(self, request)
+    100     self._connect_failed = True
+--> 101     raise exc
+    103 return self._connection.handle_request(request)
 
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS llm_responses (
-    id TEXT PRIMARY KEY,
-    content TEXT,
-    model TEXT,
-    provider TEXT,
-    finish_reason TEXT,
-    prompt_input_tokens INTEGER,
-    completion_output_tokens INTEGER,
-    total_tokens INTEGER,
-    content_filter_hate TEXT,
-    content_filter_hate_severity TEXT,
-    content_filter_self_harm TEXT,
-    content_filter_self_harm_severity TEXT,
-    content_filter_sexual TEXT,
-    content_filter_sexual_severity TEXT,
-    content_filter_violence TEXT,
-    content_filter_violence_severity TEXT,
-    additional_args_refusal TEXT,
-    created_at TEXT
-    )
-    """)
-    conn.commit()
-    conn.close()
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_sync\connection.py:78, in HTTPConnection.handle_request(self, request)
+     77 if self._connection is None:
+---> 78     stream = self._connect(request)
+     80     ssl_object = stream.get_extra_info("ssl_object")
 
-def save_to_db(response_json):
-    conn = sqlite3.connect("llm_logs.db")
-    cursor = conn.cursor()
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_sync\connection.py:156, in HTTPConnection._connect(self, request)
+    155 with Trace("start_tls", logger, request, kwargs) as trace:
+--> 156     stream = stream.start_tls(**kwargs)
+    157     trace.return_value = stream
 
-    cursor.execute("""
-    INSERT INTO llm_responses VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
-        response_json["run_id"],
-        response_json["content"],
-        response_json["model"],
-        response_json["model_provider"],
-        response_json["finish_reason"],
-        response_json["usage"]["prompt_tokens"],
-        response_json["usage"]["completion_tokens"],
-        response_json["usage"]["total_tokens"],
-        response_json["content_filter_results"]["hate"]["filtered"],
-        response_json["content_filter_results"]["hate"]["severity"],
-        response_json["content_filter_results"]["self_harm"]["filtered"],
-        response_json["content_filter_results"]["self_harm"]["severity"],
-        response_json["content_filter_results"]["sexual"]["filtered"],
-        response_json["content_filter_results"]["sexual"]["severity"],
-        response_json["content_filter_results"]["violence"]["filtered"],
-        response_json["content_filter_results"]["violence"]["severity"],
-        response_json["additional_kwargs"]["refusal"],
-        datetime.now().isoformat()
-    ))
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_backends\sync.py:154, in SyncStream.start_tls(self, ssl_context, server_hostname, timeout)
+    150 exc_map: ExceptionMapping = {
+    151     socket.timeout: ConnectTimeout,
+    152     OSError: ConnectError,
+    153 }
+--> 154 with map_exceptions(exc_map):
+    155     try:
 
-    conn.commit()
-    conn.close()
+File C:\ProgramData\miniforge3\Lib\contextlib.py:158, in _GeneratorContextManager.__exit__(self, typ, value, traceback)
+    157 try:
+--> 158     self.gen.throw(value)
+    159 except StopIteration as exc:
+    160     # Suppress StopIteration *unless* it's the same exception that
+    161     # was passed to throw().  This prevents a StopIteration
+    162     # raised inside the "with" statement from being suppressed.
 
-def init_db_doc_chunks():
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_exceptions.py:14, in map_exceptions(map)
+     13     if isinstance(exc, from_exc):
+---> 14         raise to_exc(exc) from exc
+     15 raise
 
-    conn = sqlite3.connect("llm_logs.db")
-    cursor = conn.cursor()
+ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1010)
 
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS document_chunks (
-    doc_id TEXT,
-    chunk_id INTEGER,
-    source TEXT,
-    file_type TEXT,
-    section TEXT,
-    department TEXT,
-    owner TEXT,
-    keywords TEXT,
-    sensitivity TEXT,
-    contains_pii BOOLEAN,
-    created_at TEXT
-    ingested_at TEXT
-    language TEXT
-    )
-    """)
-    
-    conn.commit()
-    conn.close()
+The above exception was the direct cause of the following exception:
 
-def store_chunk_metadata(chunks):
-    conn = sqlite3.connect("llm_logs.db")
-    cursor = conn.cursor()
+ConnectError                              Traceback (most recent call last)
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\openai\_base_client.py:1005, in SyncAPIClient.request(self, cast_to, options, stream, stream_cls)
+   1004 try:
+-> 1005     response = self._client.send(
+   1006         request,
+   1007         stream=stream or self._should_stream_response_body(request=request),
+   1008         **kwargs,
+   1009     )
+   1010 except httpx.TimeoutException as err:
 
-    for chunk in chunks:
-        m = chunk.metadata
-        cursor.execute(
-            """
-            INSERT INTO document_chunks VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """, (
-                m["doc_id"],
-                m["chunk_id"],
-                m["source"],
-                m["file_type"],
-                m["section"],
-                m["department"],
-                m["owner"],
-                m["keywords"],
-                m["sensititvity"],
-                m["contains_pii"],
-                m["created_at"],
-                m["ingested_at"],
-                m["language"]
-            )
-        )
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:914, in Client.send(self, request, stream, auth, follow_redirects)
+    912 auth = self._build_request_auth(request, auth)
+--> 914 response = self._send_handling_auth(
+    915     request,
+    916     auth=auth,
+    917     follow_redirects=follow_redirects,
+    918     history=[],
+    919 )
+    920 try:
 
-    conn.commit()
-    conn.close()
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:942, in Client._send_handling_auth(self, request, auth, follow_redirects, history)
+    941 while True:
+--> 942     response = self._send_handling_redirects(
+    943         request,
+    944         follow_redirects=follow_redirects,
+    945         history=history,
+    946     )
+    947     try:
 
-init_db()
-response = query_llm("Explain data governance", gpt4o_llm)
-save_to_db(response)
-print(json.dumps(response,indent = 4))
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:979, in Client._send_handling_redirects(self, request, follow_redirects, history)
+    977     hook(request)
+--> 979 response = self._send_single_request(request)
+    980 try:
 
-from langchain_community.document_loaders import (
-PyPDFLoader,
-TextLoader,
-UnstructuredWordDocumentLoader,
-CSVLoader
-)
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:1014, in Client._send_single_request(self, request)
+   1013 with request_context(request=request):
+-> 1014     response = transport.handle_request(request)
+   1016 assert isinstance(response.stream, SyncByteStream)
 
-def load_document(file_path):
-    if file_path.endswith(".pdf"):
-        loader = PyPDFLoader(file_path)
-    elif file_path.endswith(".docx"):
-        loader = UnstructuredWordDocumentLoader(file_path)
-    elif file_path.endswith(".csv"):
-        loader = CSVLoader(file_path)
-    elif file_path.endswith(".txt"):
-        loader = TextLoader(file_path)
-    else:
-        raise ValueError("Unsupported file type")
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_transports\default.py:249, in HTTPTransport.handle_request(self, request)
+    237 req = httpcore.Request(
+    238     method=request.method,
+    239     url=httpcore.URL(
+   (...)    247     extensions=request.extensions,
+    248 )
+--> 249 with map_httpcore_exceptions():
+    250     resp = self._pool.handle_request(req)
 
-    return loader.load()
+File C:\ProgramData\miniforge3\Lib\contextlib.py:158, in _GeneratorContextManager.__exit__(self, typ, value, traceback)
+    157 try:
+--> 158     self.gen.throw(value)
+    159 except StopIteration as exc:
+    160     # Suppress StopIteration *unless* it's the same exception that
+    161     # was passed to throw().  This prevents a StopIteration
+    162     # raised inside the "with" statement from being suppressed.
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-import uuid
-import re
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_transports\default.py:118, in map_httpcore_exceptions()
+    117 message = str(exc)
+--> 118 raise mapped_exc(message) from exc
 
-def extract_advanced_metadata(chunk, file_name, doc_type="policy"):
-    text = chunk.page_content.lower()
+ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1010)
 
-    keywords = list(set(re.findall(r"\b\w+\b", text)))[:5]
+The above exception was the direct cause of the following exception:
 
-    section = "Unknown"
+APIConnectionError                        Traceback (most recent call last)
+Cell In[8], line 42
+     40 # Build fresh store if we have new chunks, otherwise reload existing
+     41 if enriched_chunks:
+---> 42     vectordb = build_vector_store(enriched_chunks)
+     43 else:
+     44     vectordb = load_vector_store()
 
-    lines = chunk.page_content.split("\n")
-    if len(lines) > 0:
-        section = lines[0][:100]
+Cell In[8], line 18, in build_vector_store(chunks)
+     11     flat_meta = {
+     12         k: (json.dumps(v) if isinstance(v, (list, bool, dict)) else
+     13             str(v) if v is not None else "")
+     14         for k, v in chunk.metadata.items()
+     15     }
+     16     safe_chunks.append(Document(page_content=chunk.page_content, metadata=flat_meta))
+---> 18 vectordb = Chroma.from_documents(
+     19     documents=safe_chunks,
+     20     embedding=embeddings,
+     21     persist_directory=str(CHROMA_DIR),
+     22     collection_name="governance_docs"
+     23 )
+     24 vectordb.persist()
+     25 print(f"✅ Vector store built — {len(safe_chunks)} vectors persisted to {CHROMA_DIR}")
 
-    sensitive_words = ["ssn", "aadhar", "password", "bank"]
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\langchain_community\vectorstores\chroma.py:887, in Chroma.from_documents(cls, documents, embedding, ids, collection_name, persist_directory, client_settings, client, collection_metadata, **kwargs)
+    885 texts = [doc.page_content for doc in documents]
+    886 metadatas = [doc.metadata for doc in documents]
+--> 887 return cls.from_texts(
+    888     texts=texts,
+    889     embedding=embedding,
+    890     metadatas=metadatas,
+    891     ids=ids,
+    892     collection_name=collection_name,
+    893     persist_directory=persist_directory,
+    894     client_settings=client_settings,
+    895     client=client,
+    896     collection_metadata=collection_metadata,
+    897     **kwargs,
+    898 )
 
-    contains_pii = any(word in text for word in sensitive_words)
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\langchain_community\vectorstores\chroma.py:843, in Chroma.from_texts(cls, texts, embedding, metadatas, ids, collection_name, persist_directory, client_settings, client, collection_metadata, **kwargs)
+    835     from chromadb.utils.batch_utils import create_batches
+    837     for batch in create_batches(
+    838         api=chroma_collection._client,
+    839         ids=ids,
+    840         metadatas=metadatas,
+    841         documents=texts,
+    842     ):
+--> 843         chroma_collection.add_texts(
+    844             texts=batch[3] if batch[3] else [],
+    845             metadatas=batch[2] if batch[2] else None,
+    846             ids=batch[0],
+    847         )
+    848 else:
+    849     chroma_collection.add_texts(texts=texts, metadatas=metadatas, ids=ids)
 
-    sensitivity = "Confidential" if contains_pii else "Internal"
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\langchain_community\vectorstores\chroma.py:277, in Chroma.add_texts(self, texts, metadatas, ids, **kwargs)
+    275 texts = list(texts)
+    276 if self._embedding_function is not None:
+--> 277     embeddings = self._embedding_function.embed_documents(texts)
+    278 if metadatas:
+    279     # fill metadatas with empty dicts if somebody
+    280     # did not specify metadata for all texts
+    281     length_diff = len(texts) - len(metadatas)
 
-    return {
-        "doc_id": str(uuid.uuid4()),
-        "source": file_name,
-        "file_type": file_name.split(".")[-1],
-        "chunk_id": None,
-        "section": section,
-        "heading_level": "H2",
-        "department": "Claims",
-        "owner": "DAAS DMG",
-        "sensitivity": sensitivity,
-        "contains_pii": contains_pii,
-        "keywords": keywords,
-        "summary": chunk.page_content[:150],
-        "created_date": "2023-01-01",
-        "ingested_at": datetime.now().isoformat(),
-        "language": "en"
-    }
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\langchain_openai\embeddings\base.py:751, in OpenAIEmbeddings.embed_documents(self, texts, chunk_size, **kwargs)
+    748 # Unconditionally call _get_len_safe_embeddings to handle length safety.
+    749 # This could be optimized to avoid double work when all texts are short enough.
+    750 engine = cast(str, self.deployment)
+--> 751 return self._get_len_safe_embeddings(
+    752     texts, engine=engine, chunk_size=chunk_size, **kwargs
+    753 )
 
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\langchain_openai\embeddings\base.py:618, in OpenAIEmbeddings._get_len_safe_embeddings(self, texts, engine, chunk_size, **kwargs)
+    616 # Make API call with this batch
+    617 batch_tokens = tokens[i:batch_end]
+--> 618 response = self.client.create(input=batch_tokens, **client_kwargs)
+    619 if not isinstance(response, dict):
+    620     response = response.model_dump()
 
-def split_documents(documents, file_name):
-    splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
-    chunks = splitter.split_documents(documents)
-    enriched_chunks = []
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\openai\resources\embeddings.py:136, in Embeddings.create(self, input, model, dimensions, encoding_format, user, extra_headers, extra_query, extra_body, timeout)
+    130             embedding.embedding = np.frombuffer(  # type: ignore[no-untyped-call]
+    131                 base64.b64decode(data), dtype="float32"
+    132             ).tolist()
+    134     return obj
+--> 136 return self._post(
+    137     "/embeddings",
+    138     body=maybe_transform(params, embedding_create_params.EmbeddingCreateParams),
+    139     options=make_request_options(
+    140         extra_headers=extra_headers,
+    141         extra_query=extra_query,
+    142         extra_body=extra_body,
+    143         timeout=timeout,
+    144         post_parser=parser,
+    145     ),
+    146     cast_to=CreateEmbeddingResponse,
+    147 )
 
-    for i,chunk in enumerate(chunks):
-        metadata = extract_advanced_metadata(chunk,file_name)
-        metadata["chunk_id"] = i
-        metadata.update(chunk.metadata)
-        chunk.metadata = metadata
-        enriched_chunks.append(chunk)
-    return enriched_chunks
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\openai\_base_client.py:1297, in SyncAPIClient.post(self, path, cast_to, body, content, options, files, stream, stream_cls)
+   1288     warnings.warn(
+   1289         "Passing raw bytes as `body` is deprecated and will be removed in a future version. "
+   1290         "Please pass raw bytes via the `content` parameter instead.",
+   1291         DeprecationWarning,
+   1292         stacklevel=2,
+   1293     )
+   1294 opts = FinalRequestOptions.construct(
+   1295     method="post", url=path, json_data=body, content=content, files=to_httpx_files(files), **options
+   1296 )
+-> 1297 return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))
 
-from langchain_openai import OpenAIEmbeddings
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\openai\_base_client.py:1037, in SyncAPIClient.request(self, cast_to, options, stream, stream_cls)
+   1034         continue
+   1036     log.debug("Raising connection error")
+-> 1037     raise APIConnectionError(request=request) from err
+   1039 log.debug(
+   1040     'HTTP Response: %s %s "%i %s" %s',
+   1041     request.method,
+   (...)   1045     response.headers,
+   1046 )
+   1047 log.debug("request_id: %s", response.headers.get("x-request-id"))
 
-def get_embeddings():
-    return OpenAIEmbeddings(
-        model = "text-embedding-3-small",
-        api_key = tk,
-        base_url = api_base_url,
-        default_headers = {
-            "Authorization": f"Bearer {tk}"
-        }
-    )
-
-from langchain_community.vectorstores import Chroma
-
-def create_vector_store(chunks):
-    embedding = get_embeddings()
-
-    vectordb = Chroma.from_documents(
-        documents = chunks,
-        embedding = embedding,
-        persist_directory = "./chroma_db"
-    )
-
-    vectordb.persist()
-    return vectordb
-
+APIConnectionError: Connection error.
