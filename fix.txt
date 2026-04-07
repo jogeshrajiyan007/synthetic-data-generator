@@ -1,119 +1,328 @@
 ---------------------------------------------------------------------------
-NotFoundError                             Traceback (most recent call last)
-Cell In[12], line 42
-     40 # Build fresh store if we have new chunks, otherwise reload existing
-     41 if enriched_chunks:
----> 42     vectordb = build_vector_store(enriched_chunks)
-     43 else:
-     44     vectordb = load_vector_store()
+RuntimeError                              Traceback (most recent call last)
+Cell In[21], line 51
+     49 TOKEN       = get_token()
+     50 llm         = SecureGPTChat(api_key=TOKEN, base_url=API_BASE_URL)
+---> 51 embeddings  = get_embeddings()
+     52 print("✅ LLM and Embeddings ready.")
 
-Cell In[12], line 18, in build_vector_store(chunks)
-     11     flat_meta = {
-     12         k: (json.dumps(v) if isinstance(v, (list, bool, dict)) else
-     13             str(v) if v is not None else "")
-     14         for k, v in chunk.metadata.items()
-     15     }
-     16     safe_chunks.append(Document(page_content=chunk.page_content, metadata=flat_meta))
----> 18 vectordb = Chroma.from_documents(
-     19     documents=safe_chunks,
-     20     embedding=embeddings,
-     21     persist_directory=str(CHROMA_DIR),
-     22     collection_name="governance_docs"
-     23 )
-     24 vectordb.persist()
-     25 print(f"✅ Vector store built — {len(safe_chunks)} vectors persisted to {CHROMA_DIR}")
+Cell In[21], line 41, in get_embeddings(api_key)
+     39 def get_embeddings(api_key: str=None) -> HuggingFaceEmbeddings:
+     40     """Return an embeddings client using the same SecureGPT endpoint."""
+---> 41     return HuggingFaceEmbeddings(
+     42         model_name=EMBED_MODEL,
+     43         model_kwargs ={"device": "cpu"},
+     44         encode_kwargs = {"normalize_embeddings":True}
+     45     )
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\langchain_community\vectorstores\chroma.py:887, in Chroma.from_documents(cls, documents, embedding, ids, collection_name, persist_directory, client_settings, client, collection_metadata, **kwargs)
-    885 texts = [doc.page_content for doc in documents]
-    886 metadatas = [doc.metadata for doc in documents]
---> 887 return cls.from_texts(
-    888     texts=texts,
-    889     embedding=embedding,
-    890     metadatas=metadatas,
-    891     ids=ids,
-    892     collection_name=collection_name,
-    893     persist_directory=persist_directory,
-    894     client_settings=client_settings,
-    895     client=client,
-    896     collection_metadata=collection_metadata,
-    897     **kwargs,
-    898 )
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\langchain_core\_api\deprecation.py:238, in deprecated.<locals>.deprecate.<locals>.finalize.<locals>.warn_if_direct_instance(self, *args, **kwargs)
+    236     warned = True
+    237     emit_warning()
+--> 238 return wrapped(self, *args, **kwargs)
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\langchain_community\vectorstores\chroma.py:843, in Chroma.from_texts(cls, texts, embedding, metadatas, ids, collection_name, persist_directory, client_settings, client, collection_metadata, **kwargs)
-    835     from chromadb.utils.batch_utils import create_batches
-    837     for batch in create_batches(
-    838         api=chroma_collection._client,
-    839         ids=ids,
-    840         metadatas=metadatas,
-    841         documents=texts,
-    842     ):
---> 843         chroma_collection.add_texts(
-    844             texts=batch[3] if batch[3] else [],
-    845             metadatas=batch[2] if batch[2] else None,
-    846             ids=batch[0],
-    847         )
-    848 else:
-    849     chroma_collection.add_texts(texts=texts, metadatas=metadatas, ids=ids)
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\langchain_community\embeddings\huggingface.py:92, in HuggingFaceEmbeddings.__init__(self, **kwargs)
+     86 except ImportError as exc:
+     87     raise ImportError(
+     88         "Could not import sentence_transformers python package. "
+     89         "Please install it with `pip install sentence-transformers`."
+     90     ) from exc
+---> 92 self.client = sentence_transformers.SentenceTransformer(
+     93     self.model_name, cache_folder=self.cache_folder, **self.model_kwargs
+     94 )
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\langchain_community\vectorstores\chroma.py:277, in Chroma.add_texts(self, texts, metadatas, ids, **kwargs)
-    275 texts = list(texts)
-    276 if self._embedding_function is not None:
---> 277     embeddings = self._embedding_function.embed_documents(texts)
-    278 if metadatas:
-    279     # fill metadatas with empty dicts if somebody
-    280     # did not specify metadata for all texts
-    281     length_diff = len(texts) - len(metadatas)
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\sentence_transformers\SentenceTransformer.py:339, in SentenceTransformer.__init__(self, model_name_or_path, modules, device, prompts, default_prompt_name, similarity_fn_name, cache_folder, trust_remote_code, revision, local_files_only, token, use_auth_token, truncate_dim, model_kwargs, tokenizer_kwargs, config_kwargs, model_card_data, backend)
+    327         modules, self.module_kwargs = self._load_sbert_model(
+    328             model_name_or_path,
+    329             token=token,
+   (...)    336             config_kwargs=config_kwargs,
+    337         )
+    338     else:
+--> 339         modules = self._load_auto_model(
+    340             model_name_or_path,
+    341             token=token,
+    342             cache_folder=cache_folder,
+    343             revision=revision,
+    344             trust_remote_code=trust_remote_code,
+    345             local_files_only=local_files_only,
+    346             model_kwargs=model_kwargs,
+    347             tokenizer_kwargs=tokenizer_kwargs,
+    348             config_kwargs=config_kwargs,
+    349             has_modules=has_modules,
+    350         )
+    352 if modules is not None and not isinstance(modules, OrderedDict):
+    353     modules = OrderedDict([(str(idx), module) for idx, module in enumerate(modules)])
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\langchain_openai\embeddings\base.py:751, in OpenAIEmbeddings.embed_documents(self, texts, chunk_size, **kwargs)
-    748 # Unconditionally call _get_len_safe_embeddings to handle length safety.
-    749 # This could be optimized to avoid double work when all texts are short enough.
-    750 engine = cast(str, self.deployment)
---> 751 return self._get_len_safe_embeddings(
-    752     texts, engine=engine, chunk_size=chunk_size, **kwargs
-    753 )
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\sentence_transformers\SentenceTransformer.py:2130, in SentenceTransformer._load_auto_model(self, model_name_or_path, token, cache_folder, revision, trust_remote_code, local_files_only, model_kwargs, tokenizer_kwargs, config_kwargs, has_modules)
+   2127 tokenizer_kwargs = shared_kwargs if tokenizer_kwargs is None else {**shared_kwargs, **tokenizer_kwargs}
+   2128 config_kwargs = shared_kwargs if config_kwargs is None else {**shared_kwargs, **config_kwargs}
+-> 2130 transformer_model = Transformer(
+   2131     model_name_or_path,
+   2132     cache_dir=cache_folder,
+   2133     model_args=model_kwargs,
+   2134     tokenizer_args=tokenizer_kwargs,
+   2135     config_args=config_kwargs,
+   2136     backend=self.backend,
+   2137 )
+   2138 pooling_model = Pooling(transformer_model.get_word_embedding_dimension(), "mean")
+   2139 if not local_files_only:
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\langchain_openai\embeddings\base.py:618, in OpenAIEmbeddings._get_len_safe_embeddings(self, texts, engine, chunk_size, **kwargs)
-    616 # Make API call with this batch
-    617 batch_tokens = tokens[i:batch_end]
---> 618 response = self.client.create(input=batch_tokens, **client_kwargs)
-    619 if not isinstance(response, dict):
-    620     response = response.model_dump()
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\sentence_transformers\models\Transformer.py:120, in Transformer.__init__(self, model_name_or_path, max_seq_length, model_args, tokenizer_args, config_args, cache_dir, do_lower_case, tokenizer_name_or_path, backend)
+    117 if config_args is None:
+    118     config_args = {}
+--> 120 config, is_peft_model = self._load_config(model_name_or_path, cache_dir, backend, config_args)
+    121 self._load_model(model_name_or_path, config, cache_dir, backend, is_peft_model, **model_args)
+    123 # Get the signature of the auto_model's forward method to pass only the expected arguments from `features`,
+    124 # plus some common values like "input_ids", "attention_mask", etc.
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\openai\resources\embeddings.py:136, in Embeddings.create(self, input, model, dimensions, encoding_format, user, extra_headers, extra_query, extra_body, timeout)
-    130             embedding.embedding = np.frombuffer(  # type: ignore[no-untyped-call]
-    131                 base64.b64decode(data), dtype="float32"
-    132             ).tolist()
-    134     return obj
---> 136 return self._post(
-    137     "/embeddings",
-    138     body=maybe_transform(params, embedding_create_params.EmbeddingCreateParams),
-    139     options=make_request_options(
-    140         extra_headers=extra_headers,
-    141         extra_query=extra_query,
-    142         extra_body=extra_body,
-    143         timeout=timeout,
-    144         post_parser=parser,
-    145     ),
-    146     cast_to=CreateEmbeddingResponse,
-    147 )
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\sentence_transformers\models\Transformer.py:171, in Transformer._load_config(self, model_name_or_path, cache_dir, backend, config_args)
+    155 def _load_config(
+    156     self, model_name_or_path: str, cache_dir: str | None, backend: str, config_args: dict[str, Any]
+    157 ) -> tuple[PeftConfig | PretrainedConfig, bool]:
+    158     """Loads the transformers or PEFT configuration
+    159 
+    160     Args:
+   (...)    168         tuple[PretrainedConfig, bool]: The model configuration and a boolean indicating whether the model is a PEFT model.
+    169     """
+    170     if (
+--> 171         find_adapter_config_file(
+    172             model_name_or_path,
+    173             cache_dir=cache_dir,
+    174             token=config_args.get("token"),
+    175             revision=config_args.get("revision"),
+    176             local_files_only=config_args.get("local_files_only", False),
+    177         )
+    178         is not None
+    179     ):
+    180         if not is_peft_available():
+    181             raise Exception(
+    182                 "Loading a PEFT model requires installing the `peft` package. You can install it via `pip install peft`."
+    183             )
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\openai\_base_client.py:1297, in SyncAPIClient.post(self, path, cast_to, body, content, options, files, stream, stream_cls)
-   1288     warnings.warn(
-   1289         "Passing raw bytes as `body` is deprecated and will be removed in a future version. "
-   1290         "Please pass raw bytes via the `content` parameter instead.",
-   1291         DeprecationWarning,
-   1292         stacklevel=2,
-   1293     )
-   1294 opts = FinalRequestOptions.construct(
-   1295     method="post", url=path, json_data=body, content=content, files=to_httpx_files(files), **options
-   1296 )
--> 1297 return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\transformers\utils\peft_utils.py:84, in find_adapter_config_file(model_id, cache_dir, force_download, proxies, token, revision, local_files_only, subfolder, _commit_hash)
+     82         adapter_cached_filename = os.path.join(model_id, ADAPTER_CONFIG_NAME)
+     83 else:
+---> 84     adapter_cached_filename = cached_file(
+     85         model_id,
+     86         ADAPTER_CONFIG_NAME,
+     87         cache_dir=cache_dir,
+     88         force_download=force_download,
+     89         proxies=proxies,
+     90         token=token,
+     91         revision=revision,
+     92         local_files_only=local_files_only,
+     93         subfolder=subfolder,
+     94         _commit_hash=_commit_hash,
+     95         _raise_exceptions_for_gated_repo=False,
+     96         _raise_exceptions_for_missing_entries=False,
+     97         _raise_exceptions_for_connection_errors=False,
+     98     )
+    100 return adapter_cached_filename
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\openai\_base_client.py:1070, in SyncAPIClient.request(self, cast_to, options, stream, stream_cls)
-   1067             err.response.read()
-   1069         log.debug("Re-raising status error")
--> 1070         raise self._make_status_error_from_response(err.response) from None
-   1072     break
-   1074 assert response is not None, "could not resolve response (should never happen)"
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\transformers\utils\hub.py:278, in cached_file(path_or_repo_id, filename, **kwargs)
+    223 def cached_file(
+    224     path_or_repo_id: str | os.PathLike,
+    225     filename: str,
+    226     **kwargs,
+    227 ) -> str | None:
+    228     """
+    229     Tries to locate a file in a local folder and repo, downloads and cache it if necessary.
+    230 
+   (...)    276     ```
+    277     """
+--> 278     file = cached_files(path_or_repo_id=path_or_repo_id, filenames=[filename], **kwargs)
+    279     file = file[0] if file is not None else file
+    280     return file
 
-NotFoundError: Error code: 404 - {'code': 'NotFound', 'message': 'The requested resource was not found', 'details': []}
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\transformers\utils\hub.py:512, in cached_files(path_or_repo_id, filenames, cache_dir, force_download, proxies, token, revision, local_files_only, subfolder, repo_type, user_agent, _raise_exceptions_for_gated_repo, _raise_exceptions_for_missing_entries, _raise_exceptions_for_connection_errors, _commit_hash, tqdm_class, **deprecated_kwargs)
+    509     # Any other Exception type should now be re-raised, in order to provide helpful error messages and break the execution flow
+    510     # (EntryNotFoundError will be treated outside this block and correctly re-raised if needed)
+    511     elif not isinstance(e, EntryNotFoundError):
+--> 512         raise e
+    514 resolved_files = [
+    515     _get_cache_file_to_return(path_or_repo_id, filename, cache_dir, revision) for filename in full_filenames
+    516 ]
+    517 # If there are any missing file and the flag is active, raise
+
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\transformers\utils\hub.py:422, in cached_files(path_or_repo_id, filenames, cache_dir, force_download, proxies, token, revision, local_files_only, subfolder, repo_type, user_agent, _raise_exceptions_for_gated_repo, _raise_exceptions_for_missing_entries, _raise_exceptions_for_connection_errors, _commit_hash, tqdm_class, **deprecated_kwargs)
+    419 try:
+    420     if len(full_filenames) == 1:
+    421         # This is slightly better for only 1 file
+--> 422         hf_hub_download(
+    423             path_or_repo_id,
+    424             filenames[0],
+    425             subfolder=None if len(subfolder) == 0 else subfolder,
+    426             repo_type=repo_type,
+    427             revision=revision,
+    428             cache_dir=cache_dir,
+    429             user_agent=user_agent,
+    430             force_download=force_download,
+    431             proxies=proxies,
+    432             token=token,
+    433             local_files_only=local_files_only,
+    434             tqdm_class=tqdm_class,
+    435         )
+    436     else:
+    437         snapshot_download(
+    438             path_or_repo_id,
+    439             allow_patterns=full_filenames,
+   (...)    448             tqdm_class=tqdm_class,
+    449         )
+
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\utils\_validators.py:88, in validate_hf_hub_args.<locals>._inner_fn(*args, **kwargs)
+     84         validate_repo_id(arg_value)
+     86 kwargs = smoothly_deprecate_legacy_arguments(fn_name=fn.__name__, kwargs=kwargs)
+---> 88 return fn(*args, **kwargs)
+
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\file_download.py:995, in hf_hub_download(repo_id, filename, subfolder, repo_type, revision, library_name, library_version, cache_dir, local_dir, user_agent, force_download, etag_timeout, token, local_files_only, headers, endpoint, tqdm_class, dry_run)
+    974     return _hf_hub_download_to_local_dir(
+    975         # Destination
+    976         local_dir=local_dir,
+   (...)    992         dry_run=dry_run,
+    993     )
+    994 else:
+--> 995     return _hf_hub_download_to_cache_dir(
+    996         # Destination
+    997         cache_dir=cache_dir,
+    998         # File info
+    999         repo_id=repo_id,
+   1000         filename=filename,
+   1001         repo_type=repo_type,
+   1002         revision=revision,
+   1003         # HTTP info
+   1004         endpoint=endpoint,
+   1005         etag_timeout=etag_timeout,
+   1006         headers=hf_headers,
+   1007         token=token,
+   1008         # Additional options
+   1009         local_files_only=local_files_only,
+   1010         force_download=force_download,
+   1011         tqdm_class=tqdm_class,
+   1012         dry_run=dry_run,
+   1013     )
+
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\file_download.py:1128, in _hf_hub_download_to_cache_dir(cache_dir, repo_id, filename, repo_type, revision, endpoint, etag_timeout, headers, token, local_files_only, force_download, tqdm_class, dry_run)
+   1122     if isinstance(head_call_error, _DEFAULT_RETRY_ON_EXCEPTIONS) or (
+   1123         isinstance(head_call_error, HfHubHTTPError)
+   1124         and head_call_error.response.status_code in _DEFAULT_RETRY_ON_STATUS_CODES
+   1125     ):
+   1126         logger.info("No local file found. Retrying..")
+   1127         (url_to_download, etag, commit_hash, expected_size, xet_file_data, head_call_error) = (
+-> 1128             _get_metadata_or_catch_error(
+   1129                 repo_id=repo_id,
+   1130                 filename=filename,
+   1131                 repo_type=repo_type,
+   1132                 revision=revision,
+   1133                 endpoint=endpoint,
+   1134                 etag_timeout=_ETAG_RETRY_TIMEOUT,
+   1135                 headers=headers,
+   1136                 token=token,
+   1137                 local_files_only=local_files_only,
+   1138                 storage_folder=storage_folder,
+   1139                 relative_filename=relative_filename,
+   1140                 retry_on_errors=True,
+   1141             )
+   1142         )
+   1144 # If still error, raise
+   1145 if head_call_error is not None:
+
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\file_download.py:1665, in _get_metadata_or_catch_error(repo_id, filename, repo_type, revision, endpoint, etag_timeout, headers, token, local_files_only, relative_filename, storage_folder, retry_on_errors)
+   1663 try:
+   1664     try:
+-> 1665         metadata = get_hf_file_metadata(
+   1666             url=url,
+   1667             timeout=etag_timeout,
+   1668             headers=headers,
+   1669             token=token,
+   1670             endpoint=endpoint,
+   1671             retry_on_errors=retry_on_errors,
+   1672         )
+   1673     except RemoteEntryNotFoundError as http_error:
+   1674         if storage_folder is not None and relative_filename is not None:
+   1675             # Cache the non-existence of the file
+
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\utils\_validators.py:88, in validate_hf_hub_args.<locals>._inner_fn(*args, **kwargs)
+     84         validate_repo_id(arg_value)
+     86 kwargs = smoothly_deprecate_legacy_arguments(fn_name=fn.__name__, kwargs=kwargs)
+---> 88 return fn(*args, **kwargs)
+
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\file_download.py:1587, in get_hf_file_metadata(url, token, timeout, library_name, library_version, user_agent, headers, endpoint, retry_on_errors)
+   1584 hf_headers["Accept-Encoding"] = "identity"  # prevent any compression => we want to know the real size of the file
+   1586 # Retrieve metadata
+-> 1587 response = _httpx_follow_relative_redirects_with_backoff(
+   1588     method="HEAD", url=url, headers=hf_headers, timeout=timeout, retry_on_errors=retry_on_errors
+   1589 )
+   1590 hf_raise_for_status(response)
+   1592 # Return
+
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\utils\_http.py:685, in _httpx_follow_relative_redirects_with_backoff(method, url, retry_on_errors, **httpx_kwargs)
+    680 no_retry_kwargs: dict[str, Any] = (
+    681     {} if retry_on_errors else {"retry_on_exceptions": (), "retry_on_status_codes": ()}
+    682 )
+    684 while True:
+--> 685     response = http_backoff(
+    686         method=method,
+    687         url=url,
+    688         **httpx_kwargs,
+    689         follow_redirects=False,
+    690         **no_retry_kwargs,
+    691     )
+    692     hf_raise_for_status(response)
+    694     # Check if response is a relative redirect
+
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\utils\_http.py:559, in http_backoff(method, url, max_retries, base_wait_time, max_wait_time, retry_on_exceptions, retry_on_status_codes, **kwargs)
+    494 def http_backoff(
+    495     method: HTTP_METHOD_T,
+    496     url: str,
+   (...)    503     **kwargs,
+    504 ) -> httpx.Response:
+    505     """Wrapper around httpx to retry calls on an endpoint, with exponential backoff.
+    506 
+    507     Endpoint call is retried on exceptions (ex: connection timeout, proxy error,...)
+   (...)    557     > issue on [Github](https://github.com/huggingface/huggingface_hub).
+    558     """
+--> 559     return next(
+    560         _http_backoff_base(
+    561             method=method,
+    562             url=url,
+    563             max_retries=max_retries,
+    564             base_wait_time=base_wait_time,
+    565             max_wait_time=max_wait_time,
+    566             retry_on_exceptions=retry_on_exceptions,
+    567             retry_on_status_codes=retry_on_status_codes,
+    568             stream=False,
+    569             **kwargs,
+    570         )
+    571     )
+
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\utils\_http.py:467, in _http_backoff_base(method, url, max_retries, base_wait_time, max_wait_time, retry_on_exceptions, retry_on_status_codes, stream, **kwargs)
+    465             return
+    466 else:
+--> 467     response = client.request(method=method, url=url, **kwargs)
+    468     if not _should_retry(response):
+    469         yield response
+
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:825, in Client.request(self, method, url, content, data, files, json, params, headers, cookies, auth, follow_redirects, timeout, extensions)
+    810     warnings.warn(message, DeprecationWarning, stacklevel=2)
+    812 request = self.build_request(
+    813     method=method,
+    814     url=url,
+   (...)    823     extensions=extensions,
+    824 )
+--> 825 return self.send(request, auth=auth, follow_redirects=follow_redirects)
+
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:901, in Client.send(self, request, stream, auth, follow_redirects)
+    887 """
+    888 Send a request.
+    889 
+   (...)    898 [0]: /advanced/clients/#request-instances
+    899 """
+    900 if self._state == ClientState.CLOSED:
+--> 901     raise RuntimeError("Cannot send a request, as the client has been closed.")
+    903 self._state = ClientState.OPENED
+    904 follow_redirects = (
+    905     self.follow_redirects
+    906     if isinstance(follow_redirects, UseClientDefault)
+    907     else follow_redirects
+    908 )
+
+RuntimeError: Cannot send a request, as the client has been closed.
