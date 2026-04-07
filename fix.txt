@@ -1,146 +1,13 @@
 ---------------------------------------------------------------------------
-ConnectError                              Traceback (most recent call last)
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_transports\default.py:101, in map_httpcore_exceptions()
-    100 try:
---> 101     yield
-    102 except Exception as exc:
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_transports\default.py:250, in HTTPTransport.handle_request(self, request)
-    249 with map_httpcore_exceptions():
---> 250     resp = self._pool.handle_request(req)
-    252 assert isinstance(resp.stream, typing.Iterable)
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_sync\connection_pool.py:256, in ConnectionPool.handle_request(self, request)
-    255     self._close_connections(closing)
---> 256     raise exc from None
-    258 # Return the response. Note that in this case we still have to manage
-    259 # the point at which the response is closed.
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_sync\connection_pool.py:236, in ConnectionPool.handle_request(self, request)
-    234 try:
-    235     # Send the request on the assigned connection.
---> 236     response = connection.handle_request(
-    237         pool_request.request
-    238     )
-    239 except ConnectionNotAvailable:
-    240     # In some cases a connection may initially be available to
-    241     # handle a request, but then become unavailable.
-    242     #
-    243     # In this case we clear the connection and try again.
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_sync\connection.py:101, in HTTPConnection.handle_request(self, request)
-    100     self._connect_failed = True
---> 101     raise exc
-    103 return self._connection.handle_request(request)
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_sync\connection.py:78, in HTTPConnection.handle_request(self, request)
-     77 if self._connection is None:
----> 78     stream = self._connect(request)
-     80     ssl_object = stream.get_extra_info("ssl_object")
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_sync\connection.py:156, in HTTPConnection._connect(self, request)
-    155 with Trace("start_tls", logger, request, kwargs) as trace:
---> 156     stream = stream.start_tls(**kwargs)
-    157     trace.return_value = stream
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_backends\sync.py:154, in SyncStream.start_tls(self, ssl_context, server_hostname, timeout)
-    150 exc_map: ExceptionMapping = {
-    151     socket.timeout: ConnectTimeout,
-    152     OSError: ConnectError,
-    153 }
---> 154 with map_exceptions(exc_map):
-    155     try:
-
-File C:\ProgramData\miniforge3\Lib\contextlib.py:158, in _GeneratorContextManager.__exit__(self, typ, value, traceback)
-    157 try:
---> 158     self.gen.throw(value)
-    159 except StopIteration as exc:
-    160     # Suppress StopIteration *unless* it's the same exception that
-    161     # was passed to throw().  This prevents a StopIteration
-    162     # raised inside the "with" statement from being suppressed.
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_exceptions.py:14, in map_exceptions(map)
-     13     if isinstance(exc, from_exc):
----> 14         raise to_exc(exc) from exc
-     15 raise
-
-ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1010)
-
-The above exception was the direct cause of the following exception:
-
-ConnectError                              Traceback (most recent call last)
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\openai\_base_client.py:1005, in SyncAPIClient.request(self, cast_to, options, stream, stream_cls)
-   1004 try:
--> 1005     response = self._client.send(
-   1006         request,
-   1007         stream=stream or self._should_stream_response_body(request=request),
-   1008         **kwargs,
-   1009     )
-   1010 except httpx.TimeoutException as err:
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:914, in Client.send(self, request, stream, auth, follow_redirects)
-    912 auth = self._build_request_auth(request, auth)
---> 914 response = self._send_handling_auth(
-    915     request,
-    916     auth=auth,
-    917     follow_redirects=follow_redirects,
-    918     history=[],
-    919 )
-    920 try:
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:942, in Client._send_handling_auth(self, request, auth, follow_redirects, history)
-    941 while True:
---> 942     response = self._send_handling_redirects(
-    943         request,
-    944         follow_redirects=follow_redirects,
-    945         history=history,
-    946     )
-    947     try:
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:979, in Client._send_handling_redirects(self, request, follow_redirects, history)
-    977     hook(request)
---> 979 response = self._send_single_request(request)
-    980 try:
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:1014, in Client._send_single_request(self, request)
-   1013 with request_context(request=request):
--> 1014     response = transport.handle_request(request)
-   1016 assert isinstance(response.stream, SyncByteStream)
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_transports\default.py:249, in HTTPTransport.handle_request(self, request)
-    237 req = httpcore.Request(
-    238     method=request.method,
-    239     url=httpcore.URL(
-   (...)    247     extensions=request.extensions,
-    248 )
---> 249 with map_httpcore_exceptions():
-    250     resp = self._pool.handle_request(req)
-
-File C:\ProgramData\miniforge3\Lib\contextlib.py:158, in _GeneratorContextManager.__exit__(self, typ, value, traceback)
-    157 try:
---> 158     self.gen.throw(value)
-    159 except StopIteration as exc:
-    160     # Suppress StopIteration *unless* it's the same exception that
-    161     # was passed to throw().  This prevents a StopIteration
-    162     # raised inside the "with" statement from being suppressed.
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_transports\default.py:118, in map_httpcore_exceptions()
-    117 message = str(exc)
---> 118 raise mapped_exc(message) from exc
-
-ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1010)
-
-The above exception was the direct cause of the following exception:
-
-APIConnectionError                        Traceback (most recent call last)
-Cell In[8], line 42
+NotFoundError                             Traceback (most recent call last)
+Cell In[12], line 42
      40 # Build fresh store if we have new chunks, otherwise reload existing
      41 if enriched_chunks:
 ---> 42     vectordb = build_vector_store(enriched_chunks)
      43 else:
      44     vectordb = load_vector_store()
 
-Cell In[8], line 18, in build_vector_store(chunks)
+Cell In[12], line 18, in build_vector_store(chunks)
      11     flat_meta = {
      12         k: (json.dumps(v) if isinstance(v, (list, bool, dict)) else
      13             str(v) if v is not None else "")
@@ -242,15 +109,11 @@ File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\openai\_base_c
    1296 )
 -> 1297 return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\openai\_base_client.py:1037, in SyncAPIClient.request(self, cast_to, options, stream, stream_cls)
-   1034         continue
-   1036     log.debug("Raising connection error")
--> 1037     raise APIConnectionError(request=request) from err
-   1039 log.debug(
-   1040     'HTTP Response: %s %s "%i %s" %s',
-   1041     request.method,
-   (...)   1045     response.headers,
-   1046 )
-   1047 log.debug("request_id: %s", response.headers.get("x-request-id"))
+File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\openai\_base_client.py:1070, in SyncAPIClient.request(self, cast_to, options, stream, stream_cls)
+   1067             err.response.read()
+   1069         log.debug("Re-raising status error")
+-> 1070         raise self._make_status_error_from_response(err.response) from None
+   1072     break
+   1074 assert response is not None, "could not resolve response (should never happen)"
 
-APIConnectionError: Connection error.
+NotFoundError: Error code: 404 - {'code': 'NotFound', 'message': 'The requested resource was not found', 'details': []}
