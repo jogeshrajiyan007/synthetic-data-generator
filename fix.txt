@@ -1,239 +1,74 @@
-################ SSL PATCH ########################
 
-import ssl
-import httpx
-import certifi
+## PART 1 — DATA PROFILING & NORMALISATION ASSESSMENT
 
-ssl._create_default_https_context = ssl._create_unverified_context
+For each dataset/source file:
+1. Identify the current normal form it is in (1NF, 2NF, 3NF or Unnormalised)
+2. Identify any normalisation violations:
+   - Repeating groups or multi-valued columns (1NF violations)
+   - Partial dependencies on composite keys (2NF violations)
+   - Transitive dependencies between non-key columns (3NF violations)
+3. Propose the normalisation steps required to bring it to 3NF
+4. Identify any candidate keys, primary keys, and foreign keys
 
-import huggingface_hub.utils._http as _hf_http
-_hf_http._CLIENT = httpx.Client(verify=False)
+---
 
-print("SSL Patch applied.")
+## PART 2 — DIMENSIONAL DATA MODEL (Star Schema)
 
-from huggingface_hub import snapshot_download
+Based on all datasets combined, propose a Star Schema with:
 
-snapshot_download(
-    repo_id = f"sentence-transformers/{EMBED_MODEL}",
-    local_dir = f"./models/{EMBED_MODEL}",
-    ignore_patterns = ["*.msgpack","*.h5","flax_model*"]
-)
+FACT TABLES — identify measurable, transactional entities:
+- Table name
+- Grain (what does one row represent?)
+- All measure/metric columns (numeric, additive facts)
+- All foreign keys to dimension tables
+- Suggested partitioning column
 
-print(f"Model downloaded to ./models/{EMBED_MODEL}")
+DIMENSION TABLES — identify descriptive, slowly changing entities:
+- Table name
+- Natural key and surrogate key
+- All descriptive attributes
+- SCD Type recommendation (SCD1 / SCD2 / SCD3) with justification
+- Conformed dimensions (shared across multiple fact tables)
 
-Output:
-SSL Patch applied.
----------------------------------------------------------------------------
-ConnectError                              Traceback (most recent call last)
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_transports\default.py:101, in map_httpcore_exceptions()
-    100 try:
---> 101     yield
-    102 except Exception as exc:
+---
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_transports\default.py:250, in HTTPTransport.handle_request(self, request)
-    249 with map_httpcore_exceptions():
---> 250     resp = self._pool.handle_request(req)
-    252 assert isinstance(resp.stream, typing.Iterable)
+## PART 3 — SOURCE TO TARGET MAPPING (STTM)
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_sync\connection_pool.py:256, in ConnectionPool.handle_request(self, request)
-    255     self._close_connections(closing)
---> 256     raise exc from None
-    258 # Return the response. Note that in this case we still have to manage
-    259 # the point at which the response is closed.
+For each source column across all datasets, provide a mapping in this exact format:
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_sync\connection_pool.py:236, in ConnectionPool.handle_request(self, request)
-    234 try:
-    235     # Send the request on the assigned connection.
---> 236     response = connection.handle_request(
-    237         pool_request.request
-    238     )
-    239 except ConnectionNotAvailable:
-    240     # In some cases a connection may initially be available to
-    241     # handle a request, but then become unavailable.
-    242     #
-    243     # In this case we clear the connection and try again.
+| Source File | Source Column | Source Data Type | Transformation Logic | Target Table | Target Column | Target Data Type | Key Type | Nullable |
+|-------------|--------------|-----------------|---------------------|--------------|--------------|-----------------|----------|----------|
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_sync\connection.py:101, in HTTPConnection.handle_request(self, request)
-    100     self._connect_failed = True
---> 101     raise exc
-    103 return self._connection.handle_request(request)
+Transformation logic should include:
+- Direct mapping (no change)
+- Derived columns (formula or rule)
+- Lookup/reference joins
+- Data type casting
+- Null handling strategy
+- Standardisation rules (date formats, string casing, etc.)
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_sync\connection.py:78, in HTTPConnection.handle_request(self, request)
-     77 if self._connection is None:
----> 78     stream = self._connect(request)
-     80     ssl_object = stream.get_extra_info("ssl_object")
+---
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_sync\connection.py:156, in HTTPConnection._connect(self, request)
-    155 with Trace("start_tls", logger, request, kwargs) as trace:
---> 156     stream = stream.start_tls(**kwargs)
-    157     trace.return_value = stream
+## PART 4 — DATA GOVERNANCE TAGGING FOR THE MODEL
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_backends\sync.py:154, in SyncStream.start_tls(self, ssl_context, server_hostname, timeout)
-    150 exc_map: ExceptionMapping = {
-    151     socket.timeout: ConnectTimeout,
-    152     OSError: ConnectError,
-    153 }
---> 154 with map_exceptions(exc_map):
-    155     try:
+For the proposed data model:
+1. Flag which columns contain PII and recommended masking strategy
+2. Flag regulatory relevance (GDPR, Solvency II, IFRS 17) per table
+3. Recommend data retention period per table
+4. Identify which columns should be part of a Data Contract
+5. Suggest data quality rules (not null, referential integrity, range checks, format checks) per table
 
-File C:\ProgramData\miniforge3\Lib\contextlib.py:158, in _GeneratorContextManager.__exit__(self, typ, value, traceback)
-    157 try:
---> 158     self.gen.throw(value)
-    159 except StopIteration as exc:
-    160     # Suppress StopIteration *unless* it's the same exception that
-    161     # was passed to throw().  This prevents a StopIteration
-    162     # raised inside the "with" statement from being suppressed.
+---
 
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpcore\_exceptions.py:14, in map_exceptions(map)
-     13     if isinstance(exc, from_exc):
----> 14         raise to_exc(exc) from exc
-     15 raise
+## PART 5 — IMPLEMENTATION RECOMMENDATIONS
 
-ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain (_ssl.c:1010)
+1. Recommended layered architecture (Bronze / Silver / Gold or Raw / Cleansed / Curated)
+2. Suggested technology stack for each layer based on an insurance enterprise context
+3. Incremental load strategy per fact table (Full Load / Incremental / CDC)
+4. Suggested indexing strategy per table
 
-The above exception was the direct cause of the following exception:
+---
 
-ConnectError                              Traceback (most recent call last)
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\_snapshot_download.py:241, in snapshot_download(repo_id, repo_type, revision, cache_dir, local_dir, library_name, library_version, user_agent, etag_timeout, force_download, token, local_files_only, allow_patterns, ignore_patterns, max_workers, tqdm_class, headers, endpoint, dry_run)
-    239 try:
-    240     # if we have internet connection we want to list files to download
---> 241     repo_info = api.repo_info(repo_id=repo_id, repo_type=repo_type, revision=revision)
-    242 except httpx.ProxyError:
-    243     # Actually raise on proxy error
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\utils\_validators.py:88, in validate_hf_hub_args.<locals>._inner_fn(*args, **kwargs)
-     86 kwargs = smoothly_deprecate_legacy_arguments(fn_name=fn.__name__, kwargs=kwargs)
----> 88 return fn(*args, **kwargs)
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\hf_api.py:3280, in HfApi.repo_info(self, repo_id, revision, repo_type, timeout, files_metadata, expand, token)
-   3279         raise ValueError("Unsupported repo type.")
--> 3280 return method(
-   3281     repo_id,
-   3282     revision=revision,
-   3283     token=token,
-   3284     timeout=timeout,
-   3285     expand=expand,  # type: ignore
-   3286     files_metadata=files_metadata,
-   3287 )
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\utils\_validators.py:88, in validate_hf_hub_args.<locals>._inner_fn(*args, **kwargs)
-     86 kwargs = smoothly_deprecate_legacy_arguments(fn_name=fn.__name__, kwargs=kwargs)
----> 88 return fn(*args, **kwargs)
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\hf_api.py:3014, in HfApi.model_info(self, repo_id, revision, timeout, securityStatus, files_metadata, expand, token)
-   3013     params["expand"] = expand
--> 3014 r = get_session().get(path, headers=headers, timeout=timeout, params=params)
-   3015 hf_raise_for_status(r)
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:1053, in Client.get(self, url, params, headers, cookies, auth, follow_redirects, timeout, extensions)
-   1048 """
-   1049 Send a `GET` request.
-   1050 
-   1051 **Parameters**: See `httpx.request`.
-   1052 """
--> 1053 return self.request(
-   1054     "GET",
-   1055     url,
-   1056     params=params,
-   1057     headers=headers,
-   1058     cookies=cookies,
-   1059     auth=auth,
-   1060     follow_redirects=follow_redirects,
-   1061     timeout=timeout,
-   1062     extensions=extensions,
-   1063 )
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:825, in Client.request(self, method, url, content, data, files, json, params, headers, cookies, auth, follow_redirects, timeout, extensions)
-    812 request = self.build_request(
-    813     method=method,
-    814     url=url,
-   (...)    823     extensions=extensions,
-    824 )
---> 825 return self.send(request, auth=auth, follow_redirects=follow_redirects)
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:914, in Client.send(self, request, stream, auth, follow_redirects)
-    912 auth = self._build_request_auth(request, auth)
---> 914 response = self._send_handling_auth(
-    915     request,
-    916     auth=auth,
-    917     follow_redirects=follow_redirects,
-    918     history=[],
-    919 )
-    920 try:
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:942, in Client._send_handling_auth(self, request, auth, follow_redirects, history)
-    941 while True:
---> 942     response = self._send_handling_redirects(
-    943         request,
-    944         follow_redirects=follow_redirects,
-    945         history=history,
-    946     )
-    947     try:
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:979, in Client._send_handling_redirects(self, request, follow_redirects, history)
-    977     hook(request)
---> 979 response = self._send_single_request(request)
-    980 try:
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_client.py:1014, in Client._send_single_request(self, request)
-   1013 with request_context(request=request):
--> 1014     response = transport.handle_request(request)
-   1016 assert isinstance(response.stream, SyncByteStream)
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_transports\default.py:249, in HTTPTransport.handle_request(self, request)
-    237 req = httpcore.Request(
-    238     method=request.method,
-    239     url=httpcore.URL(
-   (...)    247     extensions=request.extensions,
-    248 )
---> 249 with map_httpcore_exceptions():
-    250     resp = self._pool.handle_request(req)
-
-File C:\ProgramData\miniforge3\Lib\contextlib.py:158, in _GeneratorContextManager.__exit__(self, typ, value, traceback)
-    157 try:
---> 158     self.gen.throw(value)
-    159 except StopIteration as exc:
-    160     # Suppress StopIteration *unless* it's the same exception that
-    161     # was passed to throw().  This prevents a StopIteration
-    162     # raised inside the "with" statement from being suppressed.
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\httpx\_transports\default.py:118, in map_httpcore_exceptions()
-    117 message = str(exc)
---> 118 raise mapped_exc(message) from exc
-
-ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain (_ssl.c:1010)
-
-The above exception was the direct cause of the following exception:
-
-LocalEntryNotFoundError                   Traceback (most recent call last)
-Cell In[26], line 16
-     12 print("SSL Patch applied.")
-     14 from huggingface_hub import snapshot_download
----> 16 snapshot_download(
-     17     repo_id = f"sentence-transformers/{EMBED_MODEL}",
-     18     local_dir = f"./models/{EMBED_MODEL}",
-     19     ignore_patterns = ["*.msgpack","*.h5","flax_model*"]
-     20 )
-     22 print(f"Model downloaded to ./models/{EMBED_MODEL}")
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\utils\_validators.py:88, in validate_hf_hub_args.<locals>._inner_fn(*args, **kwargs)
-     84         validate_repo_id(arg_value)
-     86 kwargs = smoothly_deprecate_legacy_arguments(fn_name=fn.__name__, kwargs=kwargs)
----> 88 return fn(*args, **kwargs)
-
-File ~\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\huggingface_hub\_snapshot_download.py:325, in snapshot_download(repo_id, repo_type, revision, cache_dir, local_dir, library_name, library_version, user_agent, etag_timeout, force_download, token, local_files_only, allow_patterns, ignore_patterns, max_workers, tqdm_class, headers, endpoint, dry_run)
-    322         raise api_call_error
-    323     else:
-    324         # Otherwise: most likely a connection issue or Hub downtime => let's warn the user
---> 325         raise LocalEntryNotFoundError(
-    326             f"Got: {api_call_error.__class__.__name__}: {api_call_error}"
-    327             "\nAn error happened while trying to locate the files on the Hub and we cannot find the appropriate"
-    328             " snapshot folder for the specified revision on the local disk. Please check your internet connection"
-    329             " and try again."
-    330         ) from api_call_error
-    332 # At this stage, internet connection is up and running
-    333 # => let's download the files!
-    334 assert repo_info.sha is not None, "Repo info returned from server must have a revision sha."
-
-LocalEntryNotFoundError: Got: ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain (_ssl.c:1010)
-An error happened while trying to locate the files on the Hub and we cannot find the appropriate snapshot folder for the specified revision on the local disk. Please check your internet connection and try again.
+Be specific, use actual column names from the source data, and base all recommendations 
+strictly on what exists in the provided datasets. Do not generalise — map every column.
+"""
