@@ -1,45 +1,107 @@
-import httpx
-from langchain_openai import AzureChatOpenAI
-from langchain_huggingface import HuggingFaceEmbeddings
-from auth import token_manager
-from config import CHAT_MODEL, API_BASE_URL, API_VERSION, MODELS_DIR
+from pydantic import BaseModel, Field
+from typing import Any
+from datetime import datetime
 
 
-class SecureGPTChat(AzureChatOpenAI):
-    def __init__(self, api_key: str, base_url: str):
-        super().__init__(
-            model=CHAT_MODEL,
-            api_key=api_key,
-            api_version=API_VERSION,
-            base_url=base_url,
-            validate_base_url=False,
-            http_client=httpx.Client(verify=False),
-            temperature=0,
-            top_p=0.2,
-        )
+# ── Ingest ──────────────────────────────────────────────────────
+
+class IngestResponse(BaseModel):
+    status: str
+    files_processed: int
+    files_failed: int
+    total_chunks: int
+    total_vectors: int
+    file_details: list[dict]
+    duration_seconds: float
+    ingested_at: str
 
 
-def get_llm() -> SecureGPTChat:
-    """Returns a fresh LLM instance with a valid token."""
-    token = token_manager.get_token()
-    return SecureGPTChat(api_key=token, base_url=API_BASE_URL)
+# ── Query ───────────────────────────────────────────────────────
+
+class QueryRequest(BaseModel):
+    question: str = Field(..., min_length=3, max_length=2000)
+    use_rag: bool = True
+    k: int = Field(default=5, ge=1, le=20)
 
 
-def get_embeddings() -> HuggingFaceEmbeddings:
-    """Local embeddings — loads from disk, no network call."""
-    return HuggingFaceEmbeddings(
-        model_name=str(MODELS_DIR),
-        model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True}
-    )
+class QueryResponse(BaseModel):
+    run_id: str
+    question: str
+    answer: str
+    mode: str
+    sources_used: list[str]
+    chunks_retrieved: int
+    model: str
+    created_at: str
+    duration_seconds: float
 
 
-# ── Module-level singletons (loaded once at startup) ───────────
-_embeddings: HuggingFaceEmbeddings | None = None
+# ── Sources ─────────────────────────────────────────────────────
+
+class SourceFile(BaseModel):
+    source_file: str
+    file_type: str
+    chunk_count: int
+    department: str
+    sensitivity: str
+    pii_chunks: int
+    ingested_at: str
 
 
-def get_embeddings_singleton() -> HuggingFaceEmbeddings:
-    global _embeddings
-    if _embeddings is None:
-        _embeddings = get_embeddings()
-    return _embeddings
+class SourcesResponse(BaseModel):
+    total_sources: int
+    total_chunks: int
+    sources: list[SourceFile]
+
+
+# ── Profile ─────────────────────────────────────────────────────
+
+class ColumnProfile(BaseModel):
+    column_name: str
+    dtype: str
+    null_count: int
+    null_pct: float
+    unique_count: int
+    col_type: str
+    stats: dict[str, Any]
+
+
+class FileProfileResponse(BaseModel):
+    source_file: str
+    row_count: int
+    col_count: int
+    duplicate_rows: int
+    total_nulls: int
+    columns: list[ColumnProfile]
+    strong_correlations: list[dict]
+    governance: dict[str, Any]
+
+
+# ── Logs ────────────────────────────────────────────────────────
+
+class LogsResponse(BaseModel):
+    table: str
+    total_records: int
+    limit: int
+    offset: int
+    records: list[dict]
+
+
+# ── Reset ───────────────────────────────────────────────────────
+
+class ResetResponse(BaseModel):
+    status: str
+    message: str
+    cleared: list[str]
+
+
+# ── Health ──────────────────────────────────────────────────────
+
+class HealthResponse(BaseModel):
+    status: str
+    version: str
+    chroma_vectors: int
+    sqlite_chunks: int
+    sqlite_responses: int
+    sources_loaded: int
+    timestamp: str
