@@ -1,52 +1,182 @@
-API Reference
-POST /api/ingest/
-Ingest all files currently in loading_zone/. Rebuilds vector store.
-Response:
-{
-  "status": "success",
-  "files_processed": 4,
-  "files_failed": 0,
-  "total_chunks": 4000,
-  "total_vectors": 4000,
-  "file_details": [...],
-  "duration_seconds": 12.4,
-  "ingested_at": "2026-04-08T10:00:00"
-}
-POST /api/ingest/upload
-Upload files directly via multipart form. Adds to existing vector store (incremental).
-POST /api/query/
-Ask a governance question.
+# 🚀 AXA GovernGPT – Full Frontend Generation Prompt (Firebase Studio)
+
+You are a **senior frontend engineer** tasked with building a **production-ready Next.js application** named:
+
+# 🧠 AXA GovernGPT
+
+An enterprise-grade **Data Governance AI Assistant UI** for AXA Insurance.
+
+---
+
+# ⚠️ 🚫 STRICT ARCHITECTURE RULES (NON-NEGOTIABLE)
+
+You MUST follow these constraints:
+
+- ❌ DO NOT use **Genkit**
+- ❌ DO NOT use **Google AI / Gemini / PaLM / Vertex AI in frontend**
+- ❌ DO NOT call any LLM directly from frontend
+- ❌ DO NOT simulate AI responses
+
+✅ ALL AI logic exists in backend (FastAPI RAG system)  
+✅ Frontend = **UI + API client ONLY**  
+✅ ALL communication via REST APIs  
+
+---
+
+# 🧠 APPLICATION PURPOSE
+
+The application allows users to:
+1. Upload enterprise data sources
+2. Query an AI agent powered by backend RAG
+3. View governed, contextual responses
+
+---
+
+# 🛠️ TECH STACK
+
+- Next.js (App Router)
+- TypeScript
+- Tailwind CSS
+- ShadCN UI
+- Zustand (preferred) or React Context
+- React Dropzone
+- Axios (preferred) or Fetch
+
+---
+
+# 🧩 GLOBAL LAYOUT
+
+Create a **full-screen responsive 2-panel layout**:
+
+| Left Panel (Sources) | Right Panel (Chat Agent) |
+|---------------------|--------------------------|
+| 25–30% width        | 70–75% width             |
+
+- Full height (100vh)
+- Clean enterprise design
+- Smooth scrolling
+
+---
+
+# 📂 LEFT PANEL — "Sources"
+
+## Header
+**AXA GovernGPT • Sources**
+
+---
+
+## 🔢 SOURCE LIMIT SYSTEM (CRITICAL)
+
+- Maximum allowed files: **20**
+- Enforce strict limit
+- Prevent further uploads when limit reached
+- Show toast/error message if exceeded
+
+---
+
+## 📊 SOURCE PROGRESS BAR (IMPORTANT UX FEATURE)
+
+Place at top of panel:
+
+### Behavior:
+- Display: `X / 20 Sources`
+- Progress fill = (current / 20)
+
+### Color Logic:
+- 0–70% → primary (blue/neutral)
+- 70–90% → warning (yellow/orange)
+- 90–100% → danger (red)
+
+### UX:
+- Smooth animated transitions
+- Updates on add/remove
+
+---
+
+## 📥 FILE UPLOAD SYSTEM
+
+### Supported Types:
+- Documents: pdf, docx, doc, txt, md
+- Data: csv, xlsx, xls, json, xml
+- Images: jpg, jpeg, png
+
+---
+
+### Upload UI:
+- Drag & drop zone (React Dropzone)
+- Click to upload
+- Highlight on drag hover
+
+---
+
+### Upload Behavior:
+
+On file upload:
+1. Validate file type
+2. Check limit (<=20)
+3. Call backend API: `POST /upload`
+4. Show loading state
+5. On success → add to list
+6. On failure → show error toast
+
+---
+
+### File List UI:
+
+Each file should show:
+- File name
+- File type icon
+- File size
+- Delete button
+
+Optional:
+- Image preview (for jpg/png)
+- Upload status indicator
+
+---
+
+# 💬 RIGHT PANEL — "AXA GovernGPT Agent"
+
+## Header
+**AXA GovernGPT – Data Governance Assistant**
+
+---
+
+## 💬 CHAT WINDOW
+
+- Scrollable message area
+- Full height minus input
+
+### Message Styles:
+- User → right aligned
+- AI → left aligned
+- Clean chat bubbles
+- Optional timestamps
+
+---
+
+## ⌨️ INPUT AREA
+
+- Text input box
+- Send button
+- "Enter to send"
+
+---
+
+## 🔁 CHAT FLOW (REAL API INTEGRATION)
+
+### On Send:
+
+1. Add user message to UI
+2. Show loading / typing indicator
+3. Call backend API:
+
+### POST /chat
+
 Request:
+```json
 {
-  "question": "What PII data is present and how should it be governed?",
-  "use_rag": true,
-  "k": 5
+  "message": "user query",
+  "session_id": "optional",
+  "metadata": {}
 }
-Response:
-{
-  "run_id": "uuid",
-  "question": "...",
-  "answer": "1. **Summary**...",
-  "mode": "RAG",
-  "sources_used": ["claims.csv", "customers.csv"],
-  "chunks_retrieved": 4,
-  "model": "gpt-4o-2024-05-13",
-  "created_at": "...",
-  "duration_seconds": 3.2
-}
-POST /api/query/batch
-Run up to 20 queries in one call.
-GET /api/sources/
-List all ingested source files with governance metadata.
-GET /api/profile/{filename}
-Full statistical profiling of a CSV file — returns column-level stats as JSON.
-GET /api/logs/responses
-Paginated LLM response logs. Params: limit, offset.
-GET /api/logs/chunks
-Paginated chunk metadata logs. Params: limit, offset, source_file.
-GET /api/logs/stats
-Governance dashboard stats — sensitivity distribution, PII count, dept breakdown.
-DELETE /api/reset/
-Clear ChromaDB and SQLite. Loading zone files are preserved.
-GET /health
-System health — vector count, chunk count, sources loaded.
