@@ -1,59 +1,45 @@
-from pathlib import Path
+import requests
+import threading
+import time
+from config import CLIENT_ID, CLIENT_SECRET, TOKEN_URL
 
-# ── AXA SecureGPT ──────────────────────────────────────────────
-CLIENT_ID     = "kGzjDDe6"
-CLIENT_SECRET = "E1aXr1osV0nT5oV8Q3m68HShEp3kYL4ucfjO2b3ex9SUswJIqUGNwVD31PoGoc1w"
-TOKEN_URL     = "https://onelogin.stg.axa.com/as/token.oauth2"
-API_BASE_URL  = "https://api-int.se.axa-go.applications.services.axa-tech.intraxa/ago-m365-securegpt-hub-v1-vrs/providers/openai/"
-CHAT_MODEL    = "gpt-4o-2024-05-13"
-EMBED_MODEL   = "all-MiniLM-L6-v2"
-API_VERSION   = "2024-10-21"
 
-# ── Paths ───────────────────────────────────────────────────────
-BASE_DIR     = Path(__file__).resolve().parent.parent
-LOADING_ZONE = BASE_DIR / "loading_zone"
-CHROMA_DIR   = BASE_DIR / "chroma_db"
-SQLITE_DB    = BASE_DIR / "llm_logs.db"
-MODELS_DIR   = BASE_DIR / "models" / EMBED_MODEL
+class TokenManager:
+    """
+    Thread-safe OAuth2 token manager.
+    Automatically refreshes the token before expiry.
+    """
+    def __init__(self):
+        self._token: str | None = None
+        self._expires_at: float = 0
+        self._lock = threading.Lock()
 
-LOADING_ZONE.mkdir(exist_ok=True)
-CHROMA_DIR.mkdir(exist_ok=True)
+    def _fetch(self) -> dict:
+        payload = (
+            f"grant_type=client_credentials"
+            f"&client_id={CLIENT_ID}"
+            f"&client_secret={CLIENT_SECRET}"
+            f"&scope=urn:grp:chatgpt"
+        )
+        resp = requests.post(
+            TOKEN_URL,
+            data=payload,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            verify=False
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"Token fetch failed [{resp.status_code}]: {resp.text}")
+        return resp.json()
 
-# ── Supported file types ────────────────────────────────────────
-SUPPORTED_EXTENSIONS = {
-    ".pdf", ".docx", ".doc", ".txt", ".csv",
-    ".xlsx", ".xls", ".json", ".xml", ".md",
-    ".jpg", ".jpeg", ".png"
-}
+    def get_token(self) -> str:
+        with self._lock:
+            # Refresh if expired or within 60s of expiry
+            if time.time() >= self._expires_at - 60:
+                data = self._fetch()
+                self._token = data["access_token"]
+                self._expires_at = time.time() + data.get("expires_in", 3600)
+            return self._token
 
-# ── Chunking ────────────────────────────────────────────────────
-CHUNK_SIZE    = 800
-CHUNK_OVERLAP = 100
-RETRIEVAL_K   = 5
 
-# ── Governance taxonomy ─────────────────────────────────────────
-PII_SIGNALS = [
-    "ssn", "aadhar", "aadhaar", "passport", "dob", "date of birth",
-    "bank account", "credit card", "policy number", "claimant id"
-]
-
-SENSITIVITY_TIERS = {
-    "Restricted"   : ["confidential", "restricted", "secret", "internal only"],
-    "Confidential" : ["personal", "private", "sensitive", "medical", "claimant"],
-    "Internal"     : ["internal", "proprietary", "not for distribution"],
-}
-
-DEPARTMENT_SIGNALS = {
-    "Claims"       : ["claim", "loss", "adjuster", "settlement", "payout"],
-    "Underwriting" : ["policy", "premium", "risk", "coverage", "underwrite"],
-    "Compliance"   : ["solvency", "ifrs", "gdpr", "audit", "regulatory"],
-    "HR Analytics" : ["employee", "headcount", "attrition", "hr", "workforce"],
-    "Finance"      : ["revenue", "expense", "budget", "profit", "loss ratio"],
-    "IT / Data"    : ["data", "pipeline", "schema", "database", "api", "etl"],
-}
-
-GOVERNANCE_THEMES = [
-    "data quality", "data lineage", "data contract", "data catalog",
-    "master data", "metadata", "data steward", "data governance",
-    "solvency ii", "ifrs 17", "gdpr", "data retention", "pii",
-]
+# Singleton — import this everywhere
+token_manager = TokenManager()
