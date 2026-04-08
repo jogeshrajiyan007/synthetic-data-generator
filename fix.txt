@@ -1,54 +1,137 @@
-import json
+import uuid
+from datetime import datetime
 from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda
+from langchain_core.output_parsers import StrOutputParser
 from langchain_community.vectorstores import Chroma
-from llm import get_embeddings_singleton
-from config import CHROMA_DIR
+from llm import get_llm
+from db import db_insert
+from config import CHAT_MODEL, RETRIEVAL_K
 
-COLLECTION_NAME = "governance_docs"
+GOVERNANCE_SYSTEM_PROMPT = """\
+You are a Data Governance Expert specialising in the insurance industry.
+Analyse documents and provide structured, actionable governance insights.
+
+When answering, always structure your response with:
+1. **Summary** — What is this document/section about?
+2. **Purpose** — What business or regulatory purpose does it serve?
+3. **Governance Signals** — Data owners, sensitivity, PII, regulatory references, DQ concerns.
+4. **Key Insights** — The 3–5 most important findings for a data governance officer.
+5. **Recommended Actions** — Concrete next steps.
+
+Always cite which source file your insights are drawn from.
+If the answer cannot be found in the context, say so clearly. Do not hallucinate.
+
+Context:
+{context}
+"""
 
 
-def _flatten_metadata(chunk: Document) -> Document:
-    """Chroma rejects list/bool — flatten all metadata values to strings."""
-    flat = {
-        k: (json.dumps(v) if isinstance(v, (list, bool, dict))
-            else str(v) if v is not None else "")
-        for k, v in chunk.metadata.items()
-    }
-    return Document(page_content=chunk.page_content, metadata=flat)
+def _format_docs(docs: list[Document]) -> str:
+    parts = []
+    for doc in docs:
+        src = doc.metadata.get("source_file", "unknown")
+        parts.append(f"[Source: {src}]\n{doc.page_content}")
+    return "\n\n---\n\n".join(parts)
 
 
-def build_vector_store(chunks: list[Document]) -> Chroma:
-    safe_chunks = [_flatten_metadata(c) for c in chunks]
-    embeddings  = get_embeddings_singleton()
-
-    vectordb = Chroma.from_documents(
-        documents=safe_chunks,
-        embedding=embeddings,
-        persist_directory=str(CHROMA_DIR),
-        collection_name=COLLECTION_NAME,
+def build_rag_chain(vectordb: Chroma, k: int = RETRIEVAL_K):
+    base_retriever = vectordb.as_retriever(
+        search_type="mmr",
+        search_kwargs={"k": k * 2, "fetch_k": k * 6}
     )
-    vectordb.persist()
-    return vectordb
 
+    def multi_source_retriever(query: str) -> list[Document]:
+        docs = base_retriever.invoke(query)
+        seen: dict[str, Document] = {}
+        for doc in docs:
+            src = doc.metadata.get("source_file", "unknown")
+            if src not in seen:
+                seen[src] = doc
+        if len(seen) < 2:
+            all_srcs = list({
+                d.metadata.get("source_file", "unknown")
+                for d in vectordb.similarity_search("data governance summary", k=50)
+            })
+            for src in all_srcs:
+                if src not in seen:
+                    results = vectordb.similarity_search(
+                        query, k=2, filter={"source_file": src}
+                    )
+                    if results:
+                        seen[src] = results[0]
+        return list(seen.values())
 
-def load_vector_store() -> Chroma:
-    return Chroma(
-        persist_directory=str(CHROMA_DIR),
-        embedding_function=get_embeddings_singleton(),
-        collection_name=COLLECTION_NAME,
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", GOVERNANCE_SYSTEM_PROMPT),
+        ("human", "{question}")
+    ])
+
+    retriever_runnable = RunnableLambda(multi_source_retriever)
+
+    chain = (
+        {"context": retriever_runnable | _format_docs, "question": RunnablePassthrough()}
+        | prompt
+        | get_llm()
+        | StrOutputParser()
     )
+    return chain, retriever_runnable
 
 
-def add_to_vector_store(vectordb: Chroma, chunks: list[Document]) -> Chroma:
-    """Add new chunks to an existing vector store."""
-    safe_chunks = [_flatten_metadata(c) for c in chunks]
-    vectordb.add_documents(safe_chunks)
-    vectordb.persist()
-    return vectordb
+def query_governance(
+    question: str,
+    vectordb: Chroma,
+    use_rag: bool = True,
+    k: int = RETRIEVAL_K
+) -> dict:
+    """
+    Core query function — called by the FastAPI router.
+    Returns a clean dict suitable for JSON serialisation.
+    """
+    import time
+    start = time.time()
 
+    run_id = str(uuid.uuid4())
+    result = {}
 
-def get_vector_count(vectordb: Chroma) -> int:
-    try:
-        return vectordb._collection.count()
-    except Exception:
-        return 0
+    if use_rag:
+        chain, retriever_runnable = build_rag_chain(vectordb, k=k)
+        retrieved = retriever_runnable.invoke(question)
+        answer    = chain.invoke(question)
+        sources   = list({
+            doc.metadata.get("source_file", "unknown") for doc in retrieved
+        })
+        result = {
+            "run_id"           : run_id,
+            "question"         : question,
+            "answer"           : answer,
+            "mode"             : "RAG",
+            "sources_used"     : sources,
+            "chunks_retrieved" : len(retrieved),
+            "model"            : CHAT_MODEL,
+            "created_at"       : datetime.now().isoformat(),
+            "duration_seconds" : round(time.time() - start, 2),
+        }
+    else:
+        llm    = get_llm()
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are a Data Governance Expert for the insurance industry."),
+            ("human", "{input}")
+        ])
+        response = (prompt | llm).invoke({"input": question})
+        result = {
+            "run_id"           : run_id,
+            "question"         : question,
+            "answer"           : response.content,
+            "mode"             : "direct",
+            "sources_used"     : [],
+            "chunks_retrieved" : 0,
+            "model"            : CHAT_MODEL,
+            "created_at"       : datetime.now().isoformat(),
+            "duration_seconds" : round(time.time() - start, 2),
+        }
+
+    # Log to SQLite
+    db_insert("llm_responses", result)
+    return result
