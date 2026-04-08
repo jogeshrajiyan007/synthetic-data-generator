@@ -1,221 +1,97 @@
+import re
+import uuid
 import json
-import pandas as pd
-from pathlib import Path
+from datetime import datetime
 from langchain_core.documents import Document
-from langchain_community.document_loaders import (
-    PyPDFLoader, TextLoader,
-    UnstructuredWordDocumentLoader,
-    UnstructuredXMLLoader,
-    UnstructuredMarkdownLoader,
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from db import db_insert_batch
+from config import (
+    CHUNK_SIZE, CHUNK_OVERLAP,
+    PII_SIGNALS, SENSITIVITY_TIERS,
+    DEPARTMENT_SIGNALS, GOVERNANCE_THEMES
 )
-from config import LOADING_ZONE, SUPPORTED_EXTENSIONS
 
 
-# ── Format-specific loaders ─────────────────────────────────────
-
-def _load_json(file_path: str) -> list[Document]:
-    with open(file_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return [Document(
-        page_content=json.dumps(data, indent=2),
-        metadata={"source": file_path}
-    )]
+def _detect_sensitivity(text: str) -> str:
+    lower = text.lower()
+    for tier, signals in SENSITIVITY_TIERS.items():
+        if any(s in lower for s in signals):
+            return tier
+    return "Public"
 
 
-def _load_xlsx(file_path: str) -> list[Document]:
-    dfs = pd.read_excel(file_path, sheet_name=None)
-    docs = []
-    for sheet, df in dfs.items():
-        text = f"Sheet: {sheet}\n{df.to_string(index=False)}"
-        docs.append(Document(
-            page_content=text,
-            metadata={"source": file_path, "sheet": sheet}
-        ))
-    return docs
+def _detect_department(text: str) -> str:
+    lower  = text.lower()
+    scores = {
+        dept: sum(1 for s in signals if s in lower)
+        for dept, signals in DEPARTMENT_SIGNALS.items()
+    }
+    best = max(scores, key=scores.get)
+    return best if scores[best] > 0 else "General"
 
 
-def _load_image(file_path: str) -> list[Document]:
-    try:
-        from PIL import Image
-        import pytesseract
-        text = pytesseract.image_to_string(Image.open(file_path))
-        return [Document(page_content=text, metadata={"source": file_path})]
-    except Exception as e:
-        return [Document(
-            page_content=f"[Image OCR failed: {e}]",
-            metadata={"source": file_path}
-        )]
+def _extract_keywords(text: str, top_n: int = 8) -> list[str]:
+    words = re.findall(r"\b[a-zA-Z]{4,}\b", text.lower())
+    stop  = {"that", "this", "with", "from", "have", "been", "will",
+             "they", "their", "which", "were", "also", "more", "than"}
+    counts: dict[str, int] = {}
+    for w in words:
+        if w not in stop:
+            counts[w] = counts.get(w, 0) + 1
+    return sorted(counts, key=counts.get, reverse=True)[:top_n]
 
 
-def _profile_csv(file_path: str) -> list[Document]:
-    """Full statistical profiling — LLM receives computed stats, not raw rows."""
-    df = pd.read_csv(file_path)
-    file_name = Path(file_path).name
-    sections = []
+def _detect_governance_themes(text: str) -> list[str]:
+    lower = text.lower()
+    return [t for t in GOVERNANCE_THEMES if t in lower]
 
-    # Schema overview
-    sections.append(
-        f"FILE: {file_name}\n"
-        f"SHAPE: {df.shape[0]} rows × {df.shape[1]} columns\n"
-        f"COLUMNS: {', '.join(df.columns.tolist())}\n"
-        f"MEMORY USAGE: {df.memory_usage(deep=True).sum() / 1024:.1f} KB"
+
+def enrich_metadata(chunk: Document, chunk_index: int) -> dict:
+    text        = chunk.page_content
+    lower       = text.lower()
+    base        = chunk.metadata
+    contains_pii = any(p in lower for p in PII_SIGNALS)
+
+    return {
+        "doc_id"            : str(uuid.uuid4()),
+        "chunk_index"       : chunk_index,
+        "source_file"       : base.get("source_file", base.get("source", "unknown")),
+        "file_type"         : base.get("file_type", "unknown"),
+        "page"              : base.get("page"),
+        "sheet"             : base.get("sheet"),
+        "first_line"        : text.split("\n")[0][:120].strip() or "—",
+        "char_count"        : len(text),
+        "word_count"        : len(text.split()),
+        "summary"           : text[:200].replace("\n", " "),
+        "keywords"          : _extract_keywords(text),
+        "governance_themes" : _detect_governance_themes(text),
+        "department"        : _detect_department(text),
+        "sensitivity"       : _detect_sensitivity(text),
+        "contains_pii"      : contains_pii,
+        "owner"             : "DAAS DMG",
+        "domain"            : "Insurance",
+        "ingested_at"       : datetime.now().isoformat(),
+        "language"          : "en",
+    }
+
+
+def chunk_and_enrich(raw_documents: list[Document]) -> list[Document]:
+    """Split documents into enriched chunks and persist metadata to SQLite."""
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
+        separators=["\n\n", "\n", ". ", " ", ""]
     )
+    chunks   = splitter.split_documents(raw_documents)
+    enriched = []
+    records  = []
 
-    # Per-column profiles
-    col_profiles = []
-    num_df = df.select_dtypes(include="number")
+    for i, chunk in enumerate(chunks):
+        metadata       = enrich_metadata(chunk, i)
+        chunk.metadata = metadata
+        enriched.append(chunk)
+        records.append(metadata)
 
-    for col in df.columns:
-        series  = df[col]
-        nulls   = int(series.isnull().sum())
-        unique  = int(series.nunique())
-        profile = (
-            f"\nCOLUMN: {col} | dtype: {series.dtype} | "
-            f"nulls: {nulls} ({nulls/len(df)*100:.1f}%) | unique: {unique}"
-        )
-
-        if series.dtype == object or unique <= 20:
-            vc = series.value_counts().head(20)
-            vals = " | ".join(
-                f"{v}: {c} ({c/len(df)*100:.1f}%)" for v, c in vc.items()
-            )
-            profile += f"\n  TYPE: Categorical\n  VALUES: {vals}"
-            if unique > 20:
-                profile += f"\n  (top 20 of {unique})"
-
-        if pd.api.types.is_numeric_dtype(series):
-            desc     = series.describe()
-            mode_val = series.mode().iloc[0] if not series.mode().empty else "N/A"
-            profile += (
-                f"\n  TYPE: Numerical"
-                f"\n  MEAN: {desc['mean']:.4f} | MEDIAN: {series.median():.4f} | MODE: {mode_val}"
-                f"\n  STD: {desc['std']:.4f} | MIN: {desc['min']:.4f} | MAX: {desc['max']:.4f}"
-                f"\n  25th: {desc['25%']:.4f} | 75th: {desc['75%']:.4f}"
-                f"\n  SKEW: {series.skew():.4f} | KURTOSIS: {series.kurt():.4f}"
-            )
-            try:
-                hist = pd.cut(series.dropna(), bins=5).value_counts().sort_index()
-                buckets = " | ".join(f"{k}: {v}" for k, v in hist.items())
-                profile += f"\n  DISTRIBUTION: {buckets}"
-            except Exception:
-                pass
-
-        if "date" in col.lower() or "time" in col.lower():
-            try:
-                parsed = pd.to_datetime(series, errors="coerce")
-                if parsed.notna().sum() > 0:
-                    profile += (
-                        f"\n  TYPE: Date/Time"
-                        f"\n  EARLIEST: {parsed.min()} | LATEST: {parsed.max()}"
-                        f"\n  RANGE: {(parsed.max() - parsed.min()).days} days"
-                    )
-            except Exception:
-                pass
-
-        col_profiles.append(profile)
-
-    sections.append("COLUMN PROFILES:\n" + "\n".join(col_profiles))
-
-    # DQ summary
-    dup_count   = int(df.duplicated().sum())
-    total_nulls = int(df.isnull().sum().sum())
-    sections.append(
-        f"DATA QUALITY:\n"
-        f"DUPLICATE ROWS: {dup_count} ({dup_count/len(df)*100:.1f}%)\n"
-        f"TOTAL NULLS: {total_nulls} ({total_nulls/(df.shape[0]*df.shape[1])*100:.1f}%)\n"
-        f"COLS WITH NULLS: {', '.join(df.columns[df.isnull().any()].tolist()) or 'None'}\n"
-        f"COMPLETE COLS: {', '.join(df.columns[df.isnull().sum()==0].tolist())}"
-    )
-
-    # Correlations
-    if num_df.shape[1] >= 2:
-        corr = num_df.corr().round(3)
-        strong = []
-        for i in range(len(corr.columns)):
-            for j in range(i + 1, len(corr.columns)):
-                val = corr.iloc[i, j]
-                if abs(val) > 0.5:
-                    strong.append(f"{corr.columns[i]} ↔ {corr.columns[j]}: {val:.3f}")
-        if strong:
-            sections.append("STRONG CORRELATIONS:\n" + "\n".join(strong))
-
-    sections.append(
-        f"SAMPLE ROWS (5):\n{df.sample(min(5, len(df))).to_string(index=False)}"
-    )
-
-    full_profile = ("\n\n" + "="*60 + "\n\n").join(sections)
-
-    return [Document(
-        page_content=full_profile,
-        metadata={
-            "source": file_path,
-            "source_file": file_name,
-            "file_type": "csv",
-            "row_count": str(df.shape[0]),
-            "col_count": str(df.shape[1]),
-            "columns": json.dumps(df.columns.tolist()),
-            "numeric_cols": json.dumps(num_df.columns.tolist()),
-            "has_nulls": str(total_nulls > 0),
-            "duplicate_rows": str(dup_count),
-        }
-    )]
-
-
-LOADER_MAP = {
-    ".pdf"  : lambda p: PyPDFLoader(p).load(),
-    ".docx" : lambda p: UnstructuredWordDocumentLoader(p).load(),
-    ".doc"  : lambda p: UnstructuredWordDocumentLoader(p).load(),
-    ".txt"  : lambda p: TextLoader(p, encoding="utf-8").load(),
-    ".csv"  : _profile_csv,
-    ".xlsx" : _load_xlsx,
-    ".xls"  : _load_xlsx,
-    ".json" : _load_json,
-    ".xml"  : lambda p: UnstructuredXMLLoader(p).load(),
-    ".md"   : lambda p: UnstructuredMarkdownLoader(p).load(),
-    ".jpg"  : _load_image,
-    ".jpeg" : _load_image,
-    ".png"  : _load_image,
-}
-
-
-def ingest_loading_zone(folder: Path = LOADING_ZONE) -> tuple[list[Document], list[dict]]:
-    """
-    Scan and load all supported files from the loading zone.
-    Returns (documents, file_details)
-    """
-    files = [f for f in folder.rglob("*") if f.suffix.lower() in SUPPORTED_EXTENSIONS]
-    all_docs: list[Document] = []
-    file_details: list[dict] = []
-
-    for file in files:
-        ext = file.suffix.lower()
-        detail = {"file": file.name, "type": ext, "status": "ok", "docs": 0, "error": None}
-        try:
-            docs = LOADER_MAP[ext](str(file))
-            for doc in docs:
-                doc.metadata.setdefault("source_file", file.name)
-                doc.metadata.setdefault("file_type", ext.lstrip("."))
-            all_docs.extend(docs)
-            detail["docs"] = len(docs)
-        except Exception as e:
-            detail["status"] = "failed"
-            detail["error"]  = str(e)
-        file_details.append(detail)
-
-    return all_docs, file_details
-
-
-def ingest_uploaded_file(file_path: Path) -> tuple[list[Document], dict]:
-    """Ingest a single uploaded file."""
-    ext = file_path.suffix.lower()
-    if ext not in SUPPORTED_EXTENSIONS:
-        return [], {"file": file_path.name, "status": "unsupported", "docs": 0}
-
-    try:
-        docs = LOADER_MAP[ext](str(file_path))
-        for doc in docs:
-            doc.metadata.setdefault("source_file", file_path.name)
-            doc.metadata.setdefault("file_type", ext.lstrip("."))
-        return docs, {"file": file_path.name, "status": "ok", "docs": len(docs)}
-    except Exception as e:
-        return [], {"file": file_path.name, "status": "failed", "error": str(e)}
+    # Batch insert to SQLite
+    db_insert_batch("document_chunks", records)
+    return enriched
