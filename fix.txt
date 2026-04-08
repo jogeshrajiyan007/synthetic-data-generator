@@ -1,45 +1,89 @@
-import requests
-import threading
-import time
-from config import CLIENT_ID, CLIENT_SECRET, TOKEN_URL
+import sqlite3
+import json
+from config import SQLITE_DB
 
 
-class TokenManager:
-    """
-    Thread-safe OAuth2 token manager.
-    Automatically refreshes the token before expiry.
-    """
-    def __init__(self):
-        self._token: str | None = None
-        self._expires_at: float = 0
-        self._lock = threading.Lock()
+def _get_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(str(SQLITE_DB), timeout=30, check_same_thread=False)
+    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.row_factory = sqlite3.Row
+    return conn
 
-    def _fetch(self) -> dict:
-        payload = (
-            f"grant_type=client_credentials"
-            f"&client_id={CLIENT_ID}"
-            f"&client_secret={CLIENT_SECRET}"
-            f"&scope=urn:grp:chatgpt"
+
+def _ensure_table(cursor: sqlite3.Cursor, table: str, record: dict) -> None:
+    cols = ", ".join(f'"{k}" TEXT' for k in record)
+    cursor.execute(f'CREATE TABLE IF NOT EXISTS "{table}" ({cols})')
+    cursor.execute(f'PRAGMA table_info("{table}")')
+    existing = {row[1] for row in cursor.fetchall()}
+    for key in record:
+        if key not in existing:
+            cursor.execute(f'ALTER TABLE "{table}" ADD COLUMN "{key}" TEXT')
+
+
+def db_insert(table: str, record: dict) -> None:
+    flat = {
+        k: (json.dumps(v) if isinstance(v, (dict, list, bool))
+            else str(v) if v is not None else None)
+        for k, v in record.items()
+    }
+    with _get_conn() as conn:
+        cursor = conn.cursor()
+        _ensure_table(cursor, table, flat)
+        placeholders = ", ".join("?" for _ in flat)
+        cols = ", ".join(f'"{k}"' for k in flat)
+        cursor.execute(
+            f'INSERT INTO "{table}" ({cols}) VALUES ({placeholders})',
+            list(flat.values())
         )
-        resp = requests.post(
-            TOKEN_URL,
-            data=payload,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            verify=False
-        )
-        if resp.status_code != 200:
-            raise RuntimeError(f"Token fetch failed [{resp.status_code}]: {resp.text}")
-        return resp.json()
-
-    def get_token(self) -> str:
-        with self._lock:
-            # Refresh if expired or within 60s of expiry
-            if time.time() >= self._expires_at - 60:
-                data = self._fetch()
-                self._token = data["access_token"]
-                self._expires_at = time.time() + data.get("expires_in", 3600)
-            return self._token
+        conn.commit()
 
 
-# Singleton — import this everywhere
-token_manager = TokenManager()
+def db_insert_batch(table: str, records: list[dict]) -> None:
+    if not records:
+        return
+    with _get_conn() as conn:
+        cursor = conn.cursor()
+        for record in records:
+            flat = {
+                k: (json.dumps(v) if isinstance(v, (dict, list, bool))
+                    else str(v) if v is not None else None)
+                for k, v in record.items()
+            }
+            _ensure_table(cursor, table, flat)
+            placeholders = ", ".join("?" for _ in flat)
+            cols = ", ".join(f'"{k}"' for k in flat)
+            cursor.execute(
+                f'INSERT INTO "{table}" ({cols}) VALUES ({placeholders})',
+                list(flat.values())
+            )
+        conn.commit()
+
+
+def db_query(sql: str, params: tuple = ()) -> list[dict]:
+    with _get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(sql, params)
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def db_query_table(table: str, limit: int = 100, offset: int = 0) -> list[dict]:
+    return db_query(
+        f'SELECT * FROM "{table}" ORDER BY rowid DESC LIMIT ? OFFSET ?',
+        (limit, offset)
+    )
+
+
+def db_table_exists(table: str) -> bool:
+    rows = db_query(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table,)
+    )
+    return len(rows) > 0
+
+
+def db_count(table: str) -> int:
+    if not db_table_exists(table):
+        return 0
+    rows = db_query(f'SELECT COUNT(*) as cnt FROM "{table}"')
+    return rows[0]["cnt"] if rows else 0
