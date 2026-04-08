@@ -1,97 +1,54 @@
-import re
-import uuid
 import json
-from datetime import datetime
 from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from db import db_insert_batch
-from config import (
-    CHUNK_SIZE, CHUNK_OVERLAP,
-    PII_SIGNALS, SENSITIVITY_TIERS,
-    DEPARTMENT_SIGNALS, GOVERNANCE_THEMES
-)
+from langchain_community.vectorstores import Chroma
+from llm import get_embeddings_singleton
+from config import CHROMA_DIR
+
+COLLECTION_NAME = "governance_docs"
 
 
-def _detect_sensitivity(text: str) -> str:
-    lower = text.lower()
-    for tier, signals in SENSITIVITY_TIERS.items():
-        if any(s in lower for s in signals):
-            return tier
-    return "Public"
-
-
-def _detect_department(text: str) -> str:
-    lower  = text.lower()
-    scores = {
-        dept: sum(1 for s in signals if s in lower)
-        for dept, signals in DEPARTMENT_SIGNALS.items()
+def _flatten_metadata(chunk: Document) -> Document:
+    """Chroma rejects list/bool — flatten all metadata values to strings."""
+    flat = {
+        k: (json.dumps(v) if isinstance(v, (list, bool, dict))
+            else str(v) if v is not None else "")
+        for k, v in chunk.metadata.items()
     }
-    best = max(scores, key=scores.get)
-    return best if scores[best] > 0 else "General"
+    return Document(page_content=chunk.page_content, metadata=flat)
 
 
-def _extract_keywords(text: str, top_n: int = 8) -> list[str]:
-    words = re.findall(r"\b[a-zA-Z]{4,}\b", text.lower())
-    stop  = {"that", "this", "with", "from", "have", "been", "will",
-             "they", "their", "which", "were", "also", "more", "than"}
-    counts: dict[str, int] = {}
-    for w in words:
-        if w not in stop:
-            counts[w] = counts.get(w, 0) + 1
-    return sorted(counts, key=counts.get, reverse=True)[:top_n]
+def build_vector_store(chunks: list[Document]) -> Chroma:
+    safe_chunks = [_flatten_metadata(c) for c in chunks]
+    embeddings  = get_embeddings_singleton()
 
-
-def _detect_governance_themes(text: str) -> list[str]:
-    lower = text.lower()
-    return [t for t in GOVERNANCE_THEMES if t in lower]
-
-
-def enrich_metadata(chunk: Document, chunk_index: int) -> dict:
-    text        = chunk.page_content
-    lower       = text.lower()
-    base        = chunk.metadata
-    contains_pii = any(p in lower for p in PII_SIGNALS)
-
-    return {
-        "doc_id"            : str(uuid.uuid4()),
-        "chunk_index"       : chunk_index,
-        "source_file"       : base.get("source_file", base.get("source", "unknown")),
-        "file_type"         : base.get("file_type", "unknown"),
-        "page"              : base.get("page"),
-        "sheet"             : base.get("sheet"),
-        "first_line"        : text.split("\n")[0][:120].strip() or "—",
-        "char_count"        : len(text),
-        "word_count"        : len(text.split()),
-        "summary"           : text[:200].replace("\n", " "),
-        "keywords"          : _extract_keywords(text),
-        "governance_themes" : _detect_governance_themes(text),
-        "department"        : _detect_department(text),
-        "sensitivity"       : _detect_sensitivity(text),
-        "contains_pii"      : contains_pii,
-        "owner"             : "DAAS DMG",
-        "domain"            : "Insurance",
-        "ingested_at"       : datetime.now().isoformat(),
-        "language"          : "en",
-    }
-
-
-def chunk_and_enrich(raw_documents: list[Document]) -> list[Document]:
-    """Split documents into enriched chunks and persist metadata to SQLite."""
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
-        separators=["\n\n", "\n", ". ", " ", ""]
+    vectordb = Chroma.from_documents(
+        documents=safe_chunks,
+        embedding=embeddings,
+        persist_directory=str(CHROMA_DIR),
+        collection_name=COLLECTION_NAME,
     )
-    chunks   = splitter.split_documents(raw_documents)
-    enriched = []
-    records  = []
+    vectordb.persist()
+    return vectordb
 
-    for i, chunk in enumerate(chunks):
-        metadata       = enrich_metadata(chunk, i)
-        chunk.metadata = metadata
-        enriched.append(chunk)
-        records.append(metadata)
 
-    # Batch insert to SQLite
-    db_insert_batch("document_chunks", records)
-    return enriched
+def load_vector_store() -> Chroma:
+    return Chroma(
+        persist_directory=str(CHROMA_DIR),
+        embedding_function=get_embeddings_singleton(),
+        collection_name=COLLECTION_NAME,
+    )
+
+
+def add_to_vector_store(vectordb: Chroma, chunks: list[Document]) -> Chroma:
+    """Add new chunks to an existing vector store."""
+    safe_chunks = [_flatten_metadata(c) for c in chunks]
+    vectordb.add_documents(safe_chunks)
+    vectordb.persist()
+    return vectordb
+
+
+def get_vector_count(vectordb: Chroma) -> int:
+    try:
+        return vectordb._collection.count()
+    except Exception:
+        return 0
