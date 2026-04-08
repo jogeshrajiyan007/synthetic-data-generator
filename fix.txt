@@ -1,94 +1,53 @@
-import shutil
-import time
-from pathlib import Path
-from fastapi import APIRouter, UploadFile, File, HTTPException
-from services.ingestion import ingest_loading_zone, ingest_uploaded_file
-from services.chunking import chunk_and_enrich
-from services.vectorstore import build_vector_store, add_to_vector_store, load_vector_store
-from models.schemas import IngestResponse
-from config import LOADING_ZONE, SUPPORTED_EXTENSIONS
-from datetime import datetime
+from fastapi import APIRouter, HTTPException
+from services.rag import query_governance
+from services.vectorstore import load_vector_store
+from models.schemas import QueryRequest, QueryResponse
 
-router = APIRouter(prefix="/api/ingest", tags=["Ingestion"])
+router = APIRouter(prefix="/api/query", tags=["Query"])
 
 
-@router.post("/", response_model=IngestResponse)
-async def ingest_loading_zone_endpoint():
-    """
-    Trigger full ingestion of all files currently in the loading_zone/ folder.
-    Rebuilds the vector store from scratch.
-    """
-    start = time.time()
-    raw_docs, file_details = ingest_loading_zone()
-
-    if not raw_docs:
+def _get_vectordb():
+    try:
+        return load_vector_store()
+    except Exception:
         raise HTTPException(
-            status_code=404,
-            detail="No supported files found in loading_zone/. Upload files first."
+            status_code=503,
+            detail="Vector store not initialised. Please call POST /api/ingest first."
         )
 
-    chunks  = chunk_and_enrich(raw_docs)
-    vectordb = build_vector_store(chunks)
 
-    return IngestResponse(
-        status="success",
-        files_processed=sum(1 for f in file_details if f["status"] == "ok"),
-        files_failed=sum(1 for f in file_details if f["status"] == "failed"),
-        total_chunks=len(chunks),
-        total_vectors=len(chunks),
-        file_details=file_details,
-        duration_seconds=round(time.time() - start, 2),
-        ingested_at=datetime.now().isoformat()
-    )
-
-
-@router.post("/upload", response_model=IngestResponse)
-async def upload_and_ingest(files: list[UploadFile] = File(...)):
+@router.post("/", response_model=QueryResponse)
+async def query_endpoint(request: QueryRequest):
     """
-    Upload one or more files, save to loading_zone/, and ingest them
-    into the existing vector store (incremental — does not rebuild).
+    Send a governance question. Returns a structured answer with sources.
     """
-    start        = time.time()
-    file_details = []
-    all_chunks   = []
-
-    for upload in files:
-        suffix = Path(upload.filename).suffix.lower()
-        if suffix not in SUPPORTED_EXTENSIONS:
-            file_details.append({
-                "file": upload.filename,
-                "status": "unsupported",
-                "docs": 0,
-                "error": f"Extension {suffix} not supported"
-            })
-            continue
-
-        dest = LOADING_ZONE / upload.filename
-        with open(dest, "wb") as f:
-            shutil.copyfileobj(upload.file, f)
-
-        docs, detail = ingest_uploaded_file(dest)
-        file_details.append(detail)
-
-        if docs:
-            chunks = chunk_and_enrich(docs)
-            all_chunks.extend(chunks)
-
-    if all_chunks:
-        try:
-            vectordb = load_vector_store()
-            add_to_vector_store(vectordb, all_chunks)
-        except Exception:
-            # No existing store — build fresh
-            build_vector_store(all_chunks)
-
-    return IngestResponse(
-        status="success",
-        files_processed=sum(1 for f in file_details if f.get("status") == "ok"),
-        files_failed=sum(1 for f in file_details if f.get("status") in ("failed", "unsupported")),
-        total_chunks=len(all_chunks),
-        total_vectors=len(all_chunks),
-        file_details=file_details,
-        duration_seconds=round(time.time() - start, 2),
-        ingested_at=datetime.now().isoformat()
+    vectordb = _get_vectordb()
+    result   = query_governance(
+        question=request.question,
+        vectordb=vectordb,
+        use_rag=request.use_rag,
+        k=request.k
     )
+    return QueryResponse(**result)
+
+
+@router.post("/batch", response_model=list[QueryResponse])
+async def batch_query(requests: list[QueryRequest]):
+    """
+    Run multiple queries in sequence. Useful for running the default
+    governance assessment set programmatically.
+    """
+    if len(requests) > 20:
+        raise HTTPException(status_code=400, detail="Max 20 queries per batch.")
+
+    vectordb = _get_vectordb()
+    results  = []
+    for req in requests:
+        result = query_governance(
+            question=req.question,
+            vectordb=vectordb,
+            use_rag=req.use_rag,
+            k=req.k
+        )
+        results.append(QueryResponse(**result))
+    return results
