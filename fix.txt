@@ -1,74 +1,99 @@
+import urllib3
+from contextlib import asynccontextmanager
+from datetime import datetime
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-## PART 1 — DATA PROFILING & NORMALISATION ASSESSMENT
+from routers.all_routers import (
+    sources_router, logs_router,
+    profile_router, reset_router
+)
+from routers.ingest import router as ingest_router
+from routers.query  import router as query_router
+from services.vectorstore import load_vector_store, get_vector_count
+from db import db_count, db_table_exists
+from models.schemas import HealthResponse
 
-For each dataset/source file:
-1. Identify the current normal form it is in (1NF, 2NF, 3NF or Unnormalised)
-2. Identify any normalisation violations:
-   - Repeating groups or multi-valued columns (1NF violations)
-   - Partial dependencies on composite keys (2NF violations)
-   - Transitive dependencies between non-key columns (3NF violations)
-3. Propose the normalisation steps required to bring it to 3NF
-4. Identify any candidate keys, primary keys, and foreign keys
+# Suppress corporate SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
----
 
-## PART 2 — DIMENSIONAL DATA MODEL (Star Schema)
+# ── Startup / shutdown ──────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("🏛️  Data Governance RAG API starting...")
+    # Pre-load embeddings model on startup (avoids cold start on first query)
+    from llm import get_embeddings_singleton
+    get_embeddings_singleton()
+    print("✅ Embeddings model loaded.")
+    yield
+    print("👋 Shutting down.")
 
-Based on all datasets combined, propose a Star Schema with:
 
-FACT TABLES — identify measurable, transactional entities:
-- Table name
-- Grain (what does one row represent?)
-- All measure/metric columns (numeric, additive facts)
-- All foreign keys to dimension tables
-- Suggested partitioning column
+# ── App ──────────────────────────────────────────────────────────
+app = FastAPI(
+    title="Data Governance RAG API",
+    description=(
+        "AI-powered Data Governance framework for the insurance industry. "
+        "Reads unstructured documents and generates governance intelligence "
+        "using RAG over AXA SecureGPT (GPT-4o)."
+    ),
+    version="1.0.0",
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
 
-DIMENSION TABLES — identify descriptive, slowly changing entities:
-- Table name
-- Natural key and surrogate key
-- All descriptive attributes
-- SCD Type recommendation (SCD1 / SCD2 / SCD3) with justification
-- Conformed dimensions (shared across multiple fact tables)
+# ── CORS — allow the React frontend ─────────────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
----
+# ── Routers ──────────────────────────────────────────────────────
+app.include_router(ingest_router)
+app.include_router(query_router)
+app.include_router(sources_router)
+app.include_router(logs_router)
+app.include_router(profile_router)
+app.include_router(reset_router)
 
-## PART 3 — SOURCE TO TARGET MAPPING (STTM)
 
-For each source column across all datasets, provide a mapping in this exact format:
+# ── Health check ─────────────────────────────────────────────────
+@app.get("/health", response_model=HealthResponse, tags=["Health"])
+async def health():
+    chroma_count  = 0
+    sources_count = 0
+    try:
+        vdb = load_vector_store()
+        chroma_count = get_vector_count(vdb)
+        if db_table_exists("document_chunks"):
+            from db import db_query
+            sources_count = len(db_query(
+                "SELECT DISTINCT source_file FROM document_chunks"
+            ))
+    except Exception:
+        pass
 
-| Source File | Source Column | Source Data Type | Transformation Logic | Target Table | Target Column | Target Data Type | Key Type | Nullable |
-|-------------|--------------|-----------------|---------------------|--------------|--------------|-----------------|----------|----------|
+    return HealthResponse(
+        status="healthy",
+        version="1.0.0",
+        chroma_vectors=chroma_count,
+        sqlite_chunks=db_count("document_chunks"),
+        sqlite_responses=db_count("llm_responses"),
+        sources_loaded=sources_count,
+        timestamp=datetime.now().isoformat()
+    )
 
-Transformation logic should include:
-- Direct mapping (no change)
-- Derived columns (formula or rule)
-- Lookup/reference joins
-- Data type casting
-- Null handling strategy
-- Standardisation rules (date formats, string casing, etc.)
 
----
-
-## PART 4 — DATA GOVERNANCE TAGGING FOR THE MODEL
-
-For the proposed data model:
-1. Flag which columns contain PII and recommended masking strategy
-2. Flag regulatory relevance (GDPR, Solvency II, IFRS 17) per table
-3. Recommend data retention period per table
-4. Identify which columns should be part of a Data Contract
-5. Suggest data quality rules (not null, referential integrity, range checks, format checks) per table
-
----
-
-## PART 5 — IMPLEMENTATION RECOMMENDATIONS
-
-1. Recommended layered architecture (Bronze / Silver / Gold or Raw / Cleansed / Curated)
-2. Suggested technology stack for each layer based on an insurance enterprise context
-3. Incremental load strategy per fact table (Full Load / Incremental / CDC)
-4. Suggested indexing strategy per table
-
----
-
-Be specific, use actual column names from the source data, and base all recommendations 
-strictly on what exists in the provided datasets. Do not generalise — map every column.
-"""
+@app.get("/", tags=["Health"])
+async def root():
+    return {
+        "service": "Data Governance RAG API",
+        "version": "1.0.0",
+        "docs"   : "/docs",
+        "health" : "/health"
+    }
