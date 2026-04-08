@@ -1,107 +1,221 @@
-from pydantic import BaseModel, Field
-from typing import Any
-from datetime import datetime
+import json
+import pandas as pd
+from pathlib import Path
+from langchain_core.documents import Document
+from langchain_community.document_loaders import (
+    PyPDFLoader, TextLoader,
+    UnstructuredWordDocumentLoader,
+    UnstructuredXMLLoader,
+    UnstructuredMarkdownLoader,
+)
+from config import LOADING_ZONE, SUPPORTED_EXTENSIONS
 
 
-# ── Ingest ──────────────────────────────────────────────────────
+# ── Format-specific loaders ─────────────────────────────────────
 
-class IngestResponse(BaseModel):
-    status: str
-    files_processed: int
-    files_failed: int
-    total_chunks: int
-    total_vectors: int
-    file_details: list[dict]
-    duration_seconds: float
-    ingested_at: str
+def _load_json(file_path: str) -> list[Document]:
+    with open(file_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return [Document(
+        page_content=json.dumps(data, indent=2),
+        metadata={"source": file_path}
+    )]
 
 
-# ── Query ───────────────────────────────────────────────────────
-
-class QueryRequest(BaseModel):
-    question: str = Field(..., min_length=3, max_length=2000)
-    use_rag: bool = True
-    k: int = Field(default=5, ge=1, le=20)
-
-
-class QueryResponse(BaseModel):
-    run_id: str
-    question: str
-    answer: str
-    mode: str
-    sources_used: list[str]
-    chunks_retrieved: int
-    model: str
-    created_at: str
-    duration_seconds: float
+def _load_xlsx(file_path: str) -> list[Document]:
+    dfs = pd.read_excel(file_path, sheet_name=None)
+    docs = []
+    for sheet, df in dfs.items():
+        text = f"Sheet: {sheet}\n{df.to_string(index=False)}"
+        docs.append(Document(
+            page_content=text,
+            metadata={"source": file_path, "sheet": sheet}
+        ))
+    return docs
 
 
-# ── Sources ─────────────────────────────────────────────────────
-
-class SourceFile(BaseModel):
-    source_file: str
-    file_type: str
-    chunk_count: int
-    department: str
-    sensitivity: str
-    pii_chunks: int
-    ingested_at: str
-
-
-class SourcesResponse(BaseModel):
-    total_sources: int
-    total_chunks: int
-    sources: list[SourceFile]
+def _load_image(file_path: str) -> list[Document]:
+    try:
+        from PIL import Image
+        import pytesseract
+        text = pytesseract.image_to_string(Image.open(file_path))
+        return [Document(page_content=text, metadata={"source": file_path})]
+    except Exception as e:
+        return [Document(
+            page_content=f"[Image OCR failed: {e}]",
+            metadata={"source": file_path}
+        )]
 
 
-# ── Profile ─────────────────────────────────────────────────────
+def _profile_csv(file_path: str) -> list[Document]:
+    """Full statistical profiling — LLM receives computed stats, not raw rows."""
+    df = pd.read_csv(file_path)
+    file_name = Path(file_path).name
+    sections = []
 
-class ColumnProfile(BaseModel):
-    column_name: str
-    dtype: str
-    null_count: int
-    null_pct: float
-    unique_count: int
-    col_type: str
-    stats: dict[str, Any]
+    # Schema overview
+    sections.append(
+        f"FILE: {file_name}\n"
+        f"SHAPE: {df.shape[0]} rows × {df.shape[1]} columns\n"
+        f"COLUMNS: {', '.join(df.columns.tolist())}\n"
+        f"MEMORY USAGE: {df.memory_usage(deep=True).sum() / 1024:.1f} KB"
+    )
+
+    # Per-column profiles
+    col_profiles = []
+    num_df = df.select_dtypes(include="number")
+
+    for col in df.columns:
+        series  = df[col]
+        nulls   = int(series.isnull().sum())
+        unique  = int(series.nunique())
+        profile = (
+            f"\nCOLUMN: {col} | dtype: {series.dtype} | "
+            f"nulls: {nulls} ({nulls/len(df)*100:.1f}%) | unique: {unique}"
+        )
+
+        if series.dtype == object or unique <= 20:
+            vc = series.value_counts().head(20)
+            vals = " | ".join(
+                f"{v}: {c} ({c/len(df)*100:.1f}%)" for v, c in vc.items()
+            )
+            profile += f"\n  TYPE: Categorical\n  VALUES: {vals}"
+            if unique > 20:
+                profile += f"\n  (top 20 of {unique})"
+
+        if pd.api.types.is_numeric_dtype(series):
+            desc     = series.describe()
+            mode_val = series.mode().iloc[0] if not series.mode().empty else "N/A"
+            profile += (
+                f"\n  TYPE: Numerical"
+                f"\n  MEAN: {desc['mean']:.4f} | MEDIAN: {series.median():.4f} | MODE: {mode_val}"
+                f"\n  STD: {desc['std']:.4f} | MIN: {desc['min']:.4f} | MAX: {desc['max']:.4f}"
+                f"\n  25th: {desc['25%']:.4f} | 75th: {desc['75%']:.4f}"
+                f"\n  SKEW: {series.skew():.4f} | KURTOSIS: {series.kurt():.4f}"
+            )
+            try:
+                hist = pd.cut(series.dropna(), bins=5).value_counts().sort_index()
+                buckets = " | ".join(f"{k}: {v}" for k, v in hist.items())
+                profile += f"\n  DISTRIBUTION: {buckets}"
+            except Exception:
+                pass
+
+        if "date" in col.lower() or "time" in col.lower():
+            try:
+                parsed = pd.to_datetime(series, errors="coerce")
+                if parsed.notna().sum() > 0:
+                    profile += (
+                        f"\n  TYPE: Date/Time"
+                        f"\n  EARLIEST: {parsed.min()} | LATEST: {parsed.max()}"
+                        f"\n  RANGE: {(parsed.max() - parsed.min()).days} days"
+                    )
+            except Exception:
+                pass
+
+        col_profiles.append(profile)
+
+    sections.append("COLUMN PROFILES:\n" + "\n".join(col_profiles))
+
+    # DQ summary
+    dup_count   = int(df.duplicated().sum())
+    total_nulls = int(df.isnull().sum().sum())
+    sections.append(
+        f"DATA QUALITY:\n"
+        f"DUPLICATE ROWS: {dup_count} ({dup_count/len(df)*100:.1f}%)\n"
+        f"TOTAL NULLS: {total_nulls} ({total_nulls/(df.shape[0]*df.shape[1])*100:.1f}%)\n"
+        f"COLS WITH NULLS: {', '.join(df.columns[df.isnull().any()].tolist()) or 'None'}\n"
+        f"COMPLETE COLS: {', '.join(df.columns[df.isnull().sum()==0].tolist())}"
+    )
+
+    # Correlations
+    if num_df.shape[1] >= 2:
+        corr = num_df.corr().round(3)
+        strong = []
+        for i in range(len(corr.columns)):
+            for j in range(i + 1, len(corr.columns)):
+                val = corr.iloc[i, j]
+                if abs(val) > 0.5:
+                    strong.append(f"{corr.columns[i]} ↔ {corr.columns[j]}: {val:.3f}")
+        if strong:
+            sections.append("STRONG CORRELATIONS:\n" + "\n".join(strong))
+
+    sections.append(
+        f"SAMPLE ROWS (5):\n{df.sample(min(5, len(df))).to_string(index=False)}"
+    )
+
+    full_profile = ("\n\n" + "="*60 + "\n\n").join(sections)
+
+    return [Document(
+        page_content=full_profile,
+        metadata={
+            "source": file_path,
+            "source_file": file_name,
+            "file_type": "csv",
+            "row_count": str(df.shape[0]),
+            "col_count": str(df.shape[1]),
+            "columns": json.dumps(df.columns.tolist()),
+            "numeric_cols": json.dumps(num_df.columns.tolist()),
+            "has_nulls": str(total_nulls > 0),
+            "duplicate_rows": str(dup_count),
+        }
+    )]
 
 
-class FileProfileResponse(BaseModel):
-    source_file: str
-    row_count: int
-    col_count: int
-    duplicate_rows: int
-    total_nulls: int
-    columns: list[ColumnProfile]
-    strong_correlations: list[dict]
-    governance: dict[str, Any]
+LOADER_MAP = {
+    ".pdf"  : lambda p: PyPDFLoader(p).load(),
+    ".docx" : lambda p: UnstructuredWordDocumentLoader(p).load(),
+    ".doc"  : lambda p: UnstructuredWordDocumentLoader(p).load(),
+    ".txt"  : lambda p: TextLoader(p, encoding="utf-8").load(),
+    ".csv"  : _profile_csv,
+    ".xlsx" : _load_xlsx,
+    ".xls"  : _load_xlsx,
+    ".json" : _load_json,
+    ".xml"  : lambda p: UnstructuredXMLLoader(p).load(),
+    ".md"   : lambda p: UnstructuredMarkdownLoader(p).load(),
+    ".jpg"  : _load_image,
+    ".jpeg" : _load_image,
+    ".png"  : _load_image,
+}
 
 
-# ── Logs ────────────────────────────────────────────────────────
+def ingest_loading_zone(folder: Path = LOADING_ZONE) -> tuple[list[Document], list[dict]]:
+    """
+    Scan and load all supported files from the loading zone.
+    Returns (documents, file_details)
+    """
+    files = [f for f in folder.rglob("*") if f.suffix.lower() in SUPPORTED_EXTENSIONS]
+    all_docs: list[Document] = []
+    file_details: list[dict] = []
 
-class LogsResponse(BaseModel):
-    table: str
-    total_records: int
-    limit: int
-    offset: int
-    records: list[dict]
+    for file in files:
+        ext = file.suffix.lower()
+        detail = {"file": file.name, "type": ext, "status": "ok", "docs": 0, "error": None}
+        try:
+            docs = LOADER_MAP[ext](str(file))
+            for doc in docs:
+                doc.metadata.setdefault("source_file", file.name)
+                doc.metadata.setdefault("file_type", ext.lstrip("."))
+            all_docs.extend(docs)
+            detail["docs"] = len(docs)
+        except Exception as e:
+            detail["status"] = "failed"
+            detail["error"]  = str(e)
+        file_details.append(detail)
+
+    return all_docs, file_details
 
 
-# ── Reset ───────────────────────────────────────────────────────
+def ingest_uploaded_file(file_path: Path) -> tuple[list[Document], dict]:
+    """Ingest a single uploaded file."""
+    ext = file_path.suffix.lower()
+    if ext not in SUPPORTED_EXTENSIONS:
+        return [], {"file": file_path.name, "status": "unsupported", "docs": 0}
 
-class ResetResponse(BaseModel):
-    status: str
-    message: str
-    cleared: list[str]
-
-
-# ── Health ──────────────────────────────────────────────────────
-
-class HealthResponse(BaseModel):
-    status: str
-    version: str
-    chroma_vectors: int
-    sqlite_chunks: int
-    sqlite_responses: int
-    sources_loaded: int
-    timestamp: str
+    try:
+        docs = LOADER_MAP[ext](str(file_path))
+        for doc in docs:
+            doc.metadata.setdefault("source_file", file_path.name)
+            doc.metadata.setdefault("file_type", ext.lstrip("."))
+        return docs, {"file": file_path.name, "status": "ok", "docs": len(docs)}
+    except Exception as e:
+        return [], {"file": file_path.name, "status": "failed", "error": str(e)}
