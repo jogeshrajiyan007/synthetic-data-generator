@@ -1,177 +1,52 @@
-# 🚀 AXA GovernGPT – Next.js Application Prompt
-
-You are a senior full-stack developer. Build a modern, production-ready Next.js application named **AXA GovernGPT**, a Data Governance RAG (Retrieval-Augmented Generation) platform for AXA Insurance.
-
----
-
-## 🧠 Application Overview
-
-**AXA GovernGPT** is an AI-powered data governance assistant that allows users to:
-- Upload enterprise data sources (documents, structured files, images)
-- Interact with an AI agent to query, understand, and govern data
-
----
-
-## 🛠️ Tech Stack
-
-- Next.js (App Router)
-- TypeScript
-- Tailwind CSS
-- ShadCN UI
-- Zustand (or React Context)
-- React Dropzone (for uploads)
-
----
-
-## 🧩 Layout
-
-### Two-panel responsive layout:
-
-| Left Panel (Sources) | Right Panel (Chat) |
-|---------------------|--------------------|
-| 25–30% width        | 70–75% width       |
-
----
-
-## 📂 LEFT PANEL — Sources
-
-### Header
-**AXA GovernGPT • Sources**
-
----
-
-### 🔢 Source Limit
-
-- Maximum allowed sources: **20 files**
-- Prevent uploads beyond limit
-- Show error message if exceeded
-
----
-
-### 📊 Source Progress Indicator
-
-Add a progress bar at the top:
-
-- Display: `X / 20 Sources`
-- Dynamic fill based on number of uploaded files
-
-#### Color Rules:
-- 0–70% → primary color
-- 70–90% → warning (yellow/orange)
-- 90–100% → danger (red)
-
----
-
-### 📥 Upload Features
-
-#### Supported File Types:
-- Documents: `pdf, docx, doc, txt, md`
-- Data: `csv, xlsx, xls, json, xml`
-- Images: `jpg, jpeg, png`
-
-#### Features:
-- Drag & drop upload
-- Click to upload
-- File list display:
-  - Name
-  - Type icon
-  - Size
-  - Delete button
-
-#### Optional:
-- Upload progress per file
-- Image preview
-
----
-
-## 💬 RIGHT PANEL — AXA GovernGPT Agent
-
-### Header
-**AXA GovernGPT – Data Governance Assistant**
-
----
-
-### Chat Window
-
-- Scrollable
-- User messages → right aligned
-- AI messages → left aligned
-
----
-
-### Input Area
-
-- Text input
-- Send button
-- Enter to send
-
----
-
-### Optional
-
-- Attach uploaded sources as context (simulate RAG)
-- Typing indicator
-
----
-
-## ⚙️ Functional Requirements
-
-- Maintain:
-  - Uploaded files state
-  - Chat history
-
-- Enforce:
-  - Max 20 files
-  - Disable upload at limit
-
-- On message send:
-  1. Add user message
-  2. Simulate AI response (delay)
-
----
-
-## 🧱 Component Structure
-
-components/
-SourcePanel.tsx
-SourceProgressBar.tsx
-UploadDropzone.tsx
-FileItem.tsx
-ChatWindow.tsx
-MessageBubble.tsx
-
----
-
-## 🎨 UI/UX
-
-- Modern enterprise design
-- Rounded corners (2xl)
-- Soft shadows
-- Clean spacing
-- Responsive:
-  - Desktop → side-by-side
-  - Mobile → stacked
-
----
-
-## 🚀 Bonus
-
-- Persist state (localStorage)
-- File type icons
-- Image preview modal
-- Loading spinner
-
----
-
-## 📦 Deliverables
-
-- Fully working code
-- Clean architecture
-- Modular components
-- Production-ready UI
-
----
-
-## 🧠 Important
-
-Ensure the application reflects an **enterprise-grade AI governance platform** suitable for AXA GovernGPT.
+API Reference
+POST /api/ingest/
+Ingest all files currently in loading_zone/. Rebuilds vector store.
+Response:
+{
+  "status": "success",
+  "files_processed": 4,
+  "files_failed": 0,
+  "total_chunks": 4000,
+  "total_vectors": 4000,
+  "file_details": [...],
+  "duration_seconds": 12.4,
+  "ingested_at": "2026-04-08T10:00:00"
+}
+POST /api/ingest/upload
+Upload files directly via multipart form. Adds to existing vector store (incremental).
+POST /api/query/
+Ask a governance question.
+Request:
+{
+  "question": "What PII data is present and how should it be governed?",
+  "use_rag": true,
+  "k": 5
+}
+Response:
+{
+  "run_id": "uuid",
+  "question": "...",
+  "answer": "1. **Summary**...",
+  "mode": "RAG",
+  "sources_used": ["claims.csv", "customers.csv"],
+  "chunks_retrieved": 4,
+  "model": "gpt-4o-2024-05-13",
+  "created_at": "...",
+  "duration_seconds": 3.2
+}
+POST /api/query/batch
+Run up to 20 queries in one call.
+GET /api/sources/
+List all ingested source files with governance metadata.
+GET /api/profile/{filename}
+Full statistical profiling of a CSV file — returns column-level stats as JSON.
+GET /api/logs/responses
+Paginated LLM response logs. Params: limit, offset.
+GET /api/logs/chunks
+Paginated chunk metadata logs. Params: limit, offset, source_file.
+GET /api/logs/stats
+Governance dashboard stats — sensitivity distribution, PII count, dept breakdown.
+DELETE /api/reset/
+Clear ChromaDB and SQLite. Loading zone files are preserved.
+GET /health
+System health — vector count, chunk count, sources loaded.
