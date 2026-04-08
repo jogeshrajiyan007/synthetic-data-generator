@@ -1,29 +1,86 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.0
-python-multipart==0.0.9
+🏛️ Data Governance RAG API
+AI-powered Data Governance framework for the insurance industry.
+Quick Start
+# Install dependencies
+pip install -r requirements.txt
 
-langchain==0.3.0
-langchain-core==0.3.0
-langchain-openai==0.2.0
-langchain-community==0.3.0
-langchain-huggingface==0.1.0
-langchain-text-splitters==0.3.0
-
-chromadb==0.5.0
-sentence-transformers==3.0.0
-
-openai==1.50.0
-httpx==0.27.0
-requests==2.32.0
-
-pandas==2.2.0
-openpyxl==3.1.0
-pypdf==4.3.0
-unstructured==0.15.0
-python-docx==1.1.0
-pillow==10.4.0
-pytesseract==0.3.10
-lxml==5.2.0
-
-pydantic==2.9.0
-python-dotenv==1.0.0
+# Start the API
+cd backend
+uvicorn main:app --reload --port 8000
+Open http://localhost:8000/docs for the interactive Swagger UI.
+API Reference
+POST /api/ingest/
+Ingest all files currently in loading_zone/. Rebuilds vector store.
+Response:
+{
+  "status": "success",
+  "files_processed": 4,
+  "files_failed": 0,
+  "total_chunks": 4000,
+  "total_vectors": 4000,
+  "file_details": [...],
+  "duration_seconds": 12.4,
+  "ingested_at": "2026-04-08T10:00:00"
+}
+POST /api/ingest/upload
+Upload files directly via multipart form. Adds to existing vector store (incremental).
+POST /api/query/
+Ask a governance question.
+Request:
+{
+  "question": "What PII data is present and how should it be governed?",
+  "use_rag": true,
+  "k": 5
+}
+Response:
+{
+  "run_id": "uuid",
+  "question": "...",
+  "answer": "1. **Summary**...",
+  "mode": "RAG",
+  "sources_used": ["claims.csv", "customers.csv"],
+  "chunks_retrieved": 4,
+  "model": "gpt-4o-2024-05-13",
+  "created_at": "...",
+  "duration_seconds": 3.2
+}
+POST /api/query/batch
+Run up to 20 queries in one call.
+GET /api/sources/
+List all ingested source files with governance metadata.
+GET /api/profile/{filename}
+Full statistical profiling of a CSV file — returns column-level stats as JSON.
+GET /api/logs/responses
+Paginated LLM response logs. Params: limit, offset.
+GET /api/logs/chunks
+Paginated chunk metadata logs. Params: limit, offset, source_file.
+GET /api/logs/stats
+Governance dashboard stats — sensitivity distribution, PII count, dept breakdown.
+DELETE /api/reset/
+Clear ChromaDB and SQLite. Loading zone files are preserved.
+GET /health
+System health — vector count, chunk count, sources loaded.
+Folder Structure
+data_governance_app/
+├── backend/
+│   ├── main.py           ← FastAPI entry point
+│   ├── config.py         ← All constants
+│   ├── auth.py           ← Token manager
+│   ├── llm.py            ← LLM + embeddings
+│   ├── db.py             ← Dynamic SQLite logger
+│   ├── services/
+│   │   ├── ingestion.py  ← File loaders + CSV profiler
+│   │   ├── chunking.py   ← Splitter + metadata enrichment
+│   │   ├── vectorstore.py← ChromaDB
+│   │   └── rag.py        ← RAG chain + query engine
+│   ├── routers/
+│   │   ├── ingest.py
+│   │   ├── query.py
+│   │   └── all_routers.py
+│   └── models/
+│       └── schemas.py    ← Pydantic models
+├── loading_zone/         ← Drop files here
+├── chroma_db/            ← Auto-created
+├── models/               ← HuggingFace local model
+├── llm_logs.db           ← Auto-created
+└── requirements.txt
