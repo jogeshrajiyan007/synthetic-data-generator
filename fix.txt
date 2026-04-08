@@ -1,53 +1,232 @@
-from fastapi import APIRouter, HTTPException
-from services.rag import query_governance
-from services.vectorstore import load_vector_store
-from models.schemas import QueryRequest, QueryResponse
+import json
+import shutil
+import pandas as pd
+from pathlib import Path
+from fastapi import APIRouter, HTTPException, Query
+from db import db_query, db_count, db_table_exists
+from services.vectorstore import load_vector_store, get_vector_count
+from models.schemas import SourcesResponse, SourceFile, LogsResponse, ResetResponse, FileProfileResponse, ColumnProfile
+from config import LOADING_ZONE, CHROMA_DIR, SQLITE_DB
 
-router = APIRouter(prefix="/api/query", tags=["Query"])
+# ── Sources router ──────────────────────────────────────────────
+sources_router = APIRouter(prefix="/api/sources", tags=["Sources"])
 
+@sources_router.get("/", response_model=SourcesResponse)
+async def list_sources():
+    """List all ingested source files with governance metadata summary."""
+    if not db_table_exists("document_chunks"):
+        return SourcesResponse(total_sources=0, total_chunks=0, sources=[])
 
-def _get_vectordb():
-    try:
-        return load_vector_store()
-    except Exception:
-        raise HTTPException(
-            status_code=503,
-            detail="Vector store not initialised. Please call POST /api/ingest first."
-        )
+    rows = db_query("""
+        SELECT
+            source_file,
+            file_type,
+            COUNT(*) as chunk_count,
+            MAX(department) as department,
+            MAX(sensitivity) as sensitivity,
+            SUM(CASE WHEN contains_pii = 'True' THEN 1 ELSE 0 END) as pii_chunks,
+            MAX(ingested_at) as ingested_at
+        FROM document_chunks
+        GROUP BY source_file
+        ORDER BY ingested_at DESC
+    """)
 
+    sources = [SourceFile(**r) for r in rows]
+    total_chunks = sum(s.chunk_count for s in sources)
 
-@router.post("/", response_model=QueryResponse)
-async def query_endpoint(request: QueryRequest):
-    """
-    Send a governance question. Returns a structured answer with sources.
-    """
-    vectordb = _get_vectordb()
-    result   = query_governance(
-        question=request.question,
-        vectordb=vectordb,
-        use_rag=request.use_rag,
-        k=request.k
+    return SourcesResponse(
+        total_sources=len(sources),
+        total_chunks=total_chunks,
+        sources=sources
     )
-    return QueryResponse(**result)
 
 
-@router.post("/batch", response_model=list[QueryResponse])
-async def batch_query(requests: list[QueryRequest]):
-    """
-    Run multiple queries in sequence. Useful for running the default
-    governance assessment set programmatically.
-    """
-    if len(requests) > 20:
-        raise HTTPException(status_code=400, detail="Max 20 queries per batch.")
+# ── Logs router ─────────────────────────────────────────────────
+logs_router = APIRouter(prefix="/api/logs", tags=["Logs"])
 
-    vectordb = _get_vectordb()
-    results  = []
-    for req in requests:
-        result = query_governance(
-            question=req.question,
-            vectordb=vectordb,
-            use_rag=req.use_rag,
-            k=req.k
+@logs_router.get("/responses", response_model=LogsResponse)
+async def get_llm_logs(
+    limit:  int = Query(default=20, ge=1, le=200),
+    offset: int = Query(default=0,  ge=0)
+):
+    """Fetch paginated LLM response logs."""
+    total = db_count("llm_responses")
+    rows  = db_query(
+        "SELECT * FROM llm_responses ORDER BY rowid DESC LIMIT ? OFFSET ?",
+        (limit, offset)
+    )
+    return LogsResponse(table="llm_responses", total_records=total,
+                        limit=limit, offset=offset, records=rows)
+
+
+@logs_router.get("/chunks", response_model=LogsResponse)
+async def get_chunk_logs(
+    limit:  int = Query(default=50,  ge=1, le=500),
+    offset: int = Query(default=0,   ge=0),
+    source_file: str = Query(default=None)
+):
+    """Fetch paginated document chunk metadata logs."""
+    total = db_count("document_chunks")
+    if source_file:
+        rows = db_query(
+            "SELECT * FROM document_chunks WHERE source_file=? ORDER BY chunk_index LIMIT ? OFFSET ?",
+            (source_file, limit, offset)
         )
-        results.append(QueryResponse(**result))
-    return results
+    else:
+        rows = db_query(
+            "SELECT * FROM document_chunks ORDER BY rowid DESC LIMIT ? OFFSET ?",
+            (limit, offset)
+        )
+    return LogsResponse(table="document_chunks", total_records=total,
+                        limit=limit, offset=offset, records=rows)
+
+
+@logs_router.get("/stats")
+async def get_stats():
+    """High-level statistics across all logs."""
+    if not db_table_exists("document_chunks"):
+        return {"message": "No data ingested yet."}
+
+    sensitivity_dist = db_query("""
+        SELECT sensitivity, COUNT(*) as count
+        FROM document_chunks GROUP BY sensitivity
+    """)
+    dept_dist = db_query("""
+        SELECT department, COUNT(*) as count
+        FROM document_chunks GROUP BY department ORDER BY count DESC
+    """)
+    pii_count = db_query("""
+        SELECT COUNT(*) as pii_chunks FROM document_chunks WHERE contains_pii='True'
+    """)[0]["pii_chunks"]
+    total_chunks    = db_count("document_chunks")
+    total_responses = db_count("llm_responses")
+
+    return {
+        "total_chunks"        : total_chunks,
+        "total_llm_responses" : total_responses,
+        "pii_chunks"          : pii_count,
+        "pii_percentage"      : round(int(pii_count) / total_chunks * 100, 1) if total_chunks else 0,
+        "sensitivity_distribution" : sensitivity_dist,
+        "department_distribution"  : dept_dist,
+    }
+
+
+# ── Profile router ──────────────────────────────────────────────
+profile_router = APIRouter(prefix="/api/profile", tags=["Profile"])
+
+@profile_router.get("/{filename}", response_model=FileProfileResponse)
+async def profile_file(filename: str):
+    """
+    On-demand full statistical profiling of a CSV file in the loading zone.
+    Returns structured column-level stats as JSON.
+    """
+    file_path = LOADING_ZONE / filename
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"{filename} not found in loading zone.")
+    if file_path.suffix.lower() != ".csv":
+        raise HTTPException(status_code=400, detail="Profile endpoint only supports CSV files.")
+
+    df      = pd.read_csv(file_path)
+    num_df  = df.select_dtypes(include="number")
+    dup     = int(df.duplicated().sum())
+    nulls   = int(df.isnull().sum().sum())
+    columns = []
+
+    for col in df.columns:
+        series = df[col]
+        stats  = {}
+
+        if pd.api.types.is_numeric_dtype(series):
+            desc = series.describe()
+            stats = {
+                "mean"   : round(float(desc["mean"]), 4),
+                "median" : round(float(series.median()), 4),
+                "mode"   : float(series.mode().iloc[0]) if not series.mode().empty else None,
+                "std"    : round(float(desc["std"]), 4),
+                "min"    : round(float(desc["min"]), 4),
+                "max"    : round(float(desc["max"]), 4),
+                "p25"    : round(float(desc["25%"]), 4),
+                "p75"    : round(float(desc["75%"]), 4),
+                "skew"   : round(float(series.skew()), 4),
+                "kurt"   : round(float(series.kurt()), 4),
+            }
+            col_type = "numerical"
+        elif series.dtype == object or series.nunique() <= 20:
+            vc = series.value_counts().head(20)
+            stats = {
+                "value_counts": {str(k): int(v) for k, v in vc.items()},
+                "value_percentages": {
+                    str(k): round(int(v) / len(df) * 100, 1)
+                    for k, v in vc.items()
+                }
+            }
+            col_type = "categorical"
+        else:
+            col_type = "text"
+
+        columns.append(ColumnProfile(
+            column_name  = col,
+            dtype        = str(series.dtype),
+            null_count   = int(series.isnull().sum()),
+            null_pct     = round(series.isnull().sum() / len(df) * 100, 2),
+            unique_count = int(series.nunique()),
+            col_type     = col_type,
+            stats        = stats
+        ))
+
+    # Correlations
+    strong = []
+    if num_df.shape[1] >= 2:
+        corr = num_df.corr().round(3)
+        for i in range(len(corr.columns)):
+            for j in range(i + 1, len(corr.columns)):
+                val = corr.iloc[i, j]
+                if abs(val) > 0.5:
+                    strong.append({
+                        "col_a": corr.columns[i],
+                        "col_b": corr.columns[j],
+                        "r"    : round(float(val), 3)
+                    })
+
+    return FileProfileResponse(
+        source_file        = filename,
+        row_count          = df.shape[0],
+        col_count          = df.shape[1],
+        duplicate_rows     = dup,
+        total_nulls        = nulls,
+        columns            = columns,
+        strong_correlations= strong,
+        governance={
+            "pii_risk_columns": [
+                c.column_name for c in columns
+                if any(p in c.column_name.lower() for p in ["id", "name", "dob", "ssn", "email", "phone"])
+            ],
+            "sensitivity": "Confidential" if nulls == 0 else "Internal",
+            "completeness_pct": round((1 - nulls / (df.shape[0] * df.shape[1])) * 100, 2)
+        }
+    )
+
+
+# ── Reset router ─────────────────────────────────────────────────
+reset_router = APIRouter(prefix="/api/reset", tags=["Reset"])
+
+@reset_router.delete("/", response_model=ResetResponse)
+async def reset_all():
+    """⚠️ Delete ChromaDB vectors and SQLite logs. Loading zone files are preserved."""
+    cleared = []
+    try:
+        if CHROMA_DIR.exists():
+            shutil.rmtree(CHROMA_DIR)
+            CHROMA_DIR.mkdir(exist_ok=True)
+            cleared.append("chroma_db")
+        if SQLITE_DB.exists():
+            SQLITE_DB.unlink()
+            cleared.append("llm_logs.db")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return ResetResponse(
+        status="success",
+        message="Vector store and logs cleared. Loading zone files preserved. Re-run /api/ingest to rebuild.",
+        cleared=cleared
+    )
