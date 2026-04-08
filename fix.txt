@@ -1,99 +1,59 @@
-import urllib3
-from contextlib import asynccontextmanager
-from datetime import datetime
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from pathlib import Path
 
-from routers.all_routers import (
-    sources_router, logs_router,
-    profile_router, reset_router
-)
-from routers.ingest import router as ingest_router
-from routers.query  import router as query_router
-from services.vectorstore import load_vector_store, get_vector_count
-from db import db_count, db_table_exists
-from models.schemas import HealthResponse
+# ── AXA SecureGPT ──────────────────────────────────────────────
+CLIENT_ID     = "kGzjDDe6"
+CLIENT_SECRET = "E1aXr1osV0nT5oV8Q3m68HShEp3kYL4ucfjO2b3ex9SUswJIqUGNwVD31PoGoc1w"
+TOKEN_URL     = "https://onelogin.stg.axa.com/as/token.oauth2"
+API_BASE_URL  = "https://api-int.se.axa-go.applications.services.axa-tech.intraxa/ago-m365-securegpt-hub-v1-vrs/providers/openai/"
+CHAT_MODEL    = "gpt-4o-2024-05-13"
+EMBED_MODEL   = "all-MiniLM-L6-v2"
+API_VERSION   = "2024-10-21"
 
-# Suppress corporate SSL warnings
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# ── Paths ───────────────────────────────────────────────────────
+BASE_DIR     = Path(__file__).resolve().parent.parent
+LOADING_ZONE = BASE_DIR / "loading_zone"
+CHROMA_DIR   = BASE_DIR / "chroma_db"
+SQLITE_DB    = BASE_DIR / "llm_logs.db"
+MODELS_DIR   = BASE_DIR / "models" / EMBED_MODEL
 
+LOADING_ZONE.mkdir(exist_ok=True)
+CHROMA_DIR.mkdir(exist_ok=True)
 
-# ── Startup / shutdown ──────────────────────────────────────────
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    print("🏛️  Data Governance RAG API starting...")
-    # Pre-load embeddings model on startup (avoids cold start on first query)
-    from llm import get_embeddings_singleton
-    get_embeddings_singleton()
-    print("✅ Embeddings model loaded.")
-    yield
-    print("👋 Shutting down.")
+# ── Supported file types ────────────────────────────────────────
+SUPPORTED_EXTENSIONS = {
+    ".pdf", ".docx", ".doc", ".txt", ".csv",
+    ".xlsx", ".xls", ".json", ".xml", ".md",
+    ".jpg", ".jpeg", ".png"
+}
 
+# ── Chunking ────────────────────────────────────────────────────
+CHUNK_SIZE    = 800
+CHUNK_OVERLAP = 100
+RETRIEVAL_K   = 5
 
-# ── App ──────────────────────────────────────────────────────────
-app = FastAPI(
-    title="Data Governance RAG API",
-    description=(
-        "AI-powered Data Governance framework for the insurance industry. "
-        "Reads unstructured documents and generates governance intelligence "
-        "using RAG over AXA SecureGPT (GPT-4o)."
-    ),
-    version="1.0.0",
-    lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc"
-)
+# ── Governance taxonomy ─────────────────────────────────────────
+PII_SIGNALS = [
+    "ssn", "aadhar", "aadhaar", "passport", "dob", "date of birth",
+    "bank account", "credit card", "policy number", "claimant id"
+]
 
-# ── CORS — allow the React frontend ─────────────────────────────
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+SENSITIVITY_TIERS = {
+    "Restricted"   : ["confidential", "restricted", "secret", "internal only"],
+    "Confidential" : ["personal", "private", "sensitive", "medical", "claimant"],
+    "Internal"     : ["internal", "proprietary", "not for distribution"],
+}
 
-# ── Routers ──────────────────────────────────────────────────────
-app.include_router(ingest_router)
-app.include_router(query_router)
-app.include_router(sources_router)
-app.include_router(logs_router)
-app.include_router(profile_router)
-app.include_router(reset_router)
+DEPARTMENT_SIGNALS = {
+    "Claims"       : ["claim", "loss", "adjuster", "settlement", "payout"],
+    "Underwriting" : ["policy", "premium", "risk", "coverage", "underwrite"],
+    "Compliance"   : ["solvency", "ifrs", "gdpr", "audit", "regulatory"],
+    "HR Analytics" : ["employee", "headcount", "attrition", "hr", "workforce"],
+    "Finance"      : ["revenue", "expense", "budget", "profit", "loss ratio"],
+    "IT / Data"    : ["data", "pipeline", "schema", "database", "api", "etl"],
+}
 
-
-# ── Health check ─────────────────────────────────────────────────
-@app.get("/health", response_model=HealthResponse, tags=["Health"])
-async def health():
-    chroma_count  = 0
-    sources_count = 0
-    try:
-        vdb = load_vector_store()
-        chroma_count = get_vector_count(vdb)
-        if db_table_exists("document_chunks"):
-            from db import db_query
-            sources_count = len(db_query(
-                "SELECT DISTINCT source_file FROM document_chunks"
-            ))
-    except Exception:
-        pass
-
-    return HealthResponse(
-        status="healthy",
-        version="1.0.0",
-        chroma_vectors=chroma_count,
-        sqlite_chunks=db_count("document_chunks"),
-        sqlite_responses=db_count("llm_responses"),
-        sources_loaded=sources_count,
-        timestamp=datetime.now().isoformat()
-    )
-
-
-@app.get("/", tags=["Health"])
-async def root():
-    return {
-        "service": "Data Governance RAG API",
-        "version": "1.0.0",
-        "docs"   : "/docs",
-        "health" : "/health"
-    }
+GOVERNANCE_THEMES = [
+    "data quality", "data lineage", "data contract", "data catalog",
+    "master data", "metadata", "data steward", "data governance",
+    "solvency ii", "ifrs 17", "gdpr", "data retention", "pii",
+]
