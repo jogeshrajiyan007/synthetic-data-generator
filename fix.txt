@@ -1,137 +1,94 @@
-import uuid
+import shutil
+import time
+from pathlib import Path
+from fastapi import APIRouter, UploadFile, File, HTTPException
+from services.ingestion import ingest_loading_zone, ingest_uploaded_file
+from services.chunking import chunk_and_enrich
+from services.vectorstore import build_vector_store, add_to_vector_store, load_vector_store
+from models.schemas import IngestResponse
+from config import LOADING_ZONE, SUPPORTED_EXTENSIONS
 from datetime import datetime
-from langchain_core.documents import Document
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough, RunnableLambda
-from langchain_core.output_parsers import StrOutputParser
-from langchain_community.vectorstores import Chroma
-from llm import get_llm
-from db import db_insert
-from config import CHAT_MODEL, RETRIEVAL_K
 
-GOVERNANCE_SYSTEM_PROMPT = """\
-You are a Data Governance Expert specialising in the insurance industry.
-Analyse documents and provide structured, actionable governance insights.
-
-When answering, always structure your response with:
-1. **Summary** — What is this document/section about?
-2. **Purpose** — What business or regulatory purpose does it serve?
-3. **Governance Signals** — Data owners, sensitivity, PII, regulatory references, DQ concerns.
-4. **Key Insights** — The 3–5 most important findings for a data governance officer.
-5. **Recommended Actions** — Concrete next steps.
-
-Always cite which source file your insights are drawn from.
-If the answer cannot be found in the context, say so clearly. Do not hallucinate.
-
-Context:
-{context}
-"""
+router = APIRouter(prefix="/api/ingest", tags=["Ingestion"])
 
 
-def _format_docs(docs: list[Document]) -> str:
-    parts = []
-    for doc in docs:
-        src = doc.metadata.get("source_file", "unknown")
-        parts.append(f"[Source: {src}]\n{doc.page_content}")
-    return "\n\n---\n\n".join(parts)
-
-
-def build_rag_chain(vectordb: Chroma, k: int = RETRIEVAL_K):
-    base_retriever = vectordb.as_retriever(
-        search_type="mmr",
-        search_kwargs={"k": k * 2, "fetch_k": k * 6}
-    )
-
-    def multi_source_retriever(query: str) -> list[Document]:
-        docs = base_retriever.invoke(query)
-        seen: dict[str, Document] = {}
-        for doc in docs:
-            src = doc.metadata.get("source_file", "unknown")
-            if src not in seen:
-                seen[src] = doc
-        if len(seen) < 2:
-            all_srcs = list({
-                d.metadata.get("source_file", "unknown")
-                for d in vectordb.similarity_search("data governance summary", k=50)
-            })
-            for src in all_srcs:
-                if src not in seen:
-                    results = vectordb.similarity_search(
-                        query, k=2, filter={"source_file": src}
-                    )
-                    if results:
-                        seen[src] = results[0]
-        return list(seen.values())
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", GOVERNANCE_SYSTEM_PROMPT),
-        ("human", "{question}")
-    ])
-
-    retriever_runnable = RunnableLambda(multi_source_retriever)
-
-    chain = (
-        {"context": retriever_runnable | _format_docs, "question": RunnablePassthrough()}
-        | prompt
-        | get_llm()
-        | StrOutputParser()
-    )
-    return chain, retriever_runnable
-
-
-def query_governance(
-    question: str,
-    vectordb: Chroma,
-    use_rag: bool = True,
-    k: int = RETRIEVAL_K
-) -> dict:
+@router.post("/", response_model=IngestResponse)
+async def ingest_loading_zone_endpoint():
     """
-    Core query function — called by the FastAPI router.
-    Returns a clean dict suitable for JSON serialisation.
+    Trigger full ingestion of all files currently in the loading_zone/ folder.
+    Rebuilds the vector store from scratch.
     """
-    import time
     start = time.time()
+    raw_docs, file_details = ingest_loading_zone()
 
-    run_id = str(uuid.uuid4())
-    result = {}
+    if not raw_docs:
+        raise HTTPException(
+            status_code=404,
+            detail="No supported files found in loading_zone/. Upload files first."
+        )
 
-    if use_rag:
-        chain, retriever_runnable = build_rag_chain(vectordb, k=k)
-        retrieved = retriever_runnable.invoke(question)
-        answer    = chain.invoke(question)
-        sources   = list({
-            doc.metadata.get("source_file", "unknown") for doc in retrieved
-        })
-        result = {
-            "run_id"           : run_id,
-            "question"         : question,
-            "answer"           : answer,
-            "mode"             : "RAG",
-            "sources_used"     : sources,
-            "chunks_retrieved" : len(retrieved),
-            "model"            : CHAT_MODEL,
-            "created_at"       : datetime.now().isoformat(),
-            "duration_seconds" : round(time.time() - start, 2),
-        }
-    else:
-        llm    = get_llm()
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are a Data Governance Expert for the insurance industry."),
-            ("human", "{input}")
-        ])
-        response = (prompt | llm).invoke({"input": question})
-        result = {
-            "run_id"           : run_id,
-            "question"         : question,
-            "answer"           : response.content,
-            "mode"             : "direct",
-            "sources_used"     : [],
-            "chunks_retrieved" : 0,
-            "model"            : CHAT_MODEL,
-            "created_at"       : datetime.now().isoformat(),
-            "duration_seconds" : round(time.time() - start, 2),
-        }
+    chunks  = chunk_and_enrich(raw_docs)
+    vectordb = build_vector_store(chunks)
 
-    # Log to SQLite
-    db_insert("llm_responses", result)
-    return result
+    return IngestResponse(
+        status="success",
+        files_processed=sum(1 for f in file_details if f["status"] == "ok"),
+        files_failed=sum(1 for f in file_details if f["status"] == "failed"),
+        total_chunks=len(chunks),
+        total_vectors=len(chunks),
+        file_details=file_details,
+        duration_seconds=round(time.time() - start, 2),
+        ingested_at=datetime.now().isoformat()
+    )
+
+
+@router.post("/upload", response_model=IngestResponse)
+async def upload_and_ingest(files: list[UploadFile] = File(...)):
+    """
+    Upload one or more files, save to loading_zone/, and ingest them
+    into the existing vector store (incremental — does not rebuild).
+    """
+    start        = time.time()
+    file_details = []
+    all_chunks   = []
+
+    for upload in files:
+        suffix = Path(upload.filename).suffix.lower()
+        if suffix not in SUPPORTED_EXTENSIONS:
+            file_details.append({
+                "file": upload.filename,
+                "status": "unsupported",
+                "docs": 0,
+                "error": f"Extension {suffix} not supported"
+            })
+            continue
+
+        dest = LOADING_ZONE / upload.filename
+        with open(dest, "wb") as f:
+            shutil.copyfileobj(upload.file, f)
+
+        docs, detail = ingest_uploaded_file(dest)
+        file_details.append(detail)
+
+        if docs:
+            chunks = chunk_and_enrich(docs)
+            all_chunks.extend(chunks)
+
+    if all_chunks:
+        try:
+            vectordb = load_vector_store()
+            add_to_vector_store(vectordb, all_chunks)
+        except Exception:
+            # No existing store — build fresh
+            build_vector_store(all_chunks)
+
+    return IngestResponse(
+        status="success",
+        files_processed=sum(1 for f in file_details if f.get("status") == "ok"),
+        files_failed=sum(1 for f in file_details if f.get("status") in ("failed", "unsupported")),
+        total_chunks=len(all_chunks),
+        total_vectors=len(all_chunks),
+        file_details=file_details,
+        duration_seconds=round(time.time() - start, 2),
+        ingested_at=datetime.now().isoformat()
+    )
