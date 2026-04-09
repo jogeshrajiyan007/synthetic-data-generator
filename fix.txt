@@ -1,200 +1,179 @@
-@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=Source+Sans+3:wght@300;400;500;600&family=Source+Code+Pro:wght@400;500&display=swap');
+'use client'
+import { useState } from 'react'
+import { motion } from 'framer-motion'
+import { Plus, Search, Shield, Activity } from 'lucide-react'
+import { SessionCard } from './SessionCard'
+import { CreateSessionModal } from './CreateSessionModal'
+import type { KnowledgeSet } from '@/types'
+import { cn } from '@/lib/utils'
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-:root {
-  --font-display: 'Source Serif 4', Georgia, serif;
-  --font-body: 'Source Sans 3', system-ui, sans-serif;
-  --font-mono: 'Source Code Pro', 'Courier New', monospace;
-
-  /* AXA brand tokens */
-  --axa-blue:      #00008F;
-  --axa-blue-dark: #00006B;
-  --axa-blue-light:#E8E8FF;
-  --axa-red:       #FF1721;
-  --axa-red-light: #FFF0F0;
-  --axa-white:     #FFFFFF;
-  --axa-bg:        #F5F6F8;
-  --axa-border:    #E2E4ED;
-  --axa-text:      #1A1A2E;
-  --axa-muted:     #6B6B8A;
+interface SessionGridProps {
+  sessions: KnowledgeSet[]
+  onCreate: (name: string, summary: string) => void
+  onOpen: (id: string) => void
+  onDelete: (id: string) => void
 }
 
-* { box-sizing: border-box; }
-html { scroll-behavior: smooth; }
+export function SessionGrid({ sessions, onCreate, onOpen, onDelete }: SessionGridProps) {
+  const [isModalOpen, setIsModalOpen] = useState(false)
+  const [search, setSearch] = useState('')
 
-body {
-  background-color: var(--axa-bg);
-  color: var(--axa-text);
-  font-family: var(--font-body);
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
+  const filtered = sessions.filter(s =>
+    s.project_name.toLowerCase().includes(search.toLowerCase()) ||
+    s.summary?.toLowerCase().includes(search.toLowerCase())
+  )
 
-/* Scrollbar — AXA blue tinted */
-::-webkit-scrollbar { width: 4px; height: 4px; }
-::-webkit-scrollbar-track { background: #F5F6F8; }
-::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 143, 0.2);
-  border-radius: 2px;
-}
-::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 143, 0.35); }
+  return (
+    <div className="min-h-screen bg-ink-50">
+      {/* Top nav bar */}
+      <header className="bg-white border-b border-ink-100 sticky top-0 z-30">
+        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+          {/* AXA Logo + product name */}
+          <div className="flex items-center gap-3">
+            {/* AXA Logo mark */}
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 bg-axa-800 rounded-lg flex items-center justify-center">
+                <span className="text-white font-display font-bold text-sm leading-none">AXA</span>
+              </div>
+              <div className="w-px h-6 bg-ink-200" />
+              <div>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-display text-lg text-ink-800 leading-none">GovernGPT</span>
+                  <span className="axa-badge">Beta</span>
+                </div>
+                <p className="text-[10px] text-ink-400 mt-0.5">Data Governance Intelligence</p>
+              </div>
+            </div>
+          </div>
 
-/* Selection */
-::selection {
-  background: rgba(0, 0, 143, 0.12);
-  color: #00008F;
-}
+          {/* Status + new project */}
+          <div className="flex items-center gap-3">
+            <div className="hidden md:flex items-center gap-2 text-xs text-ink-400 bg-ink-50 border border-ink-100 px-3 py-1.5 rounded-lg">
+              <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+              <span>Connected</span>
+            </div>
+            <button
+              onClick={() => setIsModalOpen(true)}
+              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-axa-800 text-white text-sm font-medium hover:bg-axa-700 transition-colors shadow-axa"
+            >
+              <Plus className="w-4 h-4" />
+              New Project
+            </button>
+          </div>
+        </div>
+      </header>
 
-/* Focus rings */
-*:focus-visible {
-  outline: 2px solid rgba(0, 0, 143, 0.4);
-  outline-offset: 2px;
-}
+      {/* Page content */}
+      <div className="max-w-7xl mx-auto px-6 pt-10 pb-16">
 
-/* Typography */
-.font-display { font-family: var(--font-display); }
-.font-mono    { font-family: var(--font-mono); }
+        {/* Hero section */}
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4 }}
+          className="mb-10"
+        >
+          <div className="flex items-center gap-2 mb-2">
+            <Activity className="w-4 h-4 text-axa-800" />
+            <span className="text-axa-800 text-xs font-semibold uppercase tracking-widest">Knowledge Sets</span>
+          </div>
+          <h1 className="font-display text-4xl text-ink-900 mb-2 leading-tight">
+            Your Governance <span className="text-axa-shimmer">Projects</span>
+          </h1>
+          <p className="text-ink-500 text-sm max-w-xl leading-relaxed">
+            Each project is an isolated knowledge set. Upload enterprise data sources and query them with AI-powered governance intelligence built for insurance.
+          </p>
+        </motion.div>
 
-/* AXA card — white with subtle blue shadow */
-.axa-card {
-  background: #FFFFFF;
-  border: 1px solid var(--axa-border);
-  border-radius: 12px;
-  box-shadow: 0 1px 4px rgba(0,0,143,0.05), 0 4px 16px rgba(0,0,143,0.05);
-}
+        {/* Toolbar */}
+        <motion.div
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.1, duration: 0.35 }}
+          className="flex items-center gap-3 mb-8"
+        >
+          <div className="relative flex-1 max-w-sm">
+            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-400" />
+            <input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Search projects…"
+              className="w-full bg-white border border-ink-200 rounded-lg pl-10 pr-4 py-2.5 text-sm text-ink-700 placeholder-ink-400 focus:outline-none focus:border-axa-400 focus:ring-2 focus:ring-axa-50 transition-all"
+            />
+          </div>
+          <span className="text-ink-400 text-sm">
+            {filtered.length} {filtered.length === 1 ? 'project' : 'projects'}
+          </span>
+        </motion.div>
 
-/* AXA panel — slightly off-white */
-.axa-panel {
-  background: #FFFFFF;
-  border-right: 1px solid var(--axa-border);
-}
+        {/* Grid */}
+        {filtered.length === 0 && sessions.length === 0 ? (
+          <EmptyState onNew={() => setIsModalOpen(true)} />
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            {filtered.map((session, i) => (
+              <SessionCard
+                key={session.id}
+                session={session}
+                index={i}
+                onOpen={onOpen}
+                onDelete={onDelete}
+              />
+            ))}
 
-/* Blue shimmer text */
-.text-axa-shimmer {
-  background: linear-gradient(90deg, #00008F, #4040C0, #00008F);
-  background-size: 200%;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  animation: shimmer 3s linear infinite;
-}
+            {/* New project card */}
+            <motion.button
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: filtered.length * 0.05 + 0.05 }}
+              onClick={() => setIsModalOpen(true)}
+              className={cn(
+                'h-52 rounded-xl border-2 border-dashed border-ink-200 text-ink-400',
+                'hover:border-axa-300 hover:text-axa-700 hover:bg-axa-50/50',
+                'transition-all duration-200 flex flex-col items-center justify-center gap-3',
+                'group cursor-pointer bg-white'
+              )}
+            >
+              <div className="w-10 h-10 rounded-lg border-2 border-dashed border-current flex items-center justify-center group-hover:scale-110 transition-transform">
+                <Plus className="w-5 h-5" />
+              </div>
+              <span className="text-sm font-medium">Start New Project</span>
+            </motion.button>
+          </div>
+        )}
+      </div>
 
-@keyframes shimmer {
-  0%   { background-position: 0% center; }
-  100% { background-position: 200% center; }
-}
-
-/* AXA blue badge */
-.axa-badge {
-  background: var(--axa-blue-light);
-  color: var(--axa-blue);
-  border: 1px solid rgba(0,0,143,0.15);
-  font-size: 0.7rem;
-  padding: 2px 8px;
-  border-radius: 99px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-
-/* AXA red badge */
-.axa-badge-red {
-  background: var(--axa-red-light);
-  color: var(--axa-red);
-  border: 1px solid rgba(255,23,33,0.15);
-}
-
-/* Prose styles for AI markdown responses */
-.prose-governance {
-  color: #2D2D45;
-  font-size: 0.9rem;
-  line-height: 1.75;
-}
-.prose-governance strong {
-  color: #00008F;
-  font-weight: 600;
-}
-.prose-governance h1,
-.prose-governance h2,
-.prose-governance h3 {
-  color: #1A1A2E;
-  font-family: var(--font-display);
-  font-weight: 600;
-  margin-top: 1.2em;
-  margin-bottom: 0.5em;
-  border-bottom: 1px solid #E8E8FF;
-  padding-bottom: 0.3em;
-}
-.prose-governance p { margin-bottom: 0.75em; }
-.prose-governance ul, .prose-governance ol {
-  padding-left: 1.5em;
-  margin-bottom: 0.75em;
-}
-.prose-governance li { margin-bottom: 0.35em; }
-.prose-governance code {
-  font-family: var(--font-mono);
-  background: #E8E8FF;
-  color: #00008F;
-  padding: 0.15em 0.45em;
-  border-radius: 4px;
-  font-size: 0.83em;
-  border: 1px solid rgba(0,0,143,0.1);
-}
-.prose-governance blockquote {
-  border-left: 3px solid #00008F;
-  padding-left: 1em;
-  color: #6B6B8A;
-  margin: 0.75em 0;
-  background: #F5F6F8;
-  padding: 0.5em 1em;
-  border-radius: 0 6px 6px 0;
-}
-.prose-governance table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.875rem;
-  margin: 1em 0;
-  border: 1px solid #E2E4ED;
-  border-radius: 8px;
-  overflow: hidden;
-}
-.prose-governance th {
-  background: #00008F;
-  color: #FFFFFF;
-  padding: 0.6em 0.85em;
-  text-align: left;
-  font-weight: 600;
-  font-size: 0.8rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.prose-governance td {
-  padding: 0.45em 0.85em;
-  border-bottom: 1px solid #E2E4ED;
-  color: #2D2D45;
-}
-.prose-governance tr:last-child td { border-bottom: none; }
-.prose-governance tr:nth-child(even) td { background: #F5F6F8; }
-.prose-governance tr:hover td { background: #E8E8FF; }
-
-/* Typing indicator dots */
-.typing-dots::after {
-  content: '';
-  animation: dots 1.4s steps(3, end) infinite;
-}
-@keyframes dots {
-  0%   { content: ''; }
-  33%  { content: '.'; }
-  66%  { content: '..'; }
-  100% { content: '...'; }
+      <CreateSessionModal
+        isOpen={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+        onCreate={(name, summary) => { onCreate(name, summary); setIsModalOpen(false) }}
+      />
+    </div>
+  )
 }
 
-/* Stagger helpers */
-.stagger-1 { animation-delay: 0.05s; opacity: 0; }
-.stagger-2 { animation-delay: 0.10s; opacity: 0; }
-.stagger-3 { animation-delay: 0.15s; opacity: 0; }
-.stagger-4 { animation-delay: 0.20s; opacity: 0; }
-.stagger-5 { animation-delay: 0.25s; opacity: 0; }
-.stagger-6 { animation-delay: 0.30s; opacity: 0; }
+function EmptyState({ onNew }: { onNew: () => void }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ delay: 0.2 }}
+      className="flex flex-col items-center justify-center py-28 text-center"
+    >
+      <div className="w-20 h-20 rounded-2xl bg-axa-50 border border-axa-100 flex items-center justify-center mb-6">
+        <Shield className="w-10 h-10 text-axa-300" />
+      </div>
+      <h3 className="font-display text-2xl text-ink-600 mb-2">No projects yet</h3>
+      <p className="text-ink-400 text-sm max-w-xs mb-6 leading-relaxed">
+        Create your first knowledge set to start querying enterprise data with AI governance intelligence.
+      </p>
+      <button
+        onClick={onNew}
+        className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-axa-800 text-white text-sm font-medium hover:bg-axa-700 transition-colors shadow-axa"
+      >
+        <Plus className="w-4 h-4" />
+        Create First Project
+      </button>
+    </motion.div>
+  )
+}
