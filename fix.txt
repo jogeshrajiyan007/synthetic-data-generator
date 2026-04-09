@@ -1,22 +1,141 @@
-import type { Metadata } from 'next'
-import './globals.css'
+'use client'
+import { useState } from 'react'
+import { AnimatePresence } from 'framer-motion'
+import { SessionGrid } from '@/components/session/SessionGrid'
+import { Workspace } from '@/components/Workspace'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { ToastProvider, toast } from '@/components/ui/Toast'
+import { useStore } from '@/store'
+import { api } from '@/lib/api'
+import type { SourceFile } from '@/types'
 
-export const metadata: Metadata = {
-  title: 'AXA GovernGPT — Data Governance Intelligence',
-  description: 'AI-powered data governance platform for AXA Insurance',
-  icons: { icon: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏛️</text></svg>" },
-}
+export default function Home() {
+  const {
+    sessions,
+    activeSessionId,
+    createSession,
+    deleteSession,
+    setActiveSession,
+    getActiveSession,
+    getSessionFiles,
+    getSessionChat,
+    addFiles,
+    updateFile,
+    removeFile,
+    addMessage,
+    updateMessage,
+    clearChat,
+  } = useStore()
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+
+  const activeSession = getActiveSession()
+  const activeFiles   = activeSessionId ? getSessionFiles(activeSessionId) : []
+  const activeChat    = activeSessionId ? getSessionChat(activeSessionId) : []
+
+  // ── Handlers ─────────────────────────────────────────────────
+  const handleCreate = (name: string, summary: string) => {
+    const session = createSession(name, summary)
+    setActiveSession(session.id)
+    toast('success', `Project "${name}" created`)
+  }
+
+  const handleOpen = (id: string) => {
+    setActiveSession(id)
+  }
+
+  const handleBack = () => {
+    setActiveSession(null)
+  }
+
+  const handleDeleteRequest = (id: string) => {
+    setDeleteTarget(id)
+  }
+
+  const handleDeleteConfirm = async () => {
+    if (!deleteTarget) return
+    const session = sessions.find(s => s.id === deleteTarget)
+    try {
+      await api.deleteKnowledgeSet(deleteTarget)
+    } catch (_) {
+      // Ignore — may not exist in backend yet
+    }
+    deleteSession(deleteTarget)
+    setDeleteTarget(null)
+    toast('info', `Project "${session?.project_name}" deleted`)
+  }
+
+  const handleAddFiles = (files: SourceFile[]) => {
+    if (!activeSessionId) return
+    addFiles(activeSessionId, files)
+  }
+
+  const handleUpdateFile = (id: string, updates: Partial<SourceFile>) => {
+    if (!activeSessionId) return
+    updateFile(activeSessionId, id, updates)
+  }
+
+  const handleRemoveFile = (id: string) => {
+    if (!activeSessionId) return
+    removeFile(activeSessionId, id)
+  }
+
+  const handleAddMessage = (msg: Parameters<typeof addMessage>[1]) => {
+    if (!activeSessionId) return
+    addMessage(activeSessionId, msg)
+  }
+
+  const handleUpdateMessage = (msgId: string, updates: Parameters<typeof updateMessage>[2]) => {
+    if (!activeSessionId) return
+    updateMessage(activeSessionId, msgId, updates)
+  }
+
+  const handleClearChat = () => {
+    if (!activeSessionId) return
+    clearChat(activeSessionId)
+  }
+
+  // ── Target session for delete dialog
+  const deleteTargetSession = sessions.find(s => s.id === deleteTarget)
+
   return (
-    <html lang="en" className="dark">
-      <head>
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-      </head>
-      <body className="bg-navy-950 text-slate-200 font-body antialiased min-h-screen">
-        {children}
-      </body>
-    </html>
+    <>
+      <ToastProvider />
+
+      <AnimatePresence mode="wait">
+        {activeSession ? (
+          <Workspace
+            key="workspace"
+            session={activeSession}
+            files={activeFiles}
+            messages={activeChat}
+            onBack={handleBack}
+            onAddFiles={handleAddFiles}
+            onUpdateFile={handleUpdateFile}
+            onRemoveFile={handleRemoveFile}
+            onAddMessage={handleAddMessage}
+            onUpdateMessage={handleUpdateMessage}
+            onClearChat={handleClearChat}
+          />
+        ) : (
+          <SessionGrid
+            key="grid"
+            sessions={sessions}
+            onCreate={handleCreate}
+            onOpen={handleOpen}
+            onDelete={handleDeleteRequest}
+          />
+        )}
+      </AnimatePresence>
+
+      <ConfirmDialog
+        isOpen={!!deleteTarget}
+        title="Delete Project"
+        description={`Are you sure you want to delete "${deleteTargetSession?.project_name}"? This will remove all uploaded sources, chat history, and vector data. This action cannot be undone.`}
+        confirmLabel="Delete Project"
+        onConfirm={handleDeleteConfirm}
+        onCancel={() => setDeleteTarget(null)}
+      />
+    </>
   )
 }
