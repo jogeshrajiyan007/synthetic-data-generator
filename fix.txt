@@ -1,61 +1,166 @@
-## Error Type
-Recoverable Error
+'use client'
+import { useState, useEffect } from 'react'
+import { AnimatePresence } from 'framer-motion'
+import { SessionGrid } from '@/components/session/SessionGrid'
+import { Workspace } from '@/components/Workspace'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { ToastProvider, toast } from '@/components/ui/Toast'
+import { useStore } from '@/store'
+import { api } from '@/lib/api'
+import type { SourceFile } from '@/types'
 
-## Error Message
-Hydration failed because the server rendered HTML didn't match the client. As a result this tree will be regenerated on the client. This can happen if a SSR-ed Client Component used:
+export default function Home() {
+  // ── Mount guard ───────────────────────────────────────────────
+  // Server always renders the loading shell.
+  // Client flips to true after first paint — only then do we read
+  // from localStorage via the store. This guarantees server HTML
+  // and initial client HTML are identical, preventing hydration mismatch.
+  const [mounted, setMounted] = useState(false)
 
-- A server/client branch `if (typeof window !== 'undefined')`.
-- Variable input such as `Date.now()` or `Math.random()` which changes each time it's called.
-- Date formatting in a user's locale which doesn't match the server.
-- External changing data without sending a snapshot of it along with the HTML.
-- Invalid HTML tag nesting.
+  useEffect(() => {
+    // Manually trigger Zustand persist rehydration from localStorage
+    useStore.persist.rehydrate()
+    setMounted(true)
+  }, [])
 
-It can also happen if the client has a browser extension installed which messes with the HTML before React loaded.
+  const {
+    sessions,
+    activeSessionId,
+    createSession,
+    deleteSession,
+    setActiveSession,
+    getActiveSession,
+    getSessionFiles,
+    getSessionChat,
+    addFiles,
+    updateFile,
+    removeFile,
+    addMessage,
+    updateMessage,
+    clearChat,
+  } = useStore()
 
-https://react.dev/link/hydration-mismatch
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
 
-  ...
-    <HTTPAccessFallbackErrorBoundary pathname="/" notFound={{...}} forbidden={undefined} unauthorized={undefined} ...>
-      <RedirectBoundary>
-        <RedirectErrorBoundary router={{...}}>
-          <InnerLayoutRouter url="/" tree={[...]} params={{}} cacheNode={{rsc:{...}, ...}} segmentPath={[...]} ...>
-            <SegmentViewNode type="page" pagePath="page.tsx">
-              <SegmentTrieNode>
-              <ClientPageRoot Component={function Home} serverProvidedParams={{...}}>
-                <Home params={Promise} searchParams={Promise}>
-                  <ToastProvider>
-                  <AnimatePresence mode="wait">
-                    <PresenceChild isPresent={true} initial={undefined} custom={undefined} presenceAffectsLayout={true} ...>
-                      <Workspace session={{id:"dmg_te...", ...}} files={[...]} messages={[...]} ...>
-                        <motion.div initial={{opacity:0}} animate={{opacity:1}} transition={{duration:0.3}} ...>
-                          <div
-+                           className="h-screen flex overflow-hidden bg-navy-950"
--                           className="min-h-screen bg-navy-950 bg-grid-pattern"
-+                           style={{opacity:0}}
--                           style={{}}
-                            ref={function useMotionRef.useCallback}
-                          >
-+                           <div className="w-72 xl:w-80 flex-shrink-0 h-full overflow-hidden">
--                           <header className="relative border-b border-white/5">
-                            ...
-                  ...
-            ...
-          ...
+  const activeSession = mounted ? getActiveSession() : null
+  const activeFiles   = mounted && activeSessionId ? getSessionFiles(activeSessionId) : []
+  const activeChat    = mounted && activeSessionId ? getSessionChat(activeSessionId) : []
 
+  const handleCreate = (name: string, summary: string) => {
+    const session = createSession(name, summary)
+    setActiveSession(session.id)
+    toast('success', `Project "${name}" created`)
+  }
 
+  const handleOpen          = (id: string) => setActiveSession(id)
+  const handleBack          = () => setActiveSession(null)
+  const handleDeleteRequest = (id: string) => setDeleteTarget(id)
 
-    at throwOnHydrationMismatch (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:3318:56)
-    at beginWork (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:6758:918)
-    at runWithFiberInDEV (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:965:74)
-    at performUnitOfWork (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:9555:97)
-    at workLoopConcurrentByScheduler (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:9551:58)
-    at renderRootConcurrent (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:9534:71)
-    at performWorkOnRoot (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:9061:150)
-    at performWorkOnRootViaSchedulerTask (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:10255:9)
-    at MessagePort.performWorkUntilDeadline (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_0rpq4pf._.js:2647:64)
-    at div (<anonymous>:null:null)
-    at Workspace (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/src_0amtx_z._.js:2942:215)
-    at Home (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/src_0amtx_z._.js:3575:245)
-    at ClientPageRoot (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_0tt2wve._.js:4461:50)
+  const handleDeleteConfirm = async () => {
+    if (!deleteTarget) return
+    const session = sessions.find(s => s.id === deleteTarget)
+    try { await api.deleteKnowledgeSet(deleteTarget) } catch (_) {}
+    deleteSession(deleteTarget)
+    setDeleteTarget(null)
+    toast('info', `Project "${session?.project_name}" deleted`)
+  }
 
-Next.js version: 16.2.3 (Turbopack)
+  const handleAddFiles = (files: SourceFile[]) => {
+    if (!activeSessionId) return
+    addFiles(activeSessionId, files)
+  }
+  const handleUpdateFile = (id: string, updates: Partial<SourceFile>) => {
+    if (!activeSessionId) return
+    updateFile(activeSessionId, id, updates)
+  }
+  const handleRemoveFile = (id: string) => {
+    if (!activeSessionId) return
+    removeFile(activeSessionId, id)
+  }
+  const handleAddMessage = (msg: Parameters<typeof addMessage>[1]) => {
+    if (!activeSessionId) return
+    addMessage(activeSessionId, msg)
+  }
+  const handleUpdateMessage = (msgId: string, updates: Parameters<typeof updateMessage>[2]) => {
+    if (!activeSessionId) return
+    updateMessage(activeSessionId, msgId, updates)
+  }
+  const handleClearChat = () => {
+    if (!activeSessionId) return
+    clearChat(activeSessionId)
+  }
+
+  const deleteTargetSession = sessions.find(s => s.id === deleteTarget)
+
+  // ── Pre-mount render — must match server HTML exactly ─────────
+  // Server renders this. Client renders this on first paint.
+  // After useEffect fires, mounted=true and we switch to real UI.
+  if (!mounted) {
+    return (
+      <div className="min-h-screen bg-navy-950 bg-grid-pattern flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-10 h-10 rounded-2xl bg-gold-400/10 border border-gold-400/20 flex items-center justify-center">
+            <svg
+              className="w-5 h-5 text-gold-400 animate-spin"
+              fill="none" viewBox="0 0 24 24"
+            >
+              <circle
+                className="opacity-25" cx="12" cy="12" r="10"
+                stroke="currentColor" strokeWidth="4"
+              />
+              <path
+                className="opacity-75" fill="currentColor"
+                d="M4 12a8 8 0 018-8v8z"
+              />
+            </svg>
+          </div>
+          <p className="text-slate-600 text-xs font-mono tracking-widest uppercase">
+            Initialising GovernGPT…
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  // ── Post-mount render — safe to use localStorage state ────────
+  return (
+    <>
+      <ToastProvider />
+
+      <AnimatePresence mode="wait">
+        {activeSession ? (
+          <Workspace
+            key="workspace"
+            session={activeSession}
+            files={activeFiles}
+            messages={activeChat}
+            onBack={handleBack}
+            onAddFiles={handleAddFiles}
+            onUpdateFile={handleUpdateFile}
+            onRemoveFile={handleRemoveFile}
+            onAddMessage={handleAddMessage}
+            onUpdateMessage={handleUpdateMessage}
+            onClearChat={handleClearChat}
+          />
+        ) : (
+          <SessionGrid
+            key="grid"
+            sessions={sessions}
+            onCreate={handleCreate}
+            onOpen={handleOpen}
+            onDelete={handleDeleteRequest}
+          />
+        )}
+      </AnimatePresence>
+
+      <ConfirmDialog
+        isOpen={!!deleteTarget}
+        title="Delete Project"
+        description={`Are you sure you want to delete "${deleteTargetSession?.project_name}"? This will remove all uploaded sources, chat history, and vector data. This action cannot be undone.`}
+        confirmLabel="Delete Project"
+        onConfirm={handleDeleteConfirm}
+        onCancel={() => setDeleteTarget(null)}
+      />
+    </>
+  )
+}
