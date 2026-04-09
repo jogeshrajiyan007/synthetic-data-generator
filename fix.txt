@@ -1,39 +1,71 @@
 'use client'
-import { cn } from '@/lib/utils'
+import { useCallback } from 'react'
+import { useDropzone } from 'react-dropzone'
+import { Upload, AlertCircle } from 'lucide-react'
+import { ACCEPTED_TYPES, cn } from '@/lib/utils'
 
-const MAX_SOURCES = 20
-
-interface SourceProgressBarProps {
-  count: number
+interface UploadDropzoneProps {
+  onFiles: (files: File[]) => void
+  disabled?: boolean
+  maxFiles?: number
 }
 
-export function SourceProgressBar({ count }: SourceProgressBarProps) {
-  const pct = (count / MAX_SOURCES) * 100
-  const color =
-    pct >= 90 ? 'bg-red-400' :
-    pct >= 70 ? 'bg-amber-400' :
-    'bg-gold-400'
-  const textColor =
-    pct >= 90 ? 'text-red-400' :
-    pct >= 70 ? 'text-amber-400' :
-    'text-gold-400'
+export function UploadDropzone({ onFiles, disabled, maxFiles = 20 }: UploadDropzoneProps) {
+  const onDrop = useCallback((accepted: File[]) => {
+    if (accepted.length > 0) onFiles(accepted)
+  }, [onFiles])
+
+  const { getRootProps, getInputProps, isDragActive, isDragReject } = useDropzone({
+    onDrop,
+    accept: ACCEPTED_TYPES,
+    disabled,
+    maxFiles,
+    maxSize: 50 * 1024 * 1024, // 50 MB
+  })
 
   return (
-    <div className="px-4 pb-4">
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-xs text-slate-500 font-mono uppercase tracking-wider">Sources</span>
-        <span className={cn('text-xs font-mono font-medium', textColor)}>
-          {count} / {MAX_SOURCES}
-        </span>
-      </div>
-      <div className="h-1 bg-navy-700 rounded-full overflow-hidden">
-        <div
-          className={cn('h-full rounded-full transition-all duration-500', color)}
-          style={{ width: `${Math.min(pct, 100)}%` }}
-        />
-      </div>
+    <div
+      {...getRootProps()}
+      className={cn(
+        'relative mx-4 mb-3 rounded-xl border-2 border-dashed transition-all duration-200 cursor-pointer',
+        'flex flex-col items-center justify-center gap-2 py-6 text-center',
+        isDragActive && !isDragReject && 'border-gold-400/50 bg-gold-400/5 scale-[0.99]',
+        isDragReject && 'border-red-500/50 bg-red-500/5',
+        !isDragActive && !disabled && 'border-white/8 hover:border-gold-400/30 hover:bg-gold-400/3',
+        disabled && 'border-white/5 opacity-50 cursor-not-allowed',
+      )}
+    >
+      <input {...getInputProps()} />
+
+      {isDragReject ? (
+        <>
+          <AlertCircle className="w-6 h-6 text-red-400" />
+          <p className="text-xs text-red-400">File type not supported</p>
+        </>
+      ) : (
+        <>
+          <div className={cn(
+            'w-9 h-9 rounded-xl flex items-center justify-center transition-colors',
+            isDragActive ? 'bg-gold-400/15 text-gold-300' : 'bg-white/4 text-slate-500'
+          )}>
+            <Upload className="w-4 h-4" />
+          </div>
+          <div>
+            <p className="text-xs text-slate-400 font-medium">
+              {isDragActive ? 'Drop files here' : 'Drop files or click to upload'}
+            </p>
+            <p className="text-[10px] text-slate-600 mt-0.5">
+              PDF, DOCX, CSV, XLSX, JSON, XML, MD, Images
+            </p>
+          </div>
+        </>
+      )}
+
+      {disabled && (
+        <p className="text-[10px] text-red-400/70 absolute bottom-2">
+          Maximum {maxFiles} files reached
+        </p>
+      )}
     </div>
   )
 }
-
-export { MAX_SOURCES }
