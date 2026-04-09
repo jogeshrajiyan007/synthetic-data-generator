@@ -1,67 +1,72 @@
 'use client'
-import { useState, useCallback, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { CheckCircle, AlertCircle, Info, X } from 'lucide-react'
-import { cn } from '@/lib/utils'
+import { AlertTriangle, X } from 'lucide-react'
 
-type ToastType = 'success' | 'error' | 'info'
-interface Toast { id: string; type: ToastType; message: string }
+interface ConfirmDialogProps {
+  isOpen: boolean
+  title: string
+  description: string
+  confirmLabel?: string
+  onConfirm: () => void
+  onCancel: () => void
+}
 
-let addToastFn: ((type: ToastType, message: string) => void) | null = null
-export function toast(type: ToastType, message: string) { addToastFn?.(type, message) }
-
-export function ToastProvider() {
-  const [toasts, setToasts] = useState<Toast[]>([])
-
-  const add = useCallback((type: ToastType, message: string) => {
-    const id = Math.random().toString(36).slice(2)
-    setToasts(t => [...t, { id, type, message }])
-    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 4000)
-  }, [])
-
-  useEffect(() => { addToastFn = add; return () => { addToastFn = null } }, [add])
-
-  const icons = { success: CheckCircle, error: AlertCircle, info: Info }
-  const styles = {
-    success: 'border-emerald-200 bg-white text-emerald-700',
-    error:   'border-axared-200 bg-white text-axared-600',
-    info:    'border-axa-100 bg-white text-axa-800',
-  }
-  const iconColors = {
-    success: 'text-emerald-500',
-    error:   'text-axared-500',
-    info:    'text-axa-800',
-  }
-
+export function ConfirmDialog({
+  isOpen, title, description, confirmLabel = 'Delete', onConfirm, onCancel
+}: ConfirmDialogProps) {
   return (
-    <div className="fixed bottom-6 right-6 z-[100] flex flex-col gap-2 pointer-events-none">
-      <AnimatePresence>
-        {toasts.map(t => {
-          const Icon = icons[t.type]
-          return (
-            <motion.div
-              key={t.id}
-              initial={{ opacity: 0, x: 32, scale: 0.96 }}
-              animate={{ opacity: 1, x: 0, scale: 1 }}
-              exit={{ opacity: 0, x: 32, scale: 0.96 }}
-              className={cn(
-                'flex items-center gap-3 px-4 py-3 rounded-xl border shadow-card pointer-events-auto',
-                'text-sm max-w-xs',
-                styles[t.type]
-              )}
-            >
-              <Icon className={cn('w-4 h-4 flex-shrink-0', iconColors[t.type])} />
-              <span className="text-ink-700 text-xs">{t.message}</span>
-              <button
-                onClick={() => setToasts(ts => ts.filter(x => x.id !== t.id))}
-                className="ml-auto text-ink-300 hover:text-ink-500"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </motion.div>
-          )
-        })}
-      </AnimatePresence>
-    </div>
+    <AnimatePresence>
+      {isOpen && (
+        <>
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={onCancel}
+            className="fixed inset-0 z-40 bg-ink-900/40 backdrop-blur-sm"
+          />
+          <motion.div
+            initial={{ opacity: 0, scale: 0.97, y: 10 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.97, y: 10 }}
+            transition={{ type: 'spring', damping: 28, stiffness: 400 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          >
+            <div className="bg-white rounded-2xl w-full max-w-sm shadow-axa-lg border border-ink-100 overflow-hidden">
+              {/* AXA red top bar */}
+              <div className="h-1 bg-axared-500" />
+              <div className="p-6">
+                <div className="flex items-start gap-3 mb-5">
+                  <div className="w-9 h-9 rounded-lg bg-axared-50 border border-axared-100 flex items-center justify-center flex-shrink-0">
+                    <AlertTriangle className="w-4 h-4 text-axared-500" />
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-display text-base text-ink-900 mb-1">{title}</h3>
+                    <p className="text-ink-500 text-xs leading-relaxed">{description}</p>
+                  </div>
+                  <button onClick={onCancel} className="text-ink-300 hover:text-ink-500 p-1">
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="flex gap-3 justify-end pt-4 border-t border-ink-100">
+                  <button
+                    onClick={onCancel}
+                    className="px-4 py-2 rounded-lg text-sm text-ink-500 hover:text-ink-700 hover:bg-ink-50 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={onConfirm}
+                    className="px-4 py-2 rounded-lg text-sm font-semibold bg-axared-500 text-white hover:bg-axared-600 transition-colors"
+                  >
+                    {confirmLabel}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>
   )
 }
