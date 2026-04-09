@@ -1,171 +1,39 @@
 'use client'
-import { useState, useCallback } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
-import { ChevronLeft, Database, RefreshCw } from 'lucide-react'
-import { UploadDropzone } from './UploadDropzone'
-import { FileItem } from './FileItem'
-import { SourceProgressBar, MAX_SOURCES } from './SourceProgressBar'
-import type { KnowledgeSet, SourceFile } from '@/types'
-import { api } from '@/lib/api'
-import { cn, formatDate } from '@/lib/utils'
+import { cn } from '@/lib/utils'
 
-interface SourcePanelProps {
-  session: KnowledgeSet
-  files: SourceFile[]
-  onBack: () => void
-  onAddFiles: (files: SourceFile[]) => void
-  onUpdateFile: (id: string, updates: Partial<SourceFile>) => void
-  onRemoveFile: (id: string) => void
+const MAX_SOURCES = 20
+
+interface SourceProgressBarProps {
+  count: number
 }
 
-export function SourcePanel({
-  session, files, onBack, onAddFiles, onUpdateFile, onRemoveFile
-}: SourcePanelProps) {
-  const [isIngesting, setIsIngesting] = useState(false)
-  const atLimit = files.length >= MAX_SOURCES
-
-  const handleFiles = useCallback(async (rawFiles: File[]) => {
-    const allowed = rawFiles.slice(0, MAX_SOURCES - files.length)
-    if (!allowed.length) return
-
-    const newEntries: SourceFile[] = allowed.map(f => ({
-      id: Math.random().toString(36).slice(2),
-      name: f.name,
-      size: f.size,
-      type: f.type,
-      extension: f.name.split('.').pop() ?? '',
-      status: 'uploading' as const,
-      progress: 0,
-    }))
-    onAddFiles(newEntries)
-
-    const ticks = newEntries.map((entry) => {
-      let p = 0
-      return setInterval(() => {
-        p = Math.min(p + Math.random() * 20 + 10, 90)
-        onUpdateFile(entry.id, { progress: Math.round(p) })
-      }, 250)
-    })
-
-    try {
-      newEntries.forEach(e => onUpdateFile(e.id, { status: 'processing', progress: 95 }))
-      ticks.forEach(clearInterval)
-
-      const result = await api.uploadFiles(session.id, allowed)
-
-      result.file_details?.forEach((detail: { file: string; status: string; docs: number; error?: string }, i: number) => {
-        const entry = newEntries[i]
-        if (!entry) return
-        if (detail.status === 'ok') {
-          onUpdateFile(entry.id, { status: 'ready', progress: 100, chunk_count: detail.docs })
-        } else {
-          onUpdateFile(entry.id, { status: 'error', error: detail.error ?? 'Failed' })
-        }
-      })
-    } catch (err: unknown) {
-      ticks.forEach(clearInterval)
-      const msg = err instanceof Error ? err.message : 'Upload failed'
-      newEntries.forEach(e => onUpdateFile(e.id, { status: 'error', error: msg }))
-    }
-  }, [files.length, session.id, onAddFiles, onUpdateFile])
-
-  const handleReingest = async () => {
-    setIsIngesting(true)
-    try { await api.ingestLoadingZone(session.id, true) }
-    catch (e) { console.error(e) }
-    finally { setIsIngesting(false) }
-  }
-
-  const readyCount = files.filter(f => f.status === 'ready').length
+export function SourceProgressBar({ count }: SourceProgressBarProps) {
+  const pct = (count / MAX_SOURCES) * 100
+  const barColor =
+    pct >= 90 ? 'bg-axared-500' :
+    pct >= 70 ? 'bg-amber-500' :
+    'bg-axa-800'
+  const textColor =
+    pct >= 90 ? 'text-axared-500' :
+    pct >= 70 ? 'text-amber-600' :
+    'text-axa-800'
 
   return (
-    <div className="h-full flex flex-col bg-white border-r border-ink-100">
-      {/* Header */}
-      <div className="flex-shrink-0 px-4 py-3 border-b border-ink-100 bg-ink-50">
-        <div className="flex items-center gap-2">
-          <button
-            onClick={onBack}
-            className="p-1.5 rounded-lg hover:bg-ink-100 text-ink-400 hover:text-ink-700 transition-colors"
-            title="Back to projects"
-          >
-            <ChevronLeft className="w-4 h-4" />
-          </button>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-1.5">
-              <Database className="w-3.5 h-3.5 text-axa-800 flex-shrink-0" />
-              <span className="text-[10px] font-semibold text-axa-800 uppercase tracking-widest">Sources</span>
-            </div>
-            <p className="text-sm font-semibold text-ink-800 truncate mt-0.5 font-display">
-              {session.project_name}
-            </p>
-          </div>
-        </div>
-        <div className="flex items-center justify-between mt-2">
-          <span className="text-[10px] text-ink-400">
-            Created {formatDate(session.created_at)}
-          </span>
-          {readyCount > 0 && (
-            <span className="text-[10px] text-emerald-600 font-semibold">
-              {readyCount} indexed
-            </span>
-          )}
-        </div>
+    <div className="px-4 pb-3">
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="text-[10px] font-semibold text-ink-500 uppercase tracking-wider">Sources</span>
+        <span className={cn('text-[10px] font-bold', textColor)}>
+          {count} / {MAX_SOURCES}
+        </span>
       </div>
-
-      {/* Progress */}
-      <div className="flex-shrink-0 pt-3">
-        <SourceProgressBar count={files.length} />
+      <div className="h-1.5 bg-ink-100 rounded-full overflow-hidden">
+        <div
+          className={cn('h-full rounded-full transition-all duration-500', barColor)}
+          style={{ width: `${Math.min(pct, 100)}%` }}
+        />
       </div>
-
-      {/* Dropzone */}
-      <div className="flex-shrink-0">
-        <UploadDropzone onFiles={handleFiles} disabled={atLimit} maxFiles={MAX_SOURCES} />
-      </div>
-
-      {/* File list */}
-      <div className="flex-1 overflow-y-auto">
-        <AnimatePresence initial={false}>
-          {files.length === 0 ? (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="flex flex-col items-center justify-center py-10 text-center px-4"
-            >
-              <div className="w-10 h-10 rounded-xl bg-axa-50 border border-axa-100 flex items-center justify-center mb-3">
-                <Database className="w-5 h-5 text-axa-200" />
-              </div>
-              <p className="text-xs text-ink-400 leading-relaxed">
-                No sources yet. Upload files to build your knowledge set.
-              </p>
-            </motion.div>
-          ) : (
-            <div className="py-1">
-              {files.map((file, i) => (
-                <FileItem key={file.id} file={file} index={i} onRemove={onRemoveFile} />
-              ))}
-            </div>
-          )}
-        </AnimatePresence>
-      </div>
-
-      {/* Footer */}
-      {files.length > 0 && (
-        <div className="flex-shrink-0 p-3 border-t border-ink-100">
-          <button
-            onClick={handleReingest}
-            disabled={isIngesting}
-            className={cn(
-              'w-full flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-semibold',
-              'bg-axa-50 border border-axa-100 text-axa-800',
-              'hover:bg-axa-100 transition-all',
-              'disabled:opacity-50 disabled:cursor-not-allowed'
-            )}
-          >
-            <RefreshCw className={cn('w-3.5 h-3.5', isIngesting && 'animate-spin')} />
-            {isIngesting ? 'Re-indexing…' : 'Re-index All'}
-          </button>
-        </div>
-      )}
     </div>
   )
 }
+
+export { MAX_SOURCES }
