@@ -1,195 +1,39 @@
 'use client'
-import { useState, useCallback } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
-import { ChevronLeft, Database, RefreshCw, Trash2 } from 'lucide-react'
-import { UploadDropzone } from './UploadDropzone'
-import { FileItem } from './FileItem'
-import { SourceProgressBar, MAX_SOURCES } from './SourceProgressBar'
-import type { KnowledgeSet, SourceFile } from '@/types'
-import { api } from '@/lib/api'
-import { cn, formatDate } from '@/lib/utils'
-import { v4 as uuidv4 } from 'crypto'
+import { cn } from '@/lib/utils'
 
-interface SourcePanelProps {
-  session: KnowledgeSet
-  files: SourceFile[]
-  onBack: () => void
-  onAddFiles: (files: SourceFile[]) => void
-  onUpdateFile: (id: string, updates: Partial<SourceFile>) => void
-  onRemoveFile: (id: string) => void
+const MAX_SOURCES = 20
+
+interface SourceProgressBarProps {
+  count: number
 }
 
-export function SourcePanel({
-  session, files, onBack, onAddFiles, onUpdateFile, onRemoveFile
-}: SourcePanelProps) {
-  const [isIngesting, setIsIngesting] = useState(false)
-  const atLimit = files.length >= MAX_SOURCES
-
-  const handleFiles = useCallback(async (rawFiles: File[]) => {
-    const allowed = rawFiles.slice(0, MAX_SOURCES - files.length)
-    if (!allowed.length) return
-
-    // Build optimistic UI entries
-    const newEntries: SourceFile[] = allowed.map(f => ({
-      id: Math.random().toString(36).slice(2),
-      name: f.name,
-      size: f.size,
-      type: f.type,
-      extension: f.name.split('.').pop() ?? '',
-      status: 'uploading' as const,
-      progress: 0,
-    }))
-    onAddFiles(newEntries)
-
-    // Simulate progress ticks
-    const ticks = newEntries.map((entry) => {
-      let p = 0
-      return setInterval(() => {
-        p = Math.min(p + Math.random() * 20 + 10, 90)
-        onUpdateFile(entry.id, { progress: Math.round(p) })
-      }, 250)
-    })
-
-    try {
-      // Mark as processing
-      newEntries.forEach(e => onUpdateFile(e.id, { status: 'processing', progress: 95 }))
-      ticks.forEach(clearInterval)
-
-      const result = await api.uploadFiles(session.id, allowed)
-
-      // Mark as ready
-      result.file_details?.forEach((detail: { file: string; status: string; docs: number; error?: string }, i: number) => {
-        const entry = newEntries[i]
-        if (!entry) return
-        if (detail.status === 'ok') {
-          onUpdateFile(entry.id, {
-            status: 'ready',
-            progress: 100,
-            chunk_count: detail.docs,
-          })
-        } else {
-          onUpdateFile(entry.id, { status: 'error', error: detail.error ?? 'Failed' })
-        }
-      })
-    } catch (err: unknown) {
-      ticks.forEach(clearInterval)
-      const msg = err instanceof Error ? err.message : 'Upload failed'
-      newEntries.forEach(e => onUpdateFile(e.id, { status: 'error', error: msg }))
-    }
-  }, [files.length, session.id, onAddFiles, onUpdateFile])
-
-  const handleReingest = async () => {
-    setIsIngesting(true)
-    try {
-      await api.ingestLoadingZone(session.id, true)
-    } catch (e) {
-      console.error(e)
-    } finally {
-      setIsIngesting(false)
-    }
-  }
-
-  const readyCount = files.filter(f => f.status === 'ready').length
+export function SourceProgressBar({ count }: SourceProgressBarProps) {
+  const pct = (count / MAX_SOURCES) * 100
+  const color =
+    pct >= 90 ? 'bg-red-400' :
+    pct >= 70 ? 'bg-amber-400' :
+    'bg-gold-400'
+  const textColor =
+    pct >= 90 ? 'text-red-400' :
+    pct >= 70 ? 'text-amber-400' :
+    'text-gold-400'
 
   return (
-    <div className="h-full flex flex-col bg-navy-900/60 border-r border-white/5">
-      {/* Header */}
-      <div className="flex-shrink-0 p-4 border-b border-white/5">
-        <div className="flex items-center gap-2 mb-3">
-          <button
-            onClick={onBack}
-            className="p-1.5 rounded-lg hover:bg-white/6 text-slate-500 hover:text-slate-300 transition-colors"
-            title="Back to projects"
-          >
-            <ChevronLeft className="w-4 h-4" />
-          </button>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-1.5">
-              <Database className="w-3.5 h-3.5 text-gold-400 flex-shrink-0" />
-              <span className="text-[10px] font-mono text-gold-400/70 uppercase tracking-widest">Sources</span>
-            </div>
-            <p className="text-sm font-medium text-slate-200 truncate mt-0.5 font-display">
-              {session.project_name}
-            </p>
-          </div>
-        </div>
-
-        {/* Session meta */}
-        <div className="flex items-center justify-between">
-          <span className="text-[10px] text-slate-600 font-mono">
-            Created {formatDate(session.created_at)}
-          </span>
-          {readyCount > 0 && (
-            <span className="text-[10px] text-emerald-400/70 font-mono">
-              {readyCount} indexed
-            </span>
-          )}
-        </div>
+    <div className="px-4 pb-4">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs text-slate-500 font-mono uppercase tracking-wider">Sources</span>
+        <span className={cn('text-xs font-mono font-medium', textColor)}>
+          {count} / {MAX_SOURCES}
+        </span>
       </div>
-
-      {/* Progress bar */}
-      <div className="flex-shrink-0 pt-3">
-        <SourceProgressBar count={files.length} />
-      </div>
-
-      {/* Upload zone */}
-      <div className="flex-shrink-0">
-        <UploadDropzone
-          onFiles={handleFiles}
-          disabled={atLimit}
-          maxFiles={MAX_SOURCES}
+      <div className="h-1 bg-navy-700 rounded-full overflow-hidden">
+        <div
+          className={cn('h-full rounded-full transition-all duration-500', color)}
+          style={{ width: `${Math.min(pct, 100)}%` }}
         />
       </div>
-
-      {/* File list */}
-      <div className="flex-1 overflow-y-auto">
-        <AnimatePresence initial={false}>
-          {files.length === 0 ? (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="flex flex-col items-center justify-center py-10 text-center px-4"
-            >
-              <div className="w-10 h-10 rounded-xl bg-navy-800 border border-white/6 flex items-center justify-center mb-3">
-                <Database className="w-5 h-5 text-slate-700" />
-              </div>
-              <p className="text-xs text-slate-600 leading-relaxed">
-                No sources yet. Upload files to begin building your knowledge set.
-              </p>
-            </motion.div>
-          ) : (
-            <div className="py-1">
-              {files.map((file, i) => (
-                <FileItem
-                  key={file.id}
-                  file={file}
-                  index={i}
-                  onRemove={onRemoveFile}
-                />
-              ))}
-            </div>
-          )}
-        </AnimatePresence>
-      </div>
-
-      {/* Footer actions */}
-      {files.length > 0 && (
-        <div className="flex-shrink-0 p-3 border-t border-white/5 flex items-center gap-2">
-          <button
-            onClick={handleReingest}
-            disabled={isIngesting}
-            className={cn(
-              'flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-medium',
-              'bg-gold-400/8 border border-gold-400/15 text-gold-400/80',
-              'hover:bg-gold-400/12 hover:text-gold-300 transition-all',
-              'disabled:opacity-50 disabled:cursor-not-allowed'
-            )}
-          >
-            <RefreshCw className={cn('w-3.5 h-3.5', isIngesting && 'animate-spin')} />
-            {isIngesting ? 'Re-indexing…' : 'Re-index All'}
-          </button>
-        </div>
-      )}
     </div>
   )
 }
+
+export { MAX_SOURCES }
