@@ -1,71 +1,73 @@
-'use client'
-import { useCallback } from 'react'
-import { useDropzone } from 'react-dropzone'
-import { Upload, AlertCircle } from 'lucide-react'
-import { ACCEPTED_TYPES, cn } from '@/lib/utils'
+import { clsx, type ClassValue } from 'clsx'
+import { twMerge } from 'tailwind-merge'
 
-interface UploadDropzoneProps {
-  onFiles: (files: File[]) => void
-  disabled?: boolean
-  maxFiles?: number
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs))
 }
 
-export function UploadDropzone({ onFiles, disabled, maxFiles = 20 }: UploadDropzoneProps) {
-  const onDrop = useCallback((accepted: File[]) => {
-    if (accepted.length > 0) onFiles(accepted)
-  }, [onFiles])
+export function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`
+}
 
-  const { getRootProps, getInputProps, isDragActive, isDragReject } = useDropzone({
-    onDrop,
-    accept: ACCEPTED_TYPES,
-    disabled,
-    maxFiles,
-    maxSize: 50 * 1024 * 1024, // 50 MB
+export function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString('en-GB', {
+    day: '2-digit', month: 'short', year: 'numeric',
   })
+}
 
-  return (
-    <div
-      {...getRootProps()}
-      className={cn(
-        'relative mx-4 mb-3 rounded-xl border-2 border-dashed transition-all duration-200 cursor-pointer',
-        'flex flex-col items-center justify-center gap-2 py-6 text-center',
-        isDragActive && !isDragReject && 'border-gold-400/50 bg-gold-400/5 scale-[0.99]',
-        isDragReject && 'border-red-500/50 bg-red-500/5',
-        !isDragActive && !disabled && 'border-white/8 hover:border-gold-400/30 hover:bg-gold-400/3',
-        disabled && 'border-white/5 opacity-50 cursor-not-allowed',
-      )}
-    >
-      <input {...getInputProps()} />
+export function formatTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString('en-GB', {
+    hour: '2-digit', minute: '2-digit',
+  })
+}
 
-      {isDragReject ? (
-        <>
-          <AlertCircle className="w-6 h-6 text-red-400" />
-          <p className="text-xs text-red-400">File type not supported</p>
-        </>
-      ) : (
-        <>
-          <div className={cn(
-            'w-9 h-9 rounded-xl flex items-center justify-center transition-colors',
-            isDragActive ? 'bg-gold-400/15 text-gold-300' : 'bg-white/4 text-slate-500'
-          )}>
-            <Upload className="w-4 h-4" />
-          </div>
-          <div>
-            <p className="text-xs text-slate-400 font-medium">
-              {isDragActive ? 'Drop files here' : 'Drop files or click to upload'}
-            </p>
-            <p className="text-[10px] text-slate-600 mt-0.5">
-              PDF, DOCX, CSV, XLSX, JSON, XML, MD, Images
-            </p>
-          </div>
-        </>
-      )}
+export function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9\s_-]/g, '')
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
+    .slice(0, 60)
+}
 
-      {disabled && (
-        <p className="text-[10px] text-red-400/70 absolute bottom-2">
-          Maximum {maxFiles} files reached
-        </p>
-      )}
-    </div>
-  )
+export const FILE_ICONS: Record<string, string> = {
+  pdf: '📄', docx: '📝', doc: '📝', txt: '📃', md: '📋',
+  csv: '📊', xlsx: '📊', xls: '📊', json: '📦', xml: '🗂️',
+  jpg: '🖼️', jpeg: '🖼️', png: '🖼️',
+}
+
+export const FILE_COLORS: Record<string, string> = {
+  pdf:  'text-red-400 bg-red-400/10',
+  docx: 'text-blue-400 bg-blue-400/10',
+  doc:  'text-blue-400 bg-blue-400/10',
+  txt:  'text-slate-400 bg-slate-400/10',
+  md:   'text-purple-400 bg-purple-400/10',
+  csv:  'text-green-400 bg-green-400/10',
+  xlsx: 'text-emerald-400 bg-emerald-400/10',
+  xls:  'text-emerald-400 bg-emerald-400/10',
+  json: 'text-yellow-400 bg-yellow-400/10',
+  xml:  'text-orange-400 bg-orange-400/10',
+  jpg:  'text-pink-400 bg-pink-400/10',
+  jpeg: 'text-pink-400 bg-pink-400/10',
+  png:  'text-pink-400 bg-pink-400/10',
+}
+
+export const ACCEPTED_TYPES = {
+  'application/pdf': ['.pdf'],
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+  'application/msword': ['.doc'],
+  'text/plain': ['.txt'],
+  'text/markdown': ['.md'],
+  'text/csv': ['.csv'],
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+  'application/vnd.ms-excel': ['.xls'],
+  'application/json': ['.json'],
+  'application/xml': ['.xml'],
+  'text/xml': ['.xml'],
+  'image/jpeg': ['.jpg', '.jpeg'],
+  'image/png': ['.png'],
 }
