@@ -1,182 +1,40 @@
-# 🚀 AXA GovernGPT – Full Frontend Generation Prompt (Firebase Studio)
-
-You are a **senior frontend engineer** tasked with building a **production-ready Next.js application** named:
-
-# 🧠 AXA GovernGPT
-
-An enterprise-grade **Data Governance AI Assistant UI** for AXA Insurance.
-
----
-
-# ⚠️ 🚫 STRICT ARCHITECTURE RULES (NON-NEGOTIABLE)
-
-You MUST follow these constraints:
-
-- ❌ DO NOT use **Genkit**
-- ❌ DO NOT use **Google AI / Gemini / PaLM / Vertex AI in frontend**
-- ❌ DO NOT call any LLM directly from frontend
-- ❌ DO NOT simulate AI responses
-
-✅ ALL AI logic exists in backend (FastAPI RAG system)  
-✅ Frontend = **UI + API client ONLY**  
-✅ ALL communication via REST APIs  
-
----
-
-# 🧠 APPLICATION PURPOSE
-
-The application allows users to:
-1. Upload enterprise data sources
-2. Query an AI agent powered by backend RAG
-3. View governed, contextual responses
-
----
-
-# 🛠️ TECH STACK
-
-- Next.js (App Router)
-- TypeScript
-- Tailwind CSS
-- ShadCN UI
-- Zustand (preferred) or React Context
-- React Dropzone
-- Axios (preferred) or Fetch
-
----
-
-# 🧩 GLOBAL LAYOUT
-
-Create a **full-screen responsive 2-panel layout**:
-
-| Left Panel (Sources) | Right Panel (Chat Agent) |
-|---------------------|--------------------------|
-| 25–30% width        | 70–75% width             |
-
-- Full height (100vh)
-- Clean enterprise design
-- Smooth scrolling
-
----
-
-# 📂 LEFT PANEL — "Sources"
-
-## Header
-**AXA GovernGPT • Sources**
-
----
-
-## 🔢 SOURCE LIMIT SYSTEM (CRITICAL)
-
-- Maximum allowed files: **20**
-- Enforce strict limit
-- Prevent further uploads when limit reached
-- Show toast/error message if exceeded
-
----
-
-## 📊 SOURCE PROGRESS BAR (IMPORTANT UX FEATURE)
-
-Place at top of panel:
-
-### Behavior:
-- Display: `X / 20 Sources`
-- Progress fill = (current / 20)
-
-### Color Logic:
-- 0–70% → primary (blue/neutral)
-- 70–90% → warning (yellow/orange)
-- 90–100% → danger (red)
-
-### UX:
-- Smooth animated transitions
-- Updates on add/remove
-
----
-
-## 📥 FILE UPLOAD SYSTEM
-
-### Supported Types:
-- Documents: pdf, docx, doc, txt, md
-- Data: csv, xlsx, xls, json, xml
-- Images: jpg, jpeg, png
-
----
-
-### Upload UI:
-- Drag & drop zone (React Dropzone)
-- Click to upload
-- Highlight on drag hover
-
----
-
-### Upload Behavior:
-
-On file upload:
-1. Validate file type
-2. Check limit (<=20)
-3. Call backend API: `POST /upload`
-4. Show loading state
-5. On success → add to list
-6. On failure → show error toast
-
----
-
-### File List UI:
-
-Each file should show:
-- File name
-- File type icon
-- File size
-- Delete button
-
-Optional:
-- Image preview (for jpg/png)
-- Upload status indicator
-
----
-
-# 💬 RIGHT PANEL — "AXA GovernGPT Agent"
-
-## Header
-**AXA GovernGPT – Data Governance Assistant**
-
----
-
-## 💬 CHAT WINDOW
-
-- Scrollable message area
-- Full height minus input
-
-### Message Styles:
-- User → right aligned
-- AI → left aligned
-- Clean chat bubbles
-- Optional timestamps
-
----
-
-## ⌨️ INPUT AREA
-
-- Text input box
-- Send button
-- "Enter to send"
-
----
-
-## 🔁 CHAT FLOW (REAL API INTEGRATION)
-
-### On Send:
-
-1. Add user message to UI
-2. Show loading / typing indicator
-3. Call backend API:
-
-### POST /chat
-
-Request:
-```json
 {
-  "message": "user query",
-  "session_id": "optional",
-  "metadata": {}
+  "name": "axa-governgpt",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "next": "14.2.5",
+    "react": "^18",
+    "react-dom": "^18",
+    "typescript": "^5",
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "tailwindcss": "^3.4.1",
+    "autoprefixer": "^10.0.1",
+    "postcss": "^8",
+    "zustand": "^4.5.2",
+    "react-dropzone": "^14.2.3",
+    "lucide-react": "^0.383.0",
+    "clsx": "^2.1.1",
+    "tailwind-merge": "^2.3.0",
+    "framer-motion": "^11.2.10",
+    "date-fns": "^3.6.0",
+    "@radix-ui/react-dialog": "^1.1.1",
+    "@radix-ui/react-tooltip": "^1.1.2",
+    "@radix-ui/react-scroll-area": "^1.1.0",
+    "@radix-ui/react-progress": "^1.1.0",
+    "react-markdown": "^9.0.1",
+    "remark-gfm": "^4.0.0"
+  },
+  "devDependencies": {
+    "eslint": "^8",
+    "eslint-config-next": "14.2.5"
+  }
 }
