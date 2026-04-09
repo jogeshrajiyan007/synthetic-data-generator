@@ -1,73 +1,81 @@
-import { clsx, type ClassValue } from 'clsx'
-import { twMerge } from 'tailwind-merge'
+'use client'
+import { motion } from 'framer-motion'
+import { X, CheckCircle, AlertCircle, Loader2 } from 'lucide-react'
+import type { SourceFile } from '@/types'
+import { formatBytes, FILE_ICONS, FILE_COLORS, cn } from '@/lib/utils'
 
-export function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs))
+interface FileItemProps {
+  file: SourceFile
+  onRemove: (id: string) => void
+  index: number
 }
 
-export function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B'
-  const k = 1024
-  const sizes = ['B', 'KB', 'MB', 'GB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`
-}
+export function FileItem({ file, onRemove, index }: FileItemProps) {
+  const ext = file.extension.toLowerCase()
+  const icon = FILE_ICONS[ext] ?? '📁'
+  const colorClass = FILE_COLORS[ext] ?? 'text-slate-400 bg-slate-400/10'
 
-export function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString('en-GB', {
-    day: '2-digit', month: 'short', year: 'numeric',
-  })
-}
+  return (
+    <motion.div
+      initial={{ opacity: 0, x: -12 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: -12 }}
+      transition={{ delay: index * 0.03 }}
+      className="group flex items-center gap-3 px-4 py-3 hover:bg-white/3 rounded-xl transition-colors"
+    >
+      {/* Icon */}
+      <div className={cn('w-8 h-8 rounded-lg flex items-center justify-center text-sm flex-shrink-0', colorClass)}>
+        {icon}
+      </div>
 
-export function formatTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString('en-GB', {
-    hour: '2-digit', minute: '2-digit',
-  })
-}
+      {/* Info */}
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <p className="text-xs text-slate-200 truncate font-medium">{file.name}</p>
+          <span className="text-[10px] font-mono text-slate-600 flex-shrink-0">
+            {formatBytes(file.size)}
+          </span>
+        </div>
 
-export function slugify(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9\s_-]/g, '')
-    .replace(/\s+/g, '_')
-    .replace(/_+/g, '_')
-    .slice(0, 60)
-}
+        {/* Status bar */}
+        {file.status === 'uploading' && (
+          <div className="mt-1.5 h-0.5 bg-navy-700 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-gold-400 rounded-full transition-all duration-300"
+              style={{ width: `${file.progress}%` }}
+            />
+          </div>
+        )}
+        {file.status === 'processing' && (
+          <span className="text-[10px] text-gold-400/70 font-mono">Processing chunks…</span>
+        )}
+        {file.status === 'error' && (
+          <span className="text-[10px] text-red-400 font-mono truncate">{file.error ?? 'Upload failed'}</span>
+        )}
+        {file.status === 'ready' && file.chunk_count && (
+          <span className="text-[10px] text-slate-600 font-mono">{file.chunk_count} chunks</span>
+        )}
+      </div>
 
-export const FILE_ICONS: Record<string, string> = {
-  pdf: '📄', docx: '📝', doc: '📝', txt: '📃', md: '📋',
-  csv: '📊', xlsx: '📊', xls: '📊', json: '📦', xml: '🗂️',
-  jpg: '🖼️', jpeg: '🖼️', png: '🖼️',
-}
+      {/* Status icon */}
+      <div className="flex-shrink-0">
+        {file.status === 'uploading' || file.status === 'processing' ? (
+          <Loader2 className="w-3.5 h-3.5 text-gold-400 animate-spin" />
+        ) : file.status === 'error' ? (
+          <AlertCircle className="w-3.5 h-3.5 text-red-400" />
+        ) : (
+          <CheckCircle className="w-3.5 h-3.5 text-emerald-400 opacity-60" />
+        )}
+      </div>
 
-export const FILE_COLORS: Record<string, string> = {
-  pdf:  'text-red-400 bg-red-400/10',
-  docx: 'text-blue-400 bg-blue-400/10',
-  doc:  'text-blue-400 bg-blue-400/10',
-  txt:  'text-slate-400 bg-slate-400/10',
-  md:   'text-purple-400 bg-purple-400/10',
-  csv:  'text-green-400 bg-green-400/10',
-  xlsx: 'text-emerald-400 bg-emerald-400/10',
-  xls:  'text-emerald-400 bg-emerald-400/10',
-  json: 'text-yellow-400 bg-yellow-400/10',
-  xml:  'text-orange-400 bg-orange-400/10',
-  jpg:  'text-pink-400 bg-pink-400/10',
-  jpeg: 'text-pink-400 bg-pink-400/10',
-  png:  'text-pink-400 bg-pink-400/10',
-}
-
-export const ACCEPTED_TYPES = {
-  'application/pdf': ['.pdf'],
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
-  'application/msword': ['.doc'],
-  'text/plain': ['.txt'],
-  'text/markdown': ['.md'],
-  'text/csv': ['.csv'],
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
-  'application/vnd.ms-excel': ['.xls'],
-  'application/json': ['.json'],
-  'application/xml': ['.xml'],
-  'text/xml': ['.xml'],
-  'image/jpeg': ['.jpg', '.jpeg'],
-  'image/png': ['.png'],
+      {/* Remove button */}
+      <button
+        onClick={() => onRemove(file.id)}
+        className="opacity-0 group-hover:opacity-100 p-1 rounded-lg hover:bg-red-500/15 hover:text-red-400 text-slate-600 transition-all flex-shrink-0"
+        title="Remove file"
+      >
+        <X className="w-3.5 h-3.5" />
+      </button>
+    </motion.div>
+  )
 }
