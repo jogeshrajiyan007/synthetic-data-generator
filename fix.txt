@@ -1,3 +1,51 @@
-module.exports = {
-  plugins: { tailwindcss: {}, autoprefixer: {} },
+import type { Config } from 'tailwindcss'
+
+const config: Config = {
+  darkMode: 'class',
+  content: [
+    './src/pages/**/*.{js,ts,jsx,tsx,mdx}',
+    './src/components/**/*.{js,ts,jsx,tsx,mdx}',
+    './src/app/**/*.{js,ts,jsx,tsx,mdx}',
+  ],
+  theme: {
+    extend: {
+      fontFamily: {
+        display: ['var(--font-display)', 'serif'],
+        body: ['var(--font-body)', 'sans-serif'],
+        mono: ['var(--font-mono)', 'monospace'],
+      },
+      colors: {
+        navy: {
+          950: '#020817', 900: '#050f1f', 800: '#0a1628',
+          700: '#0f1f35', 600: '#162840', 500: '#1e3551',
+          400: '#2a4a6e', 300: '#3a6491', 200: '#5a8ab8',
+          100: '#8bb5d8', 50:  '#c4d9ee',
+        },
+        gold: {
+          600: '#92650a', 500: '#b8820f', 400: '#d4a017',
+          300: '#e8b824', 200: '#f2cc55', 100: '#f8e098', 50: '#fdf3d0',
+        },
+      },
+      backgroundImage: {
+        'grid-pattern': "url(\"data:image/svg+xml,%3Csvg width='40' height='40' viewBox='0 0 40 40' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='0.03'%3E%3Cpath d='M0 0h40v1H0zM0 0v40h1V0z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E\")",
+      },
+      animation: {
+        'fade-up': 'fadeUp 0.5s ease forwards',
+        'fade-in': 'fadeIn 0.3s ease forwards',
+        'shimmer': 'shimmer 2s linear infinite',
+      },
+      keyframes: {
+        fadeUp: { '0%': { opacity: '0', transform: 'translateY(16px)' }, '100%': { opacity: '1', transform: 'translateY(0)' } },
+        fadeIn: { '0%': { opacity: '0' }, '100%': { opacity: '1' } },
+        shimmer: { '0%': { backgroundPosition: '-200% 0' }, '100%': { backgroundPosition: '200% 0' } },
+      },
+      boxShadow: {
+        'gold': '0 0 0 1px rgba(212, 160, 23, 0.3), 0 4px 24px rgba(212, 160, 23, 0.1)',
+        'navy-lg': '0 8px 32px rgba(2, 8, 23, 0.6)',
+      },
+    },
+  },
+  plugins: [],
 }
+
+export default config
