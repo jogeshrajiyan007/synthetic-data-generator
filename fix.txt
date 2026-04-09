@@ -1,166 +1,171 @@
 'use client'
-import { useState, useEffect } from 'react'
-import { AnimatePresence } from 'framer-motion'
-import { SessionGrid } from '@/components/session/SessionGrid'
-import { Workspace } from '@/components/Workspace'
-import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
-import { ToastProvider, toast } from '@/components/ui/Toast'
-import { useStore } from '@/store'
-import { api } from '@/lib/api'
-import type { SourceFile } from '@/types'
+import { create } from 'zustand'
+import { persist, createJSONStorage } from 'zustand/middleware'
+import type { KnowledgeSet, SourceFile, ChatMessage } from '@/types'
+import { slugify } from '@/lib/utils'
 
-export default function Home() {
-  // ── Mount guard ───────────────────────────────────────────────
-  // Server always renders the loading shell.
-  // Client flips to true after first paint — only then do we read
-  // from localStorage via the store. This guarantees server HTML
-  // and initial client HTML are identical, preventing hydration mismatch.
-  const [mounted, setMounted] = useState(false)
+interface SessionState {
+  // ── Knowledge Sets ─────────────────────────────────────────────
+  sessions: KnowledgeSet[]
+  activeSessionId: string | null
 
-  useEffect(() => {
-    // Manually trigger Zustand persist rehydration from localStorage
-    useStore.persist.rehydrate()
-    setMounted(true)
-  }, [])
+  // ── Files per session ──────────────────────────────────────────
+  files: Record<string, SourceFile[]>
 
-  const {
-    sessions,
-    activeSessionId,
-    createSession,
-    deleteSession,
-    setActiveSession,
-    getActiveSession,
-    getSessionFiles,
-    getSessionChat,
-    addFiles,
-    updateFile,
-    removeFile,
-    addMessage,
-    updateMessage,
-    clearChat,
-  } = useStore()
+  // ── Chat per session ───────────────────────────────────────────
+  chats: Record<string, ChatMessage[]>
 
-  const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+  // ── Actions ────────────────────────────────────────────────────
+  createSession: (name: string, summary: string) => KnowledgeSet
+  updateSession: (id: string, updates: Partial<KnowledgeSet>) => void
+  deleteSession: (id: string) => void
+  setActiveSession: (id: string | null) => void
+  getActiveSession: () => KnowledgeSet | null
 
-  const activeSession = mounted ? getActiveSession() : null
-  const activeFiles   = mounted && activeSessionId ? getSessionFiles(activeSessionId) : []
-  const activeChat    = mounted && activeSessionId ? getSessionChat(activeSessionId) : []
+  addFiles: (sessionId: string, files: SourceFile[]) => void
+  updateFile: (sessionId: string, fileId: string, updates: Partial<SourceFile>) => void
+  removeFile: (sessionId: string, fileId: string) => void
+  getSessionFiles: (sessionId: string) => SourceFile[]
 
-  const handleCreate = (name: string, summary: string) => {
-    const session = createSession(name, summary)
-    setActiveSession(session.id)
-    toast('success', `Project "${name}" created`)
-  }
-
-  const handleOpen          = (id: string) => setActiveSession(id)
-  const handleBack          = () => setActiveSession(null)
-  const handleDeleteRequest = (id: string) => setDeleteTarget(id)
-
-  const handleDeleteConfirm = async () => {
-    if (!deleteTarget) return
-    const session = sessions.find(s => s.id === deleteTarget)
-    try { await api.deleteKnowledgeSet(deleteTarget) } catch (_) {}
-    deleteSession(deleteTarget)
-    setDeleteTarget(null)
-    toast('info', `Project "${session?.project_name}" deleted`)
-  }
-
-  const handleAddFiles = (files: SourceFile[]) => {
-    if (!activeSessionId) return
-    addFiles(activeSessionId, files)
-  }
-  const handleUpdateFile = (id: string, updates: Partial<SourceFile>) => {
-    if (!activeSessionId) return
-    updateFile(activeSessionId, id, updates)
-  }
-  const handleRemoveFile = (id: string) => {
-    if (!activeSessionId) return
-    removeFile(activeSessionId, id)
-  }
-  const handleAddMessage = (msg: Parameters<typeof addMessage>[1]) => {
-    if (!activeSessionId) return
-    addMessage(activeSessionId, msg)
-  }
-  const handleUpdateMessage = (msgId: string, updates: Parameters<typeof updateMessage>[2]) => {
-    if (!activeSessionId) return
-    updateMessage(activeSessionId, msgId, updates)
-  }
-  const handleClearChat = () => {
-    if (!activeSessionId) return
-    clearChat(activeSessionId)
-  }
-
-  const deleteTargetSession = sessions.find(s => s.id === deleteTarget)
-
-  // ── Pre-mount render — must match server HTML exactly ─────────
-  // Server renders this. Client renders this on first paint.
-  // After useEffect fires, mounted=true and we switch to real UI.
-  if (!mounted) {
-    return (
-      <div className="min-h-screen bg-navy-950 bg-grid-pattern flex items-center justify-center">
-        <div className="flex flex-col items-center gap-4">
-          <div className="w-10 h-10 rounded-2xl bg-gold-400/10 border border-gold-400/20 flex items-center justify-center">
-            <svg
-              className="w-5 h-5 text-gold-400 animate-spin"
-              fill="none" viewBox="0 0 24 24"
-            >
-              <circle
-                className="opacity-25" cx="12" cy="12" r="10"
-                stroke="currentColor" strokeWidth="4"
-              />
-              <path
-                className="opacity-75" fill="currentColor"
-                d="M4 12a8 8 0 018-8v8z"
-              />
-            </svg>
-          </div>
-          <p className="text-slate-600 text-xs font-mono tracking-widest uppercase">
-            Initialising GovernGPT…
-          </p>
-        </div>
-      </div>
-    )
-  }
-
-  // ── Post-mount render — safe to use localStorage state ────────
-  return (
-    <>
-      <ToastProvider />
-
-      <AnimatePresence mode="wait">
-        {activeSession ? (
-          <Workspace
-            key="workspace"
-            session={activeSession}
-            files={activeFiles}
-            messages={activeChat}
-            onBack={handleBack}
-            onAddFiles={handleAddFiles}
-            onUpdateFile={handleUpdateFile}
-            onRemoveFile={handleRemoveFile}
-            onAddMessage={handleAddMessage}
-            onUpdateMessage={handleUpdateMessage}
-            onClearChat={handleClearChat}
-          />
-        ) : (
-          <SessionGrid
-            key="grid"
-            sessions={sessions}
-            onCreate={handleCreate}
-            onOpen={handleOpen}
-            onDelete={handleDeleteRequest}
-          />
-        )}
-      </AnimatePresence>
-
-      <ConfirmDialog
-        isOpen={!!deleteTarget}
-        title="Delete Project"
-        description={`Are you sure you want to delete "${deleteTargetSession?.project_name}"? This will remove all uploaded sources, chat history, and vector data. This action cannot be undone.`}
-        confirmLabel="Delete Project"
-        onConfirm={handleDeleteConfirm}
-        onCancel={() => setDeleteTarget(null)}
-      />
-    </>
-  )
+  addMessage: (sessionId: string, msg: ChatMessage) => void
+  updateMessage: (sessionId: string, msgId: string, updates: Partial<ChatMessage>) => void
+  clearChat: (sessionId: string) => void
+  getSessionChat: (sessionId: string) => ChatMessage[]
 }
+
+export const useStore = create<SessionState>()(
+  persist(
+    (set, get) => ({
+      sessions: [],
+      activeSessionId: null,
+      files: {},
+      chats: {},
+
+      createSession: (name, summary) => {
+        const id = slugify(name) + '_' + Date.now().toString(36)
+        const session: KnowledgeSet = {
+          id,
+          project_name: name,
+          summary,
+          created_at: new Date().toISOString(),
+          file_count: 0,
+          vector_count: 0,
+          collection_name: `ks_${id}`,
+        }
+        set(s => ({ sessions: [session, ...s.sessions] }))
+        return session
+      },
+
+      updateSession: (id, updates) =>
+        set(s => ({
+          sessions: s.sessions.map(sess =>
+            sess.id === id ? { ...sess, ...updates } : sess
+          ),
+        })),
+
+      deleteSession: (id) =>
+        set(s => {
+          const { [id]: _f, ...files } = s.files
+          const { [id]: _c, ...chats } = s.chats
+          return {
+            sessions: s.sessions.filter(sess => sess.id !== id),
+            activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
+            files,
+            chats,
+          }
+        }),
+
+      setActiveSession: (id) => set({ activeSessionId: id }),
+
+      getActiveSession: () => {
+        const { sessions, activeSessionId } = get()
+        return sessions.find(s => s.id === activeSessionId) ?? null
+      },
+
+      addFiles: (sessionId, newFiles) =>
+        set(s => ({
+          files: {
+            ...s.files,
+            [sessionId]: [...(s.files[sessionId] ?? []), ...newFiles],
+          },
+          sessions: s.sessions.map(sess =>
+            sess.id === sessionId
+              ? { ...sess, file_count: (s.files[sessionId]?.length ?? 0) + newFiles.length }
+              : sess
+          ),
+        })),
+
+      updateFile: (sessionId, fileId, updates) =>
+        set(s => ({
+          files: {
+            ...s.files,
+            [sessionId]: (s.files[sessionId] ?? []).map(f =>
+              f.id === fileId ? { ...f, ...updates } : f
+            ),
+          },
+        })),
+
+      removeFile: (sessionId, fileId) =>
+        set(s => {
+          const updated = (s.files[sessionId] ?? []).filter(f => f.id !== fileId)
+          return {
+            files: { ...s.files, [sessionId]: updated },
+            sessions: s.sessions.map(sess =>
+              sess.id === sessionId ? { ...sess, file_count: updated.length } : sess
+            ),
+          }
+        }),
+
+      getSessionFiles: (sessionId) => get().files[sessionId] ?? [],
+
+      addMessage: (sessionId, msg) =>
+        set(s => ({
+          chats: {
+            ...s.chats,
+            [sessionId]: [...(s.chats[sessionId] ?? []), msg],
+          },
+        })),
+
+      updateMessage: (sessionId, msgId, updates) =>
+        set(s => ({
+          chats: {
+            ...s.chats,
+            [sessionId]: (s.chats[sessionId] ?? []).map(m =>
+              m.id === msgId ? { ...m, ...updates } : m
+            ),
+          },
+        })),
+
+      clearChat: (sessionId) =>
+        set(s => ({ chats: { ...s.chats, [sessionId]: [] } })),
+
+      getSessionChat: (sessionId) => get().chats[sessionId] ?? [],
+    }),
+    {
+      name: 'governgpt-store',
+      version: 1,
+      // ── Safe localStorage — returns no-op on server ──────────────
+      storage: createJSONStorage(() => {
+        if (typeof window === 'undefined') {
+          return {
+            getItem: () => null,
+            setItem: () => {},
+            removeItem: () => {},
+          }
+        }
+        return localStorage
+      }),
+      // ── CRITICAL: never persist activeSessionId ──────────────────
+      // Server always renders with null (SessionGrid).
+      // If we persist it, client hydrates with a different tree
+      // (Workspace) → React mismatch → blank page.
+      partialize: (state) => ({
+        sessions: state.sessions,
+        files: state.files,
+        chats: state.chats,
+        // activeSessionId intentionally excluded
+      }),
+      skipHydration: true,
+    }
+  )
+)
