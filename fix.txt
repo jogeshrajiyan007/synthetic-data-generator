@@ -1,45 +1,146 @@
 'use client'
-import { cn } from '@/lib/utils'
+import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
+import type { KnowledgeSet, SourceFile, ChatMessage } from '@/types'
+import { slugify } from '@/lib/utils'
 
-function Skeleton({ className }: { className?: string }) {
-  return (
-    <div className={cn(
-      'rounded-lg bg-gradient-to-r from-navy-800 via-navy-700 to-navy-800',
-      'bg-[length:200%_100%] animate-shimmer',
-      className
-    )} />
-  )
+interface SessionState {
+  // ── Knowledge Sets ─────────────────────────────────────────────
+  sessions: KnowledgeSet[]
+  activeSessionId: string | null
+
+  // ── Files per session ──────────────────────────────────────────
+  files: Record<string, SourceFile[]>
+
+  // ── Chat per session ───────────────────────────────────────────
+  chats: Record<string, ChatMessage[]>
+
+  // ── Actions ────────────────────────────────────────────────────
+  createSession: (name: string, summary: string) => KnowledgeSet
+  updateSession: (id: string, updates: Partial<KnowledgeSet>) => void
+  deleteSession: (id: string) => void
+  setActiveSession: (id: string | null) => void
+  getActiveSession: () => KnowledgeSet | null
+
+  addFiles: (sessionId: string, files: SourceFile[]) => void
+  updateFile: (sessionId: string, fileId: string, updates: Partial<SourceFile>) => void
+  removeFile: (sessionId: string, fileId: string) => void
+  getSessionFiles: (sessionId: string) => SourceFile[]
+
+  addMessage: (sessionId: string, msg: ChatMessage) => void
+  updateMessage: (sessionId: string, msgId: string, updates: Partial<ChatMessage>) => void
+  clearChat: (sessionId: string) => void
+  getSessionChat: (sessionId: string) => ChatMessage[]
 }
 
-export function SessionCardSkeleton() {
-  return (
-    <div className="h-52 rounded-2xl bg-navy-800/60 border border-white/5 p-5 flex flex-col gap-4">
-      <div className="flex items-start justify-between">
-        <Skeleton className="w-10 h-10 rounded-xl" />
-        <Skeleton className="w-16 h-5 rounded-full" />
-      </div>
-      <div className="space-y-2 flex-1">
-        <Skeleton className="h-5 w-3/4" />
-        <Skeleton className="h-3 w-full" />
-        <Skeleton className="h-3 w-2/3" />
-      </div>
-      <div className="flex items-center justify-between pt-2 border-t border-white/5">
-        <Skeleton className="h-3 w-24" />
-        <Skeleton className="h-3 w-16" />
-      </div>
-    </div>
-  )
-}
+export const useStore = create<SessionState>()(
+  persist(
+    (set, get) => ({
+      sessions: [],
+      activeSessionId: null,
+      files: {},
+      chats: {},
 
-export function MessageSkeleton() {
-  return (
-    <div className="flex gap-3">
-      <Skeleton className="w-8 h-8 rounded-xl flex-shrink-0" />
-      <div className="flex-1 space-y-2 max-w-sm">
-        <Skeleton className="h-4 w-full rounded-xl" />
-        <Skeleton className="h-4 w-4/5 rounded-xl" />
-        <Skeleton className="h-4 w-3/5 rounded-xl" />
-      </div>
-    </div>
+      createSession: (name, summary) => {
+        const id = slugify(name) + '_' + Date.now().toString(36)
+        const session: KnowledgeSet = {
+          id,
+          project_name: name,
+          summary,
+          created_at: new Date().toISOString(),
+          file_count: 0,
+          vector_count: 0,
+          collection_name: `ks_${id}`,
+        }
+        set(s => ({ sessions: [session, ...s.sessions] }))
+        return session
+      },
+
+      updateSession: (id, updates) =>
+        set(s => ({
+          sessions: s.sessions.map(sess =>
+            sess.id === id ? { ...sess, ...updates } : sess
+          ),
+        })),
+
+      deleteSession: (id) =>
+        set(s => {
+          const { [id]: _f, ...files } = s.files
+          const { [id]: _c, ...chats } = s.chats
+          return {
+            sessions: s.sessions.filter(sess => sess.id !== id),
+            activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
+            files,
+            chats,
+          }
+        }),
+
+      setActiveSession: (id) => set({ activeSessionId: id }),
+
+      getActiveSession: () => {
+        const { sessions, activeSessionId } = get()
+        return sessions.find(s => s.id === activeSessionId) ?? null
+      },
+
+      addFiles: (sessionId, newFiles) =>
+        set(s => ({
+          files: {
+            ...s.files,
+            [sessionId]: [...(s.files[sessionId] ?? []), ...newFiles],
+          },
+          sessions: s.sessions.map(sess =>
+            sess.id === sessionId
+              ? { ...sess, file_count: (s.files[sessionId]?.length ?? 0) + newFiles.length }
+              : sess
+          ),
+        })),
+
+      updateFile: (sessionId, fileId, updates) =>
+        set(s => ({
+          files: {
+            ...s.files,
+            [sessionId]: (s.files[sessionId] ?? []).map(f =>
+              f.id === fileId ? { ...f, ...updates } : f
+            ),
+          },
+        })),
+
+      removeFile: (sessionId, fileId) =>
+        set(s => {
+          const updated = (s.files[sessionId] ?? []).filter(f => f.id !== fileId)
+          return {
+            files: { ...s.files, [sessionId]: updated },
+            sessions: s.sessions.map(sess =>
+              sess.id === sessionId ? { ...sess, file_count: updated.length } : sess
+            ),
+          }
+        }),
+
+      getSessionFiles: (sessionId) => get().files[sessionId] ?? [],
+
+      addMessage: (sessionId, msg) =>
+        set(s => ({
+          chats: {
+            ...s.chats,
+            [sessionId]: [...(s.chats[sessionId] ?? []), msg],
+          },
+        })),
+
+      updateMessage: (sessionId, msgId, updates) =>
+        set(s => ({
+          chats: {
+            ...s.chats,
+            [sessionId]: (s.chats[sessionId] ?? []).map(m =>
+              m.id === msgId ? { ...m, ...updates } : m
+            ),
+          },
+        })),
+
+      clearChat: (sessionId) =>
+        set(s => ({ chats: { ...s.chats, [sessionId]: [] } })),
+
+      getSessionChat: (sessionId) => get().chats[sessionId] ?? [],
+    }),
+    { name: 'governgpt-store', version: 1 }
   )
-}
+)
