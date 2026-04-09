@@ -1,179 +1,92 @@
 'use client'
-import { useState } from 'react'
 import { motion } from 'framer-motion'
-import { Plus, Search, Shield, Activity } from 'lucide-react'
-import { SessionCard } from './SessionCard'
-import { CreateSessionModal } from './CreateSessionModal'
+import { Database, Calendar, Trash2, ArrowRight, FolderOpen } from 'lucide-react'
 import type { KnowledgeSet } from '@/types'
-import { cn } from '@/lib/utils'
+import { formatDate, cn } from '@/lib/utils'
 
-interface SessionGridProps {
-  sessions: KnowledgeSet[]
-  onCreate: (name: string, summary: string) => void
+interface SessionCardProps {
+  session: KnowledgeSet
+  index: number
   onOpen: (id: string) => void
   onDelete: (id: string) => void
 }
 
-export function SessionGrid({ sessions, onCreate, onOpen, onDelete }: SessionGridProps) {
-  const [isModalOpen, setIsModalOpen] = useState(false)
-  const [search, setSearch] = useState('')
-
-  const filtered = sessions.filter(s =>
-    s.project_name.toLowerCase().includes(search.toLowerCase()) ||
-    s.summary?.toLowerCase().includes(search.toLowerCase())
-  )
-
-  return (
-    <div className="min-h-screen bg-ink-50">
-      {/* Top nav bar */}
-      <header className="bg-white border-b border-ink-100 sticky top-0 z-30">
-        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-          {/* AXA Logo + product name */}
-          <div className="flex items-center gap-3">
-            {/* AXA Logo mark */}
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 bg-axa-800 rounded-lg flex items-center justify-center">
-                <span className="text-white font-display font-bold text-sm leading-none">AXA</span>
-              </div>
-              <div className="w-px h-6 bg-ink-200" />
-              <div>
-                <div className="flex items-center gap-1.5">
-                  <span className="font-display text-lg text-ink-800 leading-none">GovernGPT</span>
-                  <span className="axa-badge">Beta</span>
-                </div>
-                <p className="text-[10px] text-ink-400 mt-0.5">Data Governance Intelligence</p>
-              </div>
-            </div>
-          </div>
-
-          {/* Status + new project */}
-          <div className="flex items-center gap-3">
-            <div className="hidden md:flex items-center gap-2 text-xs text-ink-400 bg-ink-50 border border-ink-100 px-3 py-1.5 rounded-lg">
-              <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-              <span>Connected</span>
-            </div>
-            <button
-              onClick={() => setIsModalOpen(true)}
-              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-axa-800 text-white text-sm font-medium hover:bg-axa-700 transition-colors shadow-axa"
-            >
-              <Plus className="w-4 h-4" />
-              New Project
-            </button>
-          </div>
-        </div>
-      </header>
-
-      {/* Page content */}
-      <div className="max-w-7xl mx-auto px-6 pt-10 pb-16">
-
-        {/* Hero section */}
-        <motion.div
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.4 }}
-          className="mb-10"
-        >
-          <div className="flex items-center gap-2 mb-2">
-            <Activity className="w-4 h-4 text-axa-800" />
-            <span className="text-axa-800 text-xs font-semibold uppercase tracking-widest">Knowledge Sets</span>
-          </div>
-          <h1 className="font-display text-4xl text-ink-900 mb-2 leading-tight">
-            Your Governance <span className="text-axa-shimmer">Projects</span>
-          </h1>
-          <p className="text-ink-500 text-sm max-w-xl leading-relaxed">
-            Each project is an isolated knowledge set. Upload enterprise data sources and query them with AI-powered governance intelligence built for insurance.
-          </p>
-        </motion.div>
-
-        {/* Toolbar */}
-        <motion.div
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.1, duration: 0.35 }}
-          className="flex items-center gap-3 mb-8"
-        >
-          <div className="relative flex-1 max-w-sm">
-            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-400" />
-            <input
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              placeholder="Search projects…"
-              className="w-full bg-white border border-ink-200 rounded-lg pl-10 pr-4 py-2.5 text-sm text-ink-700 placeholder-ink-400 focus:outline-none focus:border-axa-400 focus:ring-2 focus:ring-axa-50 transition-all"
-            />
-          </div>
-          <span className="text-ink-400 text-sm">
-            {filtered.length} {filtered.length === 1 ? 'project' : 'projects'}
-          </span>
-        </motion.div>
-
-        {/* Grid */}
-        {filtered.length === 0 && sessions.length === 0 ? (
-          <EmptyState onNew={() => setIsModalOpen(true)} />
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {filtered.map((session, i) => (
-              <SessionCard
-                key={session.id}
-                session={session}
-                index={i}
-                onOpen={onOpen}
-                onDelete={onDelete}
-              />
-            ))}
-
-            {/* New project card */}
-            <motion.button
-              initial={{ opacity: 0, y: 16 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: filtered.length * 0.05 + 0.05 }}
-              onClick={() => setIsModalOpen(true)}
-              className={cn(
-                'h-52 rounded-xl border-2 border-dashed border-ink-200 text-ink-400',
-                'hover:border-axa-300 hover:text-axa-700 hover:bg-axa-50/50',
-                'transition-all duration-200 flex flex-col items-center justify-center gap-3',
-                'group cursor-pointer bg-white'
-              )}
-            >
-              <div className="w-10 h-10 rounded-lg border-2 border-dashed border-current flex items-center justify-center group-hover:scale-110 transition-transform">
-                <Plus className="w-5 h-5" />
-              </div>
-              <span className="text-sm font-medium">Start New Project</span>
-            </motion.button>
-          </div>
-        )}
-      </div>
-
-      <CreateSessionModal
-        isOpen={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
-        onCreate={(name, summary) => { onCreate(name, summary); setIsModalOpen(false) }}
-      />
-    </div>
-  )
-}
-
-function EmptyState({ onNew }: { onNew: () => void }) {
+export function SessionCard({ session, index, onOpen, onDelete }: SessionCardProps) {
   return (
     <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ delay: 0.2 }}
-      className="flex flex-col items-center justify-center py-28 text-center"
+      initial={{ opacity: 0, y: 16 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: index * 0.05, duration: 0.35, ease: 'easeOut' }}
+      className="group relative"
     >
-      <div className="w-20 h-20 rounded-2xl bg-axa-50 border border-axa-100 flex items-center justify-center mb-6">
-        <Shield className="w-10 h-10 text-axa-300" />
-      </div>
-      <h3 className="font-display text-2xl text-ink-600 mb-2">No projects yet</h3>
-      <p className="text-ink-400 text-sm max-w-xs mb-6 leading-relaxed">
-        Create your first knowledge set to start querying enterprise data with AI governance intelligence.
-      </p>
-      <button
-        onClick={onNew}
-        className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-axa-800 text-white text-sm font-medium hover:bg-axa-700 transition-colors shadow-axa"
+      <div
+        onClick={() => onOpen(session.id)}
+        className={cn(
+          'relative h-52 rounded-xl cursor-pointer overflow-hidden bg-white',
+          'border border-ink-100 shadow-card',
+          'transition-all duration-250 ease-out',
+          'hover:shadow-card-hover hover:-translate-y-0.5 hover:border-axa-300/50'
+        )}
       >
-        <Plus className="w-4 h-4" />
-        Create First Project
-      </button>
+        {/* Top blue accent bar */}
+        <div className="h-1 w-full bg-gradient-to-r from-axa-800 to-axa-600" />
+
+        {/* Content */}
+        <div className="relative p-5 h-[calc(100%-4px)] flex flex-col">
+          {/* Icon + badge row */}
+          <div className="flex items-start justify-between mb-4">
+            <div className="w-10 h-10 rounded-lg bg-axa-50 border border-axa-100 flex items-center justify-center">
+              <Database className="w-5 h-5 text-axa-800" />
+            </div>
+            <span className={cn(
+              'text-[10px] font-semibold px-2.5 py-1 rounded-full border',
+              session.file_count > 0
+                ? 'text-axa-800 bg-axa-50 border-axa-100'
+                : 'text-ink-400 bg-ink-50 border-ink-100'
+            )}>
+              {session.file_count} {session.file_count === 1 ? 'source' : 'sources'}
+            </span>
+          </div>
+
+          {/* Name */}
+          <h3 className="font-display text-lg text-ink-800 leading-snug mb-2 line-clamp-2 group-hover:text-axa-800 transition-colors">
+            {session.project_name}
+          </h3>
+
+          {/* Summary */}
+          {session.summary && (
+            <p className="text-ink-500 text-xs leading-relaxed line-clamp-2 flex-1">
+              {session.summary}
+            </p>
+          )}
+
+          {/* Footer */}
+          <div className="flex items-center justify-between mt-auto pt-3 border-t border-ink-100">
+            <div className="flex items-center gap-1.5 text-ink-400 text-[10px]">
+              <Calendar className="w-3 h-3" />
+              <span>{formatDate(session.created_at)}</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={(e) => { e.stopPropagation(); onDelete(session.id) }}
+                className="p-1.5 rounded-lg opacity-0 group-hover:opacity-100 hover:bg-axared-50 hover:text-axared-500 text-ink-300 transition-all"
+                title="Delete session"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+              <div className="flex items-center gap-1 text-axa-800 text-[10px] font-semibold opacity-0 group-hover:opacity-100 transition-opacity">
+                <span>Open</span>
+                <ArrowRight className="w-3 h-3" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Hover blue wash */}
+        <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none rounded-xl"
+          style={{ background: 'linear-gradient(160deg, rgba(0,0,143,0.02) 0%, transparent 60%)' }}
+        />
+      </div>
     </motion.div>
   )
 }
