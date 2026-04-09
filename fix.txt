@@ -1,146 +1,65 @@
-'use client'
-import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
-import type { KnowledgeSet, SourceFile, ChatMessage } from '@/types'
-import { slugify } from '@/lib/utils'
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
-interface SessionState {
-  // ── Knowledge Sets ─────────────────────────────────────────────
-  sessions: KnowledgeSet[]
-  activeSessionId: string | null
-
-  // ── Files per session ──────────────────────────────────────────
-  files: Record<string, SourceFile[]>
-
-  // ── Chat per session ───────────────────────────────────────────
-  chats: Record<string, ChatMessage[]>
-
-  // ── Actions ────────────────────────────────────────────────────
-  createSession: (name: string, summary: string) => KnowledgeSet
-  updateSession: (id: string, updates: Partial<KnowledgeSet>) => void
-  deleteSession: (id: string) => void
-  setActiveSession: (id: string | null) => void
-  getActiveSession: () => KnowledgeSet | null
-
-  addFiles: (sessionId: string, files: SourceFile[]) => void
-  updateFile: (sessionId: string, fileId: string, updates: Partial<SourceFile>) => void
-  removeFile: (sessionId: string, fileId: string) => void
-  getSessionFiles: (sessionId: string) => SourceFile[]
-
-  addMessage: (sessionId: string, msg: ChatMessage) => void
-  updateMessage: (sessionId: string, msgId: string, updates: Partial<ChatMessage>) => void
-  clearChat: (sessionId: string) => void
-  getSessionChat: (sessionId: string) => ChatMessage[]
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_URL}${path}`, {
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    ...options,
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }))
+    throw new Error(err.detail || `Request failed: ${res.status}`)
+  }
+  return res.json()
 }
 
-export const useStore = create<SessionState>()(
-  persist(
-    (set, get) => ({
-      sessions: [],
-      activeSessionId: null,
-      files: {},
-      chats: {},
+// ── Knowledge Sets ──────────────────────────────────────────────
+export const api = {
+  // List all ChromaDB collections
+  listKnowledgeSets: () =>
+    request<{ total: number; knowledge_sets: { knowledge_set: string; collection_name: string; vector_count: number }[] }>('/api/knowledge-sets/'),
 
-      createSession: (name, summary) => {
-        const id = slugify(name) + '_' + Date.now().toString(36)
-        const session: KnowledgeSet = {
-          id,
-          project_name: name,
-          summary,
-          created_at: new Date().toISOString(),
-          file_count: 0,
-          vector_count: 0,
-          collection_name: `ks_${id}`,
-        }
-        set(s => ({ sessions: [session, ...s.sessions] }))
-        return session
-      },
+  deleteKnowledgeSet: (ks: string) =>
+    request(`/api/knowledge-sets/${encodeURIComponent(ks)}`, { method: 'DELETE' }),
 
-      updateSession: (id, updates) =>
-        set(s => ({
-          sessions: s.sessions.map(sess =>
-            sess.id === id ? { ...sess, ...updates } : sess
-          ),
-        })),
-
-      deleteSession: (id) =>
-        set(s => {
-          const { [id]: _f, ...files } = s.files
-          const { [id]: _c, ...chats } = s.chats
-          return {
-            sessions: s.sessions.filter(sess => sess.id !== id),
-            activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
-            files,
-            chats,
-          }
-        }),
-
-      setActiveSession: (id) => set({ activeSessionId: id }),
-
-      getActiveSession: () => {
-        const { sessions, activeSessionId } = get()
-        return sessions.find(s => s.id === activeSessionId) ?? null
-      },
-
-      addFiles: (sessionId, newFiles) =>
-        set(s => ({
-          files: {
-            ...s.files,
-            [sessionId]: [...(s.files[sessionId] ?? []), ...newFiles],
-          },
-          sessions: s.sessions.map(sess =>
-            sess.id === sessionId
-              ? { ...sess, file_count: (s.files[sessionId]?.length ?? 0) + newFiles.length }
-              : sess
-          ),
-        })),
-
-      updateFile: (sessionId, fileId, updates) =>
-        set(s => ({
-          files: {
-            ...s.files,
-            [sessionId]: (s.files[sessionId] ?? []).map(f =>
-              f.id === fileId ? { ...f, ...updates } : f
-            ),
-          },
-        })),
-
-      removeFile: (sessionId, fileId) =>
-        set(s => {
-          const updated = (s.files[sessionId] ?? []).filter(f => f.id !== fileId)
-          return {
-            files: { ...s.files, [sessionId]: updated },
-            sessions: s.sessions.map(sess =>
-              sess.id === sessionId ? { ...sess, file_count: updated.length } : sess
-            ),
-          }
-        }),
-
-      getSessionFiles: (sessionId) => get().files[sessionId] ?? [],
-
-      addMessage: (sessionId, msg) =>
-        set(s => ({
-          chats: {
-            ...s.chats,
-            [sessionId]: [...(s.chats[sessionId] ?? []), msg],
-          },
-        })),
-
-      updateMessage: (sessionId, msgId, updates) =>
-        set(s => ({
-          chats: {
-            ...s.chats,
-            [sessionId]: (s.chats[sessionId] ?? []).map(m =>
-              m.id === msgId ? { ...m, ...updates } : m
-            ),
-          },
-        })),
-
-      clearChat: (sessionId) =>
-        set(s => ({ chats: { ...s.chats, [sessionId]: [] } })),
-
-      getSessionChat: (sessionId) => get().chats[sessionId] ?? [],
+  // Ingest loading zone
+  ingestLoadingZone: (knowledge_set: string, rebuild = false) =>
+    request('/api/ingest/', {
+      method: 'POST',
+      body: JSON.stringify({ knowledge_set, rebuild }),
     }),
-    { name: 'governgpt-store', version: 1 }
-  )
-)
+
+  // Upload files (multipart)
+  uploadFiles: async (knowledge_set: string, files: File[]) => {
+    const form = new FormData()
+    form.append('knowledge_set', knowledge_set)
+    files.forEach(f => form.append('files', f))
+    const res = await fetch(`${API_URL}/api/ingest/upload`, {
+      method: 'POST',
+      body: form,
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }))
+      throw new Error(err.detail || `Upload failed: ${res.status}`)
+    }
+    return res.json()
+  },
+
+  // Query
+  query: (payload: { knowledge_set: string; question: string; use_rag: boolean; k: number }) =>
+    request('/api/query/', { method: 'POST', body: JSON.stringify(payload) }),
+
+  // Sources
+  getSources: (knowledge_set: string) =>
+    request(`/api/sources/?knowledge_set=${encodeURIComponent(knowledge_set)}`),
+
+  // Stats
+  getStats: (knowledge_set: string) =>
+    request(`/api/logs/stats?knowledge_set=${encodeURIComponent(knowledge_set)}`),
+
+  // Profile
+  profileFile: (filename: string) =>
+    request(`/api/profile/${encodeURIComponent(filename)}`),
+
+  // Health
+  health: () => request('/health'),
+}
