@@ -1,171 +1,89 @@
-'use client'
-import { create } from 'zustand'
-import { persist, createJSONStorage } from 'zustand/middleware'
-import type { KnowledgeSet, SourceFile, ChatMessage } from '@/types'
-import { slugify } from '@/lib/utils'
+import type { Config } from 'tailwindcss'
 
-interface SessionState {
-  // ── Knowledge Sets ─────────────────────────────────────────────
-  sessions: KnowledgeSet[]
-  activeSessionId: string | null
-
-  // ── Files per session ──────────────────────────────────────────
-  files: Record<string, SourceFile[]>
-
-  // ── Chat per session ───────────────────────────────────────────
-  chats: Record<string, ChatMessage[]>
-
-  // ── Actions ────────────────────────────────────────────────────
-  createSession: (name: string, summary: string) => KnowledgeSet
-  updateSession: (id: string, updates: Partial<KnowledgeSet>) => void
-  deleteSession: (id: string) => void
-  setActiveSession: (id: string | null) => void
-  getActiveSession: () => KnowledgeSet | null
-
-  addFiles: (sessionId: string, files: SourceFile[]) => void
-  updateFile: (sessionId: string, fileId: string, updates: Partial<SourceFile>) => void
-  removeFile: (sessionId: string, fileId: string) => void
-  getSessionFiles: (sessionId: string) => SourceFile[]
-
-  addMessage: (sessionId: string, msg: ChatMessage) => void
-  updateMessage: (sessionId: string, msgId: string, updates: Partial<ChatMessage>) => void
-  clearChat: (sessionId: string) => void
-  getSessionChat: (sessionId: string) => ChatMessage[]
+const config: Config = {
+  darkMode: 'class',
+  content: [
+    './src/pages/**/*.{js,ts,jsx,tsx,mdx}',
+    './src/components/**/*.{js,ts,jsx,tsx,mdx}',
+    './src/app/**/*.{js,ts,jsx,tsx,mdx}',
+  ],
+  theme: {
+    extend: {
+      fontFamily: {
+        display: ['var(--font-display)', 'serif'],
+        body: ['var(--font-body)', 'sans-serif'],
+        mono: ['var(--font-mono)', 'monospace'],
+      },
+      colors: {
+        // AXA Brand Blue
+        axa: {
+          950: '#00004A',
+          900: '#00006B',
+          800: '#00008F', // ← AXA signature blue
+          700: '#1414A0',
+          600: '#2828B0',
+          500: '#4040C0',
+          400: '#6666D0',
+          300: '#9999E0',
+          200: '#BBBBEE',
+          100: '#D8D8F8',
+          50:  '#E8E8FF',
+        },
+        // AXA Red
+        axared: {
+          700: '#CC0010',
+          600: '#E8000F',
+          500: '#FF1721', // ← AXA signature red
+          400: '#FF4D55',
+          300: '#FF8087',
+          200: '#FFB3B7',
+          100: '#FFD9DB',
+          50:  '#FFF0F0',
+        },
+        // Neutrals
+        ink: {
+          900: '#0F0F1A',
+          800: '#1A1A2E',
+          700: '#2D2D45',
+          600: '#4A4A6A',
+          500: '#6B6B8A',
+          400: '#8E8EAA',
+          300: '#B2B2C8',
+          200: '#D4D4E4',
+          100: '#E8E8F2',
+          50:  '#F5F6F8',
+        },
+      },
+      backgroundImage: {
+        'grid-pattern': "url(\"data:image/svg+xml,%3Csvg width='40' height='40' viewBox='0 0 40 40' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%2300008F' fill-opacity='0.04'%3E%3Cpath d='M0 0h40v1H0zM0 0v40h1V0z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E\")",
+        'axa-gradient': 'linear-gradient(135deg, #00008F 0%, #1414A0 100%)',
+        'axa-gradient-light': 'linear-gradient(135deg, #E8E8FF 0%, #F5F6F8 100%)',
+        'axa-hero': 'linear-gradient(160deg, #00008F 0%, #1414A0 60%, #2828B0 100%)',
+      },
+      animation: {
+        'fade-up':   'fadeUp 0.45s ease forwards',
+        'fade-in':   'fadeIn 0.3s ease forwards',
+        'slide-right': 'slideRight 0.35s ease forwards',
+        'shimmer':   'shimmer 2s linear infinite',
+        'pulse-red': 'pulseRed 2s ease-in-out infinite',
+      },
+      keyframes: {
+        fadeUp:    { '0%': { opacity: '0', transform: 'translateY(14px)' }, '100%': { opacity: '1', transform: 'translateY(0)' } },
+        fadeIn:    { '0%': { opacity: '0' }, '100%': { opacity: '1' } },
+        slideRight:{ '0%': { opacity: '0', transform: 'translateX(-12px)' }, '100%': { opacity: '1', transform: 'translateX(0)' } },
+        shimmer:   { '0%': { backgroundPosition: '-200% 0' }, '100%': { backgroundPosition: '200% 0' } },
+        pulseRed:  { '0%,100%': { boxShadow: '0 0 0 0 rgba(255,23,33,0)' }, '50%': { boxShadow: '0 0 0 5px rgba(255,23,33,0.12)' } },
+      },
+      boxShadow: {
+        'axa':    '0 0 0 1px rgba(0,0,143,0.15), 0 4px 20px rgba(0,0,143,0.1)',
+        'axa-lg': '0 8px 40px rgba(0,0,143,0.15)',
+        'red':    '0 0 0 1px rgba(255,23,33,0.2), 0 4px 16px rgba(255,23,33,0.08)',
+        'card':   '0 1px 4px rgba(0,0,143,0.06), 0 4px 16px rgba(0,0,143,0.06)',
+        'card-hover': '0 4px 20px rgba(0,0,143,0.12), 0 1px 4px rgba(0,0,143,0.08)',
+      },
+    },
+  },
+  plugins: [],
 }
 
-export const useStore = create<SessionState>()(
-  persist(
-    (set, get) => ({
-      sessions: [],
-      activeSessionId: null,
-      files: {},
-      chats: {},
-
-      createSession: (name, summary) => {
-        const id = slugify(name) + '_' + Date.now().toString(36)
-        const session: KnowledgeSet = {
-          id,
-          project_name: name,
-          summary,
-          created_at: new Date().toISOString(),
-          file_count: 0,
-          vector_count: 0,
-          collection_name: `ks_${id}`,
-        }
-        set(s => ({ sessions: [session, ...s.sessions] }))
-        return session
-      },
-
-      updateSession: (id, updates) =>
-        set(s => ({
-          sessions: s.sessions.map(sess =>
-            sess.id === id ? { ...sess, ...updates } : sess
-          ),
-        })),
-
-      deleteSession: (id) =>
-        set(s => {
-          const { [id]: _f, ...files } = s.files
-          const { [id]: _c, ...chats } = s.chats
-          return {
-            sessions: s.sessions.filter(sess => sess.id !== id),
-            activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
-            files,
-            chats,
-          }
-        }),
-
-      setActiveSession: (id) => set({ activeSessionId: id }),
-
-      getActiveSession: () => {
-        const { sessions, activeSessionId } = get()
-        return sessions.find(s => s.id === activeSessionId) ?? null
-      },
-
-      addFiles: (sessionId, newFiles) =>
-        set(s => ({
-          files: {
-            ...s.files,
-            [sessionId]: [...(s.files[sessionId] ?? []), ...newFiles],
-          },
-          sessions: s.sessions.map(sess =>
-            sess.id === sessionId
-              ? { ...sess, file_count: (s.files[sessionId]?.length ?? 0) + newFiles.length }
-              : sess
-          ),
-        })),
-
-      updateFile: (sessionId, fileId, updates) =>
-        set(s => ({
-          files: {
-            ...s.files,
-            [sessionId]: (s.files[sessionId] ?? []).map(f =>
-              f.id === fileId ? { ...f, ...updates } : f
-            ),
-          },
-        })),
-
-      removeFile: (sessionId, fileId) =>
-        set(s => {
-          const updated = (s.files[sessionId] ?? []).filter(f => f.id !== fileId)
-          return {
-            files: { ...s.files, [sessionId]: updated },
-            sessions: s.sessions.map(sess =>
-              sess.id === sessionId ? { ...sess, file_count: updated.length } : sess
-            ),
-          }
-        }),
-
-      getSessionFiles: (sessionId) => get().files[sessionId] ?? [],
-
-      addMessage: (sessionId, msg) =>
-        set(s => ({
-          chats: {
-            ...s.chats,
-            [sessionId]: [...(s.chats[sessionId] ?? []), msg],
-          },
-        })),
-
-      updateMessage: (sessionId, msgId, updates) =>
-        set(s => ({
-          chats: {
-            ...s.chats,
-            [sessionId]: (s.chats[sessionId] ?? []).map(m =>
-              m.id === msgId ? { ...m, ...updates } : m
-            ),
-          },
-        })),
-
-      clearChat: (sessionId) =>
-        set(s => ({ chats: { ...s.chats, [sessionId]: [] } })),
-
-      getSessionChat: (sessionId) => get().chats[sessionId] ?? [],
-    }),
-    {
-      name: 'governgpt-store',
-      version: 1,
-      // ── Safe localStorage — returns no-op on server ──────────────
-      storage: createJSONStorage(() => {
-        if (typeof window === 'undefined') {
-          return {
-            getItem: () => null,
-            setItem: () => {},
-            removeItem: () => {},
-          }
-        }
-        return localStorage
-      }),
-      // ── CRITICAL: never persist activeSessionId ──────────────────
-      // Server always renders with null (SessionGrid).
-      // If we persist it, client hydrates with a different tree
-      // (Workspace) → React mismatch → blank page.
-      partialize: (state) => ({
-        sessions: state.sessions,
-        files: state.files,
-        chats: state.chats,
-        // activeSessionId intentionally excluded
-      }),
-      skipHydration: true,
-    }
-  )
-)
+export default config
