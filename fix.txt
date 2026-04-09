@@ -1,65 +1,75 @@
 'use client'
-import { useCallback } from 'react'
-import { useDropzone } from 'react-dropzone'
-import { Upload, AlertCircle } from 'lucide-react'
-import { ACCEPTED_TYPES, cn } from '@/lib/utils'
+import { motion } from 'framer-motion'
+import { X, CheckCircle, AlertCircle, Loader2 } from 'lucide-react'
+import type { SourceFile } from '@/types'
+import { formatBytes, FILE_ICONS, FILE_COLORS, cn } from '@/lib/utils'
 
-interface UploadDropzoneProps {
-  onFiles: (files: File[]) => void
-  disabled?: boolean
-  maxFiles?: number
+interface FileItemProps {
+  file: SourceFile
+  onRemove: (id: string) => void
+  index: number
 }
 
-export function UploadDropzone({ onFiles, disabled, maxFiles = 20 }: UploadDropzoneProps) {
-  const onDrop = useCallback((accepted: File[]) => {
-    if (accepted.length > 0) onFiles(accepted)
-  }, [onFiles])
-
-  const { getRootProps, getInputProps, isDragActive, isDragReject } = useDropzone({
-    onDrop, accept: ACCEPTED_TYPES, disabled, maxFiles, maxSize: 50 * 1024 * 1024,
-  })
+export function FileItem({ file, onRemove, index }: FileItemProps) {
+  const ext = file.extension.toLowerCase()
+  const icon = FILE_ICONS[ext] ?? '📁'
 
   return (
-    <div
-      {...getRootProps()}
-      className={cn(
-        'relative mx-4 mb-3 rounded-xl border-2 border-dashed transition-all duration-200 cursor-pointer',
-        'flex flex-col items-center justify-center gap-2 py-5 text-center',
-        isDragActive && !isDragReject && 'border-axa-400 bg-axa-50 scale-[0.99]',
-        isDragReject && 'border-axared-400 bg-axared-50',
-        !isDragActive && !disabled && 'border-ink-200 hover:border-axa-300 hover:bg-axa-50/50',
-        disabled && 'border-ink-100 opacity-50 cursor-not-allowed bg-ink-50',
-      )}
+    <motion.div
+      initial={{ opacity: 0, x: -10 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: -10 }}
+      transition={{ delay: index * 0.03 }}
+      className="group flex items-center gap-3 px-4 py-2.5 hover:bg-ink-50 rounded-lg mx-1 transition-colors"
     >
-      <input {...getInputProps()} />
-      {isDragReject ? (
-        <>
-          <AlertCircle className="w-5 h-5 text-axared-500" />
-          <p className="text-xs text-axared-500 font-medium">File type not supported</p>
-        </>
-      ) : (
-        <>
-          <div className={cn(
-            'w-8 h-8 rounded-lg flex items-center justify-center transition-colors',
-            isDragActive ? 'bg-axa-100 text-axa-800' : 'bg-ink-100 text-ink-400'
-          )}>
-            <Upload className="w-4 h-4" />
+      {/* Icon */}
+      <div className="w-7 h-7 rounded-lg bg-axa-50 border border-axa-100 flex items-center justify-center text-xs flex-shrink-0">
+        {icon}
+      </div>
+
+      {/* Info */}
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5">
+          <p className="text-xs text-ink-700 truncate font-medium">{file.name}</p>
+          <span className="text-[9px] text-ink-400 flex-shrink-0">{formatBytes(file.size)}</span>
+        </div>
+
+        {file.status === 'uploading' && (
+          <div className="mt-1 h-1 bg-ink-100 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-axa-800 rounded-full transition-all duration-300"
+              style={{ width: `${file.progress}%` }}
+            />
           </div>
-          <div>
-            <p className="text-xs text-ink-600 font-medium">
-              {isDragActive ? 'Drop files here' : 'Drop files or click to upload'}
-            </p>
-            <p className="text-[10px] text-ink-400 mt-0.5">
-              PDF, DOCX, CSV, XLSX, JSON, XML, MD, Images · Max 50MB
-            </p>
-          </div>
-        </>
-      )}
-      {disabled && (
-        <p className="text-[10px] text-axared-500 font-medium">
-          Maximum {maxFiles} files reached
-        </p>
-      )}
-    </div>
+        )}
+        {file.status === 'processing' && (
+          <span className="text-[10px] text-axa-700">Processing…</span>
+        )}
+        {file.status === 'error' && (
+          <span className="text-[10px] text-axared-500 truncate">{file.error ?? 'Upload failed'}</span>
+        )}
+        {file.status === 'ready' && file.chunk_count && (
+          <span className="text-[10px] text-ink-400">{file.chunk_count} chunks</span>
+        )}
+      </div>
+
+      {/* Status */}
+      <div className="flex-shrink-0">
+        {file.status === 'uploading' || file.status === 'processing'
+          ? <Loader2 className="w-3.5 h-3.5 text-axa-800 animate-spin" />
+          : file.status === 'error'
+          ? <AlertCircle className="w-3.5 h-3.5 text-axared-500" />
+          : <CheckCircle className="w-3.5 h-3.5 text-emerald-500 opacity-70" />
+        }
+      </div>
+
+      {/* Remove */}
+      <button
+        onClick={() => onRemove(file.id)}
+        className="opacity-0 group-hover:opacity-100 p-1 rounded-lg hover:bg-axared-50 hover:text-axared-500 text-ink-300 transition-all flex-shrink-0"
+      >
+        <X className="w-3.5 h-3.5" />
+      </button>
+    </motion.div>
   )
 }
