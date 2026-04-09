@@ -1,158 +1,22 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600&family=DM+Mono:wght@400;500&display=swap');
+import type { Metadata } from 'next'
+import './globals.css'
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-:root {
-  --font-display: 'DM Serif Display', Georgia, serif;
-  --font-body: 'DM Sans', system-ui, sans-serif;
-  --font-mono: 'DM Mono', 'Courier New', monospace;
+export const metadata: Metadata = {
+  title: 'AXA GovernGPT — Data Governance Intelligence',
+  description: 'AI-powered data governance platform for AXA Insurance',
+  icons: { icon: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏛️</text></svg>" },
 }
 
-* { box-sizing: border-box; }
-
-html {
-  scroll-behavior: smooth;
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en" className="dark">
+      <head>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+      </head>
+      <body className="bg-navy-950 text-slate-200 font-body antialiased min-h-screen">
+        {children}
+      </body>
+    </html>
+  )
 }
-
-body {
-  background-color: #020817;
-  color: #e2e8f0;
-  font-family: var(--font-body);
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
-
-/* Custom scrollbar */
-::-webkit-scrollbar { width: 4px; height: 4px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb {
-  background: rgba(212, 160, 23, 0.25);
-  border-radius: 2px;
-}
-::-webkit-scrollbar-thumb:hover { background: rgba(212, 160, 23, 0.4); }
-
-/* Selection */
-::selection {
-  background: rgba(212, 160, 23, 0.25);
-  color: #f8e098;
-}
-
-/* Focus rings */
-*:focus-visible {
-  outline: 2px solid rgba(212, 160, 23, 0.5);
-  outline-offset: 2px;
-}
-
-/* Typography */
-.font-display { font-family: var(--font-display); }
-.font-mono { font-family: var(--font-mono); }
-
-/* Glass effect */
-.glass {
-  background: rgba(10, 22, 40, 0.7);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-}
-
-.glass-light {
-  background: rgba(15, 31, 53, 0.5);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-}
-
-/* Gold shimmer text */
-.text-gold-shimmer {
-  background: linear-gradient(90deg, #d4a017, #f2cc55, #d4a017);
-  background-size: 200%;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  animation: shimmer 3s linear infinite;
-}
-
-@keyframes shimmer {
-  0% { background-position: 0% center; }
-  100% { background-position: 200% center; }
-}
-
-/* Prose styles for AI markdown */
-.prose-governance {
-  color: #cbd5e1;
-  font-size: 0.925rem;
-  line-height: 1.7;
-}
-.prose-governance strong { color: #f8e098; font-weight: 600; }
-.prose-governance h1, .prose-governance h2, .prose-governance h3 {
-  color: #e2e8f0;
-  font-family: var(--font-display);
-  margin-top: 1.2em;
-  margin-bottom: 0.5em;
-}
-.prose-governance p { margin-bottom: 0.75em; }
-.prose-governance ul, .prose-governance ol {
-  padding-left: 1.5em;
-  margin-bottom: 0.75em;
-}
-.prose-governance li { margin-bottom: 0.3em; }
-.prose-governance code {
-  font-family: var(--font-mono);
-  background: rgba(212, 160, 23, 0.1);
-  color: #f2cc55;
-  padding: 0.15em 0.4em;
-  border-radius: 4px;
-  font-size: 0.85em;
-}
-.prose-governance blockquote {
-  border-left: 2px solid rgba(212, 160, 23, 0.4);
-  padding-left: 1em;
-  color: #94a3b8;
-  margin: 0.75em 0;
-}
-.prose-governance table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.875rem;
-  margin: 1em 0;
-}
-.prose-governance th {
-  background: rgba(212, 160, 23, 0.1);
-  color: #f2cc55;
-  padding: 0.5em 0.75em;
-  text-align: left;
-  font-weight: 600;
-  border-bottom: 1px solid rgba(212, 160, 23, 0.2);
-}
-.prose-governance td {
-  padding: 0.4em 0.75em;
-  border-bottom: 1px solid rgba(255,255,255,0.04);
-  color: #cbd5e1;
-}
-.prose-governance tr:hover td {
-  background: rgba(255,255,255,0.02);
-}
-
-/* Animated dots for typing */
-.typing-dots::after {
-  content: '';
-  animation: dots 1.4s steps(3, end) infinite;
-}
-@keyframes dots {
-  0%   { content: ''; }
-  33%  { content: '.'; }
-  66%  { content: '..'; }
-  100% { content: '...'; }
-}
-
-/* Stagger animation helpers */
-.stagger-1 { animation-delay: 0.05s; }
-.stagger-2 { animation-delay: 0.1s; }
-.stagger-3 { animation-delay: 0.15s; }
-.stagger-4 { animation-delay: 0.2s; }
-.stagger-5 { animation-delay: 0.25s; }
-.stagger-6 { animation-delay: 0.3s; }
-.stagger-7 { animation-delay: 0.35s; }
-.stagger-8 { animation-delay: 0.4s; }
