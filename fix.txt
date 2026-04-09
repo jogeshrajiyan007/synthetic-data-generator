@@ -1,65 +1,107 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
-    ...options,
-  })
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error(err.detail || `Request failed: ${res.status}`)
-  }
-  return res.json()
+// ── Knowledge Set / Session ─────────────────────────────────────
+export interface KnowledgeSet {
+  id: string              // used as knowledge_set param in API calls
+  project_name: string
+  summary: string
+  created_at: string
+  file_count: number
+  vector_count: number
+  collection_name: string
 }
 
-// ── Knowledge Sets ──────────────────────────────────────────────
-export const api = {
-  // List all ChromaDB collections
-  listKnowledgeSets: () =>
-    request<{ total: number; knowledge_sets: { knowledge_set: string; collection_name: string; vector_count: number }[] }>('/api/knowledge-sets/'),
+export interface CreateKnowledgeSetPayload {
+  project_name: string
+  summary: string
+}
 
-  deleteKnowledgeSet: (ks: string) =>
-    request(`/api/knowledge-sets/${encodeURIComponent(ks)}`, { method: 'DELETE' }),
+// ── Files / Sources ─────────────────────────────────────────────
+export interface SourceFile {
+  id: string              // local uuid for UI key
+  name: string
+  size: number
+  type: string
+  extension: string
+  status: 'uploading' | 'processing' | 'ready' | 'error'
+  progress: number
+  error?: string
+  ingested_at?: string
+  chunk_count?: number
+  department?: string
+  sensitivity?: string
+  pii_chunks?: number
+}
 
-  // Ingest loading zone
-  ingestLoadingZone: (knowledge_set: string, rebuild = false) =>
-    request('/api/ingest/', {
-      method: 'POST',
-      body: JSON.stringify({ knowledge_set, rebuild }),
-    }),
+export interface IngestResponse {
+  status: string
+  knowledge_set: string
+  collection_name: string
+  files_processed: number
+  files_failed: number
+  total_chunks: number
+  total_vectors: number
+  file_details: FileDetail[]
+  duration_seconds: number
+  ingested_at: string
+}
 
-  // Upload files (multipart)
-  uploadFiles: async (knowledge_set: string, files: File[]) => {
-    const form = new FormData()
-    form.append('knowledge_set', knowledge_set)
-    files.forEach(f => form.append('files', f))
-    const res = await fetch(`${API_URL}/api/ingest/upload`, {
-      method: 'POST',
-      body: form,
-    })
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: res.statusText }))
-      throw new Error(err.detail || `Upload failed: ${res.status}`)
-    }
-    return res.json()
-  },
+export interface FileDetail {
+  file: string
+  type: string
+  status: string
+  docs: number
+  error?: string
+}
 
-  // Query
-  query: (payload: { knowledge_set: string; question: string; use_rag: boolean; k: number }) =>
-    request('/api/query/', { method: 'POST', body: JSON.stringify(payload) }),
+// ── Chat ─────────────────────────────────────────────────────────
+export interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  timestamp: string
+  sources_used?: string[]
+  chunks_retrieved?: number
+  duration_seconds?: number
+  run_id?: string
+}
 
-  // Sources
-  getSources: (knowledge_set: string) =>
-    request(`/api/sources/?knowledge_set=${encodeURIComponent(knowledge_set)}`),
+export interface QueryRequest {
+  knowledge_set: string
+  question: string
+  use_rag: boolean
+  k: number
+}
 
-  // Stats
-  getStats: (knowledge_set: string) =>
-    request(`/api/logs/stats?knowledge_set=${encodeURIComponent(knowledge_set)}`),
+export interface QueryResponse {
+  run_id: string
+  knowledge_set: string
+  question: string
+  answer: string
+  mode: string
+  sources_used: string[]
+  chunks_retrieved: number
+  model: string
+  created_at: string
+  duration_seconds: number
+}
 
-  // Profile
-  profileFile: (filename: string) =>
-    request(`/api/profile/${encodeURIComponent(filename)}`),
+// ── Stats ────────────────────────────────────────────────────────
+export interface GovernanceStats {
+  knowledge_set: string
+  total_chunks: number
+  total_llm_responses: number
+  pii_chunks: number
+  pii_percentage: number
+  sensitivity_distribution: { sensitivity: string; count: number }[]
+  department_distribution: { department: string; count: number }[]
+}
 
-  // Health
-  health: () => request('/health'),
+export interface KnowledgeSetInfo {
+  knowledge_set: string
+  collection_name: string
+  vector_count: number
+}
+
+export interface KnowledgeSetListResponse {
+  total: number
+  knowledge_sets: KnowledgeSetInfo[]
 }
