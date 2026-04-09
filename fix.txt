@@ -1,81 +1,295 @@
 'use client'
-import { motion } from 'framer-motion'
-import { X, CheckCircle, AlertCircle, Loader2 } from 'lucide-react'
-import type { SourceFile } from '@/types'
-import { formatBytes, FILE_ICONS, FILE_COLORS, cn } from '@/lib/utils'
+import { useState, useRef, useEffect, useCallback } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+import { Send, Shield, Sparkles, RotateCcw, Sliders } from 'lucide-react'
+import { MessageBubble, TypingIndicator } from './MessageBubble'
+import type { KnowledgeSet, ChatMessage } from '@/types'
+import { api } from '@/lib/api'
+import { cn } from '@/lib/utils'
 
-interface FileItemProps {
-  file: SourceFile
-  onRemove: (id: string) => void
-  index: number
+const SUGGESTED = [
+  'What are these documents about? Provide a high-level summary.',
+  'What PII data is present and how should it be governed?',
+  'What regulatory frameworks are referenced (GDPR, Solvency II, IFRS 17)?',
+  'Propose a star schema for data modelling based on the uploaded datasets.',
+  'What data quality issues can you identify?',
+]
+
+interface ChatWindowProps {
+  session: KnowledgeSet
+  messages: ChatMessage[]
+  onAddMessage: (msg: ChatMessage) => void
+  onUpdateMessage: (id: string, updates: Partial<ChatMessage>) => void
+  onClearChat: () => void
 }
 
-export function FileItem({ file, onRemove, index }: FileItemProps) {
-  const ext = file.extension.toLowerCase()
-  const icon = FILE_ICONS[ext] ?? '📁'
-  const colorClass = FILE_COLORS[ext] ?? 'text-slate-400 bg-slate-400/10'
+export function ChatWindow({
+  session, messages, onAddMessage, onUpdateMessage, onClearChat
+}: ChatWindowProps) {
+  const [input, setInput] = useState('')
+  const [isLoading, setIsLoading] = useState(false)
+  const [useRag, setUseRag] = useState(true)
+  const [k, setK] = useState(5)
+  const [showSettings, setShowSettings] = useState(false)
+  const bottomRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages, isLoading])
+
+  const sendMessage = useCallback(async (question: string) => {
+    if (!question.trim() || isLoading) return
+    setInput('')
+    setShowSettings(false)
+
+    const userMsg: ChatMessage = {
+      id: Math.random().toString(36).slice(2),
+      role: 'user',
+      content: question.trim(),
+      timestamp: new Date().toISOString(),
+    }
+    onAddMessage(userMsg)
+    setIsLoading(true)
+
+    const assistantId = Math.random().toString(36).slice(2)
+    onAddMessage({
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      timestamp: new Date().toISOString(),
+    })
+
+    try {
+      const result = await api.query({
+        knowledge_set: session.id,
+        question: question.trim(),
+        use_rag: useRag,
+        k,
+      }) as {
+        answer: string
+        sources_used: string[]
+        chunks_retrieved: number
+        duration_seconds: number
+        run_id: string
+      }
+
+      onUpdateMessage(assistantId, {
+        content: result.answer,
+        sources_used: result.sources_used,
+        chunks_retrieved: result.chunks_retrieved,
+        duration_seconds: result.duration_seconds,
+        run_id: result.run_id,
+      })
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Request failed'
+      onUpdateMessage(assistantId, {
+        content: `**Error:** ${msg}\n\nPlease ensure the backend is running and this knowledge set has been indexed.`,
+      })
+    } finally {
+      setIsLoading(false)
+      setTimeout(() => inputRef.current?.focus(), 100)
+    }
+  }, [isLoading, session.id, useRag, k, onAddMessage, onUpdateMessage])
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      sendMessage(input)
+    }
+  }
+
+  // Auto-resize textarea
+  const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInput(e.target.value)
+    e.target.style.height = 'auto'
+    e.target.style.height = Math.min(e.target.scrollHeight, 140) + 'px'
+  }
+
+  const visibleMessages = messages.filter(m => m.content !== '' || m.role === 'user')
+  const isTyping = isLoading && messages[messages.length - 1]?.content === ''
 
   return (
-    <motion.div
-      initial={{ opacity: 0, x: -12 }}
-      animate={{ opacity: 1, x: 0 }}
-      exit={{ opacity: 0, x: -12 }}
-      transition={{ delay: index * 0.03 }}
-      className="group flex items-center gap-3 px-4 py-3 hover:bg-white/3 rounded-xl transition-colors"
-    >
-      {/* Icon */}
-      <div className={cn('w-8 h-8 rounded-lg flex items-center justify-center text-sm flex-shrink-0', colorClass)}>
-        {icon}
-      </div>
+    <div className="h-full flex flex-col bg-navy-950">
+      {/* Header */}
+      <div className="flex-shrink-0 px-6 py-4 border-b border-white/5 bg-navy-900/40">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-xl bg-gold-400/10 border border-gold-400/20 flex items-center justify-center">
+              <Shield className="w-4 h-4 text-gold-300" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-display text-slate-200">GovernGPT Agent</span>
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-emerald-400/10 text-emerald-400/80 border border-emerald-400/15">
+                  GPT-4o
+                </span>
+              </div>
+              <p className="text-[10px] text-slate-600 font-mono">{session.project_name}</p>
+            </div>
+          </div>
 
-      {/* Info */}
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <p className="text-xs text-slate-200 truncate font-medium">{file.name}</p>
-          <span className="text-[10px] font-mono text-slate-600 flex-shrink-0">
-            {formatBytes(file.size)}
-          </span>
+          <div className="flex items-center gap-2">
+            {/* Settings toggle */}
+            <button
+              onClick={() => setShowSettings(s => !s)}
+              className={cn(
+                'p-2 rounded-lg transition-colors text-slate-500',
+                showSettings ? 'bg-gold-400/10 text-gold-400' : 'hover:bg-white/5 hover:text-slate-300'
+              )}
+              title="Query settings"
+            >
+              <Sliders className="w-4 h-4" />
+            </button>
+
+            {messages.length > 0 && (
+              <button
+                onClick={onClearChat}
+                className="p-2 rounded-lg hover:bg-white/5 text-slate-600 hover:text-slate-300 transition-colors"
+                title="Clear chat"
+              >
+                <RotateCcw className="w-4 h-4" />
+              </button>
+            )}
+          </div>
         </div>
 
-        {/* Status bar */}
-        {file.status === 'uploading' && (
-          <div className="mt-1.5 h-0.5 bg-navy-700 rounded-full overflow-hidden">
-            <div
-              className="h-full bg-gold-400 rounded-full transition-all duration-300"
-              style={{ width: `${file.progress}%` }}
-            />
-          </div>
-        )}
-        {file.status === 'processing' && (
-          <span className="text-[10px] text-gold-400/70 font-mono">Processing chunks…</span>
-        )}
-        {file.status === 'error' && (
-          <span className="text-[10px] text-red-400 font-mono truncate">{file.error ?? 'Upload failed'}</span>
-        )}
-        {file.status === 'ready' && file.chunk_count && (
-          <span className="text-[10px] text-slate-600 font-mono">{file.chunk_count} chunks</span>
-        )}
+        {/* Settings panel */}
+        <AnimatePresence>
+          {showSettings && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="mt-3 overflow-hidden"
+            >
+              <div className="flex items-center gap-6 py-2 px-3 bg-navy-800/60 rounded-xl border border-white/5">
+                <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer select-none">
+                  <div
+                    onClick={() => setUseRag(v => !v)}
+                    className={cn(
+                      'w-8 h-4 rounded-full transition-colors relative cursor-pointer',
+                      useRag ? 'bg-gold-400/70' : 'bg-slate-700'
+                    )}
+                  >
+                    <div className={cn(
+                      'absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform',
+                      useRag ? 'translate-x-4' : 'translate-x-0.5'
+                    )} />
+                  </div>
+                  Use RAG
+                </label>
+                <label className="flex items-center gap-2 text-xs text-slate-400">
+                  <span>Top-K</span>
+                  <select
+                    value={k}
+                    onChange={e => setK(Number(e.target.value))}
+                    className="bg-navy-700 border border-white/8 rounded-lg px-2 py-0.5 text-xs text-slate-300 focus:outline-none"
+                  >
+                    {[3, 5, 8, 10, 15, 20].map(v => (
+                      <option key={v} value={v}>{v}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
-      {/* Status icon */}
-      <div className="flex-shrink-0">
-        {file.status === 'uploading' || file.status === 'processing' ? (
-          <Loader2 className="w-3.5 h-3.5 text-gold-400 animate-spin" />
-        ) : file.status === 'error' ? (
-          <AlertCircle className="w-3.5 h-3.5 text-red-400" />
+      {/* Messages area */}
+      <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
+        {messages.length === 0 ? (
+          <WelcomeScreen
+            sessionName={session.project_name}
+            onSuggest={sendMessage}
+          />
         ) : (
-          <CheckCircle className="w-3.5 h-3.5 text-emerald-400 opacity-60" />
+          <>
+            {visibleMessages.map((msg, i) =>
+              isTyping && i === visibleMessages.length - 1 && msg.role === 'assistant' ? (
+                <TypingIndicator key={msg.id} />
+              ) : (
+                <MessageBubble key={msg.id} message={msg} index={i} />
+              )
+            )}
+            <div ref={bottomRef} />
+          </>
         )}
       </div>
 
-      {/* Remove button */}
-      <button
-        onClick={() => onRemove(file.id)}
-        className="opacity-0 group-hover:opacity-100 p-1 rounded-lg hover:bg-red-500/15 hover:text-red-400 text-slate-600 transition-all flex-shrink-0"
-        title="Remove file"
-      >
-        <X className="w-3.5 h-3.5" />
-      </button>
+      {/* Input area */}
+      <div className="flex-shrink-0 px-6 pb-6 pt-3 border-t border-white/5">
+        <div className={cn(
+          'flex items-end gap-3 bg-navy-800/80 border rounded-2xl px-4 py-3 transition-all',
+          'focus-within:border-gold-400/30 border-white/8'
+        )}>
+          <textarea
+            ref={inputRef}
+            value={input}
+            onChange={handleInput}
+            onKeyDown={handleKeyDown}
+            placeholder="Ask a governance question about your data…"
+            disabled={isLoading}
+            rows={1}
+            className="flex-1 bg-transparent text-sm text-slate-200 placeholder-slate-600 resize-none focus:outline-none leading-relaxed py-0.5 max-h-36 disabled:opacity-60"
+            style={{ height: '24px' }}
+          />
+          <button
+            onClick={() => sendMessage(input)}
+            disabled={!input.trim() || isLoading}
+            className={cn(
+              'w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0 transition-all',
+              input.trim() && !isLoading
+                ? 'bg-gold-400 text-navy-950 hover:bg-gold-300 shadow-gold'
+                : 'bg-navy-700 text-slate-600 cursor-not-allowed'
+            )}
+          >
+            <Send className="w-3.5 h-3.5" />
+          </button>
+        </div>
+        <p className="text-center text-[10px] text-slate-700 mt-2">
+          Press <kbd className="font-mono bg-navy-800 px-1 rounded">Enter</kbd> to send · <kbd className="font-mono bg-navy-800 px-1 rounded">Shift+Enter</kbd> for new line
+        </p>
+      </div>
+    </div>
+  )
+}
+
+function WelcomeScreen({
+  sessionName, onSuggest
+}: { sessionName: string; onSuggest: (q: string) => void }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 16 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="flex flex-col items-center justify-center min-h-[60%] text-center py-8"
+    >
+      <div className="w-14 h-14 rounded-2xl bg-gold-400/8 border border-gold-400/15 flex items-center justify-center mb-5">
+        <Sparkles className="w-7 h-7 text-gold-300" />
+      </div>
+      <h2 className="font-display text-2xl text-slate-200 mb-2">
+        Ask GovernGPT
+      </h2>
+      <p className="text-slate-500 text-sm max-w-sm mb-8 leading-relaxed">
+        Query your <span className="text-gold-400/80 font-medium">{sessionName}</span> knowledge set. Upload sources first, then ask governance questions.
+      </p>
+
+      <div className="w-full max-w-lg space-y-2">
+        <p className="text-[10px] font-mono text-slate-600 uppercase tracking-widest mb-3">Suggested queries</p>
+        {SUGGESTED.map((q, i) => (
+          <motion.button
+            key={i}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: i * 0.07 }}
+            onClick={() => onSuggest(q)}
+            className="w-full text-left px-4 py-2.5 rounded-xl bg-navy-800/60 border border-white/5 text-xs text-slate-400 hover:border-gold-400/20 hover:text-slate-200 hover:bg-navy-800 transition-all"
+          >
+            {q}
+          </motion.button>
+        ))}
+      </div>
     </motion.div>
   )
 }
