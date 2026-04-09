@@ -1,121 +1,67 @@
 'use client'
-import { motion } from 'framer-motion'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import { User, Bot, Clock, FileText, Copy, Check } from 'lucide-react'
-import { useState } from 'react'
-import type { ChatMessage } from '@/types'
-import { formatTime, cn } from '@/lib/utils'
+import { useState, useCallback, useEffect } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+import { CheckCircle, AlertCircle, Info, X } from 'lucide-react'
+import { cn } from '@/lib/utils'
 
-interface MessageBubbleProps {
-  message: ChatMessage
-  index: number
-}
+type ToastType = 'success' | 'error' | 'info'
+interface Toast { id: string; type: ToastType; message: string }
 
-export function MessageBubble({ message, index }: MessageBubbleProps) {
-  const [copied, setCopied] = useState(false)
-  const isUser = message.role === 'user'
+let addToastFn: ((type: ToastType, message: string) => void) | null = null
+export function toast(type: ToastType, message: string) { addToastFn?.(type, message) }
 
-  const handleCopy = async () => {
-    await navigator.clipboard.writeText(message.content)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+export function ToastProvider() {
+  const [toasts, setToasts] = useState<Toast[]>([])
+
+  const add = useCallback((type: ToastType, message: string) => {
+    const id = Math.random().toString(36).slice(2)
+    setToasts(t => [...t, { id, type, message }])
+    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 4000)
+  }, [])
+
+  useEffect(() => { addToastFn = add; return () => { addToastFn = null } }, [add])
+
+  const icons = { success: CheckCircle, error: AlertCircle, info: Info }
+  const styles = {
+    success: 'border-emerald-200 bg-white text-emerald-700',
+    error:   'border-axared-200 bg-white text-axared-600',
+    info:    'border-axa-100 bg-white text-axa-800',
+  }
+  const iconColors = {
+    success: 'text-emerald-500',
+    error:   'text-axared-500',
+    info:    'text-axa-800',
   }
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: Math.min(index * 0.04, 0.25), duration: 0.3 }}
-      className={cn('flex gap-3 group', isUser ? 'flex-row-reverse' : 'flex-row')}
-    >
-      {/* Avatar */}
-      <div className={cn(
-        'w-8 h-8 rounded-lg flex-shrink-0 flex items-center justify-center mt-0.5',
-        isUser ? 'bg-axa-800' : 'bg-white border border-ink-200 shadow-sm'
-      )}>
-        {isUser
-          ? <User className="w-4 h-4 text-white" />
-          : <Bot className="w-4 h-4 text-axa-800" />
-        }
-      </div>
-
-      {/* Bubble */}
-      <div className={cn('flex-1 min-w-0 max-w-[85%] flex flex-col gap-1', isUser ? 'items-end' : 'items-start')}>
-        <div className={cn(
-          'relative rounded-2xl px-4 py-3 text-sm',
-          isUser
-            ? 'bg-axa-800 text-white rounded-tr-sm ml-auto'
-            : 'bg-white border border-ink-200 shadow-sm rounded-tl-sm'
-        )}>
-          {isUser ? (
-            <p className="text-white leading-relaxed">{message.content}</p>
-          ) : (
-            <div className="prose-governance">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-            </div>
-          )}
-
-          {/* Copy button */}
-          {!isUser && message.content && (
-            <button
-              onClick={handleCopy}
-              className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1 rounded-lg bg-ink-50 hover:bg-ink-100 text-ink-400 hover:text-ink-700 transition-all border border-ink-200"
-              title="Copy response"
+    <div className="fixed bottom-6 right-6 z-[100] flex flex-col gap-2 pointer-events-none">
+      <AnimatePresence>
+        {toasts.map(t => {
+          const Icon = icons[t.type]
+          return (
+            <motion.div
+              key={t.id}
+              initial={{ opacity: 0, x: 32, scale: 0.96 }}
+              animate={{ opacity: 1, x: 0, scale: 1 }}
+              exit={{ opacity: 0, x: 32, scale: 0.96 }}
+              className={cn(
+                'flex items-center gap-3 px-4 py-3 rounded-xl border shadow-card pointer-events-auto',
+                'text-sm max-w-xs',
+                styles[t.type]
+              )}
             >
-              {copied ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
-            </button>
-          )}
-        </div>
-
-        {/* Meta row */}
-        <div className={cn('flex items-center gap-3 px-1', isUser ? 'flex-row-reverse' : 'flex-row')}>
-          <span className="text-[10px] text-ink-400 flex items-center gap-1">
-            <Clock className="w-2.5 h-2.5" />
-            {formatTime(message.timestamp)}
-          </span>
-
-          {!isUser && message.sources_used && message.sources_used.length > 0 && (
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <FileText className="w-2.5 h-2.5 text-ink-400" />
-              {message.sources_used.map(src => (
-                <span key={src} className="text-[10px] font-mono text-axa-800 bg-axa-50 px-1.5 py-0.5 rounded border border-axa-100">
-                  {src}
-                </span>
-              ))}
-            </div>
-          )}
-
-          {!isUser && message.duration_seconds && (
-            <span className="text-[10px] text-ink-300">{message.duration_seconds}s</span>
-          )}
-        </div>
-      </div>
-    </motion.div>
-  )
-}
-
-export function TypingIndicator() {
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: 8 }}
-      className="flex gap-3"
-    >
-      <div className="w-8 h-8 rounded-lg bg-white border border-ink-200 shadow-sm flex items-center justify-center flex-shrink-0">
-        <Bot className="w-4 h-4 text-axa-800" />
-      </div>
-      <div className="bg-white border border-ink-200 shadow-sm rounded-2xl rounded-tl-sm px-4 py-3 flex items-center gap-1.5">
-        {[0, 0.2, 0.4].map((delay, i) => (
-          <motion.div
-            key={i}
-            className="w-1.5 h-1.5 rounded-full bg-axa-800"
-            animate={{ scale: [1, 1.4, 1], opacity: [0.3, 1, 0.3] }}
-            transition={{ duration: 0.8, delay, repeat: Infinity }}
-          />
-        ))}
-      </div>
-    </motion.div>
+              <Icon className={cn('w-4 h-4 flex-shrink-0', iconColors[t.type])} />
+              <span className="text-ink-700 text-xs">{t.message}</span>
+              <button
+                onClick={() => setToasts(ts => ts.filter(x => x.id !== t.id))}
+                className="ml-auto text-ink-300 hover:text-ink-500"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </motion.div>
+          )
+        })}
+      </AnimatePresence>
+    </div>
   )
 }
