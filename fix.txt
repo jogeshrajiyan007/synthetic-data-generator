@@ -1,148 +1,195 @@
 'use client'
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Sparkles, AlertCircle } from 'lucide-react'
-import { cn } from '@/lib/utils'
+import { ChevronLeft, Database, RefreshCw, Trash2 } from 'lucide-react'
+import { UploadDropzone } from './UploadDropzone'
+import { FileItem } from './FileItem'
+import { SourceProgressBar, MAX_SOURCES } from './SourceProgressBar'
+import type { KnowledgeSet, SourceFile } from '@/types'
+import { api } from '@/lib/api'
+import { cn, formatDate } from '@/lib/utils'
+import { v4 as uuidv4 } from 'crypto'
 
-interface CreateSessionModalProps {
-  isOpen: boolean
-  onClose: () => void
-  onCreate: (name: string, summary: string) => void
+interface SourcePanelProps {
+  session: KnowledgeSet
+  files: SourceFile[]
+  onBack: () => void
+  onAddFiles: (files: SourceFile[]) => void
+  onUpdateFile: (id: string, updates: Partial<SourceFile>) => void
+  onRemoveFile: (id: string) => void
 }
 
-export function CreateSessionModal({ isOpen, onClose, onCreate }: CreateSessionModalProps) {
-  const [name, setName] = useState('')
-  const [summary, setSummary] = useState('')
-  const [error, setError] = useState('')
+export function SourcePanel({
+  session, files, onBack, onAddFiles, onUpdateFile, onRemoveFile
+}: SourcePanelProps) {
+  const [isIngesting, setIsIngesting] = useState(false)
+  const atLimit = files.length >= MAX_SOURCES
 
-  const handleSubmit = () => {
-    if (!name.trim()) { setError('Project name is required'); return }
-    if (name.trim().length < 3) { setError('Name must be at least 3 characters'); return }
-    onCreate(name.trim(), summary.trim())
-    setName(''); setSummary(''); setError('')
+  const handleFiles = useCallback(async (rawFiles: File[]) => {
+    const allowed = rawFiles.slice(0, MAX_SOURCES - files.length)
+    if (!allowed.length) return
+
+    // Build optimistic UI entries
+    const newEntries: SourceFile[] = allowed.map(f => ({
+      id: Math.random().toString(36).slice(2),
+      name: f.name,
+      size: f.size,
+      type: f.type,
+      extension: f.name.split('.').pop() ?? '',
+      status: 'uploading' as const,
+      progress: 0,
+    }))
+    onAddFiles(newEntries)
+
+    // Simulate progress ticks
+    const ticks = newEntries.map((entry) => {
+      let p = 0
+      return setInterval(() => {
+        p = Math.min(p + Math.random() * 20 + 10, 90)
+        onUpdateFile(entry.id, { progress: Math.round(p) })
+      }, 250)
+    })
+
+    try {
+      // Mark as processing
+      newEntries.forEach(e => onUpdateFile(e.id, { status: 'processing', progress: 95 }))
+      ticks.forEach(clearInterval)
+
+      const result = await api.uploadFiles(session.id, allowed)
+
+      // Mark as ready
+      result.file_details?.forEach((detail: { file: string; status: string; docs: number; error?: string }, i: number) => {
+        const entry = newEntries[i]
+        if (!entry) return
+        if (detail.status === 'ok') {
+          onUpdateFile(entry.id, {
+            status: 'ready',
+            progress: 100,
+            chunk_count: detail.docs,
+          })
+        } else {
+          onUpdateFile(entry.id, { status: 'error', error: detail.error ?? 'Failed' })
+        }
+      })
+    } catch (err: unknown) {
+      ticks.forEach(clearInterval)
+      const msg = err instanceof Error ? err.message : 'Upload failed'
+      newEntries.forEach(e => onUpdateFile(e.id, { status: 'error', error: msg }))
+    }
+  }, [files.length, session.id, onAddFiles, onUpdateFile])
+
+  const handleReingest = async () => {
+    setIsIngesting(true)
+    try {
+      await api.ingestLoadingZone(session.id, true)
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setIsIngesting(false)
+    }
   }
 
-  const handleClose = () => {
-    setName(''); setSummary(''); setError('')
-    onClose()
-  }
+  const readyCount = files.filter(f => f.status === 'ready').length
 
   return (
-    <AnimatePresence>
-      {isOpen && (
-        <>
-          {/* Backdrop */}
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            onClick={handleClose}
-            className="fixed inset-0 z-40 bg-navy-950/80 backdrop-blur-sm"
-          />
-
-          {/* Modal */}
-          <motion.div
-            initial={{ opacity: 0, scale: 0.95, y: 20 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.95, y: 20 }}
-            transition={{ type: 'spring', damping: 28, stiffness: 350 }}
-            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+    <div className="h-full flex flex-col bg-navy-900/60 border-r border-white/5">
+      {/* Header */}
+      <div className="flex-shrink-0 p-4 border-b border-white/5">
+        <div className="flex items-center gap-2 mb-3">
+          <button
+            onClick={onBack}
+            className="p-1.5 rounded-lg hover:bg-white/6 text-slate-500 hover:text-slate-300 transition-colors"
+            title="Back to projects"
           >
-            <div className="relative w-full max-w-md glass rounded-2xl overflow-hidden shadow-navy-lg">
-              {/* Top gold bar */}
-              <div className="h-px bg-gradient-to-r from-transparent via-gold-400/50 to-transparent" />
-
-              <div className="p-7">
-                {/* Header */}
-                <div className="flex items-start justify-between mb-6">
-                  <div>
-                    <div className="flex items-center gap-2 mb-1">
-                      <Sparkles className="w-4 h-4 text-gold-400" />
-                      <span className="text-gold-400 text-xs font-mono uppercase tracking-widest">New Knowledge Set</span>
-                    </div>
-                    <h2 className="font-display text-2xl text-slate-100">Start a New Project</h2>
-                    <p className="text-slate-500 text-sm mt-1">Create a dedicated workspace for your data governance project.</p>
-                  </div>
-                  <button
-                    onClick={handleClose}
-                    className="p-2 rounded-xl hover:bg-white/5 text-slate-500 hover:text-slate-300 transition-colors mt-0.5"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-
-                {/* Form */}
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-xs font-medium text-slate-400 mb-2 uppercase tracking-wider">
-                      Project Name <span className="text-gold-400">*</span>
-                    </label>
-                    <input
-                      autoFocus
-                      value={name}
-                      onChange={e => { setName(e.target.value); setError('') }}
-                      onKeyDown={e => e.key === 'Enter' && handleSubmit()}
-                      placeholder="e.g. Claims Processing Q1 2025"
-                      className={cn(
-                        'w-full bg-navy-900/80 border rounded-xl px-4 py-3 text-sm text-slate-200',
-                        'placeholder-slate-600 focus:outline-none transition-all',
-                        error
-                          ? 'border-red-500/50 focus:border-red-500/70'
-                          : 'border-white/8 focus:border-gold-400/40 focus:bg-navy-900'
-                      )}
-                    />
-                    {error && (
-                      <motion.div
-                        initial={{ opacity: 0, y: -4 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        className="flex items-center gap-1.5 mt-1.5 text-red-400 text-xs"
-                      >
-                        <AlertCircle className="w-3.5 h-3.5" />
-                        {error}
-                      </motion.div>
-                    )}
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-slate-400 mb-2 uppercase tracking-wider">
-                      Summary <span className="text-slate-600">(optional)</span>
-                    </label>
-                    <textarea
-                      value={summary}
-                      onChange={e => setSummary(e.target.value)}
-                      placeholder="Brief description of this project's purpose..."
-                      rows={3}
-                      className="w-full bg-navy-900/80 border border-white/8 rounded-xl px-4 py-3 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-gold-400/40 focus:bg-navy-900 transition-all resize-none"
-                    />
-                  </div>
-                </div>
-
-                {/* Actions */}
-                <div className="flex items-center justify-end gap-3 mt-6 pt-5 border-t border-white/5">
-                  <button
-                    onClick={handleClose}
-                    className="px-4 py-2.5 rounded-xl text-sm text-slate-400 hover:text-slate-200 hover:bg-white/5 transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleSubmit}
-                    disabled={!name.trim()}
-                    className={cn(
-                      'px-5 py-2.5 rounded-xl text-sm font-medium transition-all duration-200',
-                      'bg-gold-400/90 text-navy-950 hover:bg-gold-300',
-                      'disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-gold-400/90',
-                      'shadow-sm hover:shadow-gold'
-                    )}
-                  >
-                    Create Project
-                  </button>
-                </div>
-              </div>
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1.5">
+              <Database className="w-3.5 h-3.5 text-gold-400 flex-shrink-0" />
+              <span className="text-[10px] font-mono text-gold-400/70 uppercase tracking-widest">Sources</span>
             </div>
-          </motion.div>
-        </>
+            <p className="text-sm font-medium text-slate-200 truncate mt-0.5 font-display">
+              {session.project_name}
+            </p>
+          </div>
+        </div>
+
+        {/* Session meta */}
+        <div className="flex items-center justify-between">
+          <span className="text-[10px] text-slate-600 font-mono">
+            Created {formatDate(session.created_at)}
+          </span>
+          {readyCount > 0 && (
+            <span className="text-[10px] text-emerald-400/70 font-mono">
+              {readyCount} indexed
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Progress bar */}
+      <div className="flex-shrink-0 pt-3">
+        <SourceProgressBar count={files.length} />
+      </div>
+
+      {/* Upload zone */}
+      <div className="flex-shrink-0">
+        <UploadDropzone
+          onFiles={handleFiles}
+          disabled={atLimit}
+          maxFiles={MAX_SOURCES}
+        />
+      </div>
+
+      {/* File list */}
+      <div className="flex-1 overflow-y-auto">
+        <AnimatePresence initial={false}>
+          {files.length === 0 ? (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="flex flex-col items-center justify-center py-10 text-center px-4"
+            >
+              <div className="w-10 h-10 rounded-xl bg-navy-800 border border-white/6 flex items-center justify-center mb-3">
+                <Database className="w-5 h-5 text-slate-700" />
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                No sources yet. Upload files to begin building your knowledge set.
+              </p>
+            </motion.div>
+          ) : (
+            <div className="py-1">
+              {files.map((file, i) => (
+                <FileItem
+                  key={file.id}
+                  file={file}
+                  index={i}
+                  onRemove={onRemoveFile}
+                />
+              ))}
+            </div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {/* Footer actions */}
+      {files.length > 0 && (
+        <div className="flex-shrink-0 p-3 border-t border-white/5 flex items-center gap-2">
+          <button
+            onClick={handleReingest}
+            disabled={isIngesting}
+            className={cn(
+              'flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-medium',
+              'bg-gold-400/8 border border-gold-400/15 text-gold-400/80',
+              'hover:bg-gold-400/12 hover:text-gold-300 transition-all',
+              'disabled:opacity-50 disabled:cursor-not-allowed'
+            )}
+          >
+            <RefreshCw className={cn('w-3.5 h-3.5', isIngesting && 'animate-spin')} />
+            {isIngesting ? 'Re-indexing…' : 'Re-index All'}
+          </button>
+        </div>
       )}
-    </AnimatePresence>
+    </div>
   )
 }
