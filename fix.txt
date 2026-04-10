@@ -1,4 +1,167 @@
-Index(['run_id', 'question', 'answer', 'prompt_tokens', 'completion_tokens',
-       'total_tokens', 'content_filters', 'mode', 'sources_used',
-       'chunks_retrieved', 'model', 'created_at', 'knowledge_set',
-       'duration_seconds'],
+import pandas as pd
+import numpy as np
+import json
+import plotly.express as px
+import plotly.graph_objects as go
+
+# Convert timestamps
+df['created_at'] = pd.to_datetime(df['created_at'], errors='coerce')
+df = df.dropna(subset=['created_at'])
+
+# Time features
+df['date'] = df['created_at'].dt.date
+df['hour'] = df['created_at'].dt.hour
+df['day'] = df['created_at'].dt.day_name()
+
+# Fix sources_used (string → list)
+def parse_sources(x):
+    try:
+        return json.loads(x) if isinstance(x, str) else x
+    except:
+        return []
+
+df['sources_used'] = df['sources_used'].apply(parse_sources)
+
+# Derived metrics
+df['efficiency'] = df['completion_tokens'] / df['prompt_tokens']
+df['answer_length'] = df['answer'].str.len()
+
+print("📊 LLM OBSERVABILITY DASHBOARD")
+print("="*50)
+
+print(f"Total Queries        : {len(df)}")
+print(f"Total Tokens         : {df['total_tokens'].sum():,.0f}")
+print(f"Avg Tokens / Query   : {df['total_tokens'].mean():.2f}")
+print(f"Avg Latency (sec)    : {df['duration_seconds'].mean():.2f}")
+print(f"Avg Chunks Retrieved : {df['chunks_retrieved'].mean():.2f}")
+
+fig = px.line(
+    df.sort_values('created_at'),
+    x="created_at",
+    y="total_tokens",
+    title="📈 Token Usage Over Time"
+)
+fig.show()
+
+heatmap = df.pivot_table(
+    values='total_tokens',
+    index='hour',
+    columns='date',
+    aggfunc='sum'
+)
+
+fig = px.imshow(
+    heatmap,
+    aspect="auto",
+    title="🔥 Token Usage Heatmap (Hour vs Date)"
+)
+fig.show()
+
+fig = px.histogram(
+    df,
+    x="duration_seconds",
+    nbins=20,
+    title="⚡ Latency Distribution"
+)
+fig.show()
+
+fig = px.scatter(
+    df,
+    x="total_tokens",
+    y="duration_seconds",
+    size="completion_tokens",
+    color="chunks_retrieved",
+    hover_data=["question"],
+    title="⚡ Latency vs Token Usage"
+)
+fig.show()
+
+fig = px.scatter(
+    df,
+    x="chunks_retrieved",
+    y="completion_tokens",
+    size="total_tokens",
+    color="duration_seconds",
+    hover_data=["question"],
+    title="🎯 RAG Effectiveness Map"
+)
+fig.show()
+
+fig = px.histogram(
+    df,
+    x="efficiency",
+    nbins=20,
+    title="🧠 Token Efficiency (Completion / Prompt)"
+)
+fig.show()
+
+sources = df['sources_used'].explode()
+
+fig = px.bar(
+    sources.value_counts().reset_index(),
+    x="index",
+    y="sources_used",
+    title="📂 Source Usage Frequency"
+)
+fig.show()
+
+threshold = df['total_tokens'].mean() + 2 * df['total_tokens'].std()
+df['anomaly'] = df['total_tokens'] > threshold
+
+fig = px.scatter(
+    df,
+    x="created_at",
+    y="total_tokens",
+    color="anomaly",
+    title="🧪 Token Anomaly Detection"
+)
+fig.show()
+
+fig = px.bar(
+    df.groupby('hour').size().reset_index(name='queries'),
+    x="hour",
+    y="queries",
+    title="🕒 Query Volume by Hour"
+)
+fig.show()
+
+fig = go.Figure(go.Funnel(
+    y=["Prompt Tokens", "Completion Tokens"],
+    x=[df['prompt_tokens'].sum(), df['completion_tokens'].sum()]
+))
+
+fig.update_layout(title="🔥 Token Funnel")
+fig.show()
+
+fig = px.parallel_coordinates(
+    df,
+    dimensions=[
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "duration_seconds",
+        "chunks_retrieved"
+    ],
+    color="total_tokens",
+    title="🧠 Multi-Dimensional Analysis"
+)
+
+fig.show()
+
+df.sort_values('duration_seconds', ascending=False)[
+    ['question','duration_seconds']
+].head(5)
+
+df[df['chunks_retrieved'] < 2][['question']]
+
+df.sort_values('total_tokens', ascending=False)[
+    ['question','total_tokens']
+].head(5)
+
+daily = df.groupby('date').agg({
+    'total_tokens': 'sum',
+    'duration_seconds': 'mean',
+    'run_id': 'count'
+}).rename(columns={'run_id': 'query_count'}).reset_index()
+
+daily
