@@ -1,22 +1,209 @@
-Goal Template - Jan 2026 to Dec 2026					
-Goal Category	Goal Name	Goal Description	Goal Weightage	Measurement of Success	Measurement of Success Weightage
-Min 3 and Max 8 Business Goals to be set totalling to 70% Weightage 					
-Individual Business Goals (75%)	Specific Annual Assignments	Contribution in the orgnization wide initiatives over and above business Goals e.g Active member of Change Agents Network, Gurus@Work, DEIB Champions, All Hearts In or Buzz Crew..etc	5%	Successfully completed responsibilities assigned as a part of Specific Annual Assignement with positive feedback from Leadership team, GLC, HRBP…etc	100%
-					
-					
-					
-					
-					
-					
-					
-		Total weitghtage should be 75%	5%		
-Do not make any change in the below goals while updating in Crystal					
-Common Organizational Goal (25%)	Skills Assessment	Required technical skills, leadership & behavioral competencies are consistently demonstrated throughout the year, according to the current role and level.	15%	Identified skill gaps are closed through focused learning and continuous development.	100%
-	Mandatory Learning 	Completion in due time of AXA GBS mandatory learning modules as per the country requirement.	5%	Successfully completed all the mandatory trainings assigned by the  organizations within set time limits	100%
-	Community Engagement 	CSR volunteering for at least 30 minutes annually	5%	Actively participated in the CSR activities planned by the Organization and dedicated 30 mins towards community Engagement	100%
-		Total weitghtage should be 25%	25%		
-					
-Guidelines	1. Business Goals should constitute up to 75% of the total weightage, with a minimum of 3 and a maximum of 8 goals.				
-	2. Common Organizational Goals apply to all employees; therefore, no modifications are required when updating these in the Crystal Tool.				
-	3. We recommend defining measurement of success criteria for each goal, with clear and specific outcomes.				
-	4. Specific Annual Assignement are applicable only for the employees contrubuting in Orgwide initiatives throught out the year				
+"""
+services/memory.py
+
+SQLite-backed conversation memory for GovernGPT.
+
+Design:
+- Each conversation is identified by (knowledge_set, session_id)
+- session_id maps 1:1 to the frontend's Knowledge Set project ID
+- Messages are stored in the `conversation_history` table
+- Memory is loaded fresh on every API call — no in-process state
+- ConversationBufferWindowMemory window = last N turns (configurable)
+
+Table schema (auto-created via db.py dynamic schema):
+    conversation_history(
+        session_id    TEXT,
+        knowledge_set TEXT,
+        role          TEXT,   -- 'human' or 'ai'
+        content       TEXT,
+        run_id        TEXT,
+        created_at    TEXT
+    )
+"""
+
+import json
+from datetime import datetime
+from langchain.memory import ConversationBufferWindowMemory
+from langchain.schema import HumanMessage, AIMessage, BaseMessage
+from db import db_insert, db_query, db_table_exists, _get_conn
+
+# How many past Q&A turns to include in context (1 turn = 1 human + 1 AI message)
+DEFAULT_WINDOW_K = 6
+
+
+# ── Low-level SQLite helpers ─────────────────────────────────────
+
+def _ensure_history_table() -> None:
+    """Create conversation_history table if it doesn't exist."""
+    with _get_conn() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS conversation_history (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id    TEXT NOT NULL,
+                knowledge_set TEXT NOT NULL,
+                role          TEXT NOT NULL,
+                content       TEXT NOT NULL,
+                run_id        TEXT,
+                token_count   INTEGER,
+                created_at    TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_conv_session
+            ON conversation_history (session_id, knowledge_set, id)
+        """)
+        conn.commit()
+
+
+def save_turn(
+    session_id: str,
+    knowledge_set: str,
+    human_message: str,
+    ai_message: str,
+    run_id: str = "",
+    token_count: int = 0,
+) -> None:
+    """
+    Persist one complete Q&A turn (human + AI) to SQLite.
+    Called after every successful LLM response.
+    """
+    _ensure_history_table()
+    now = datetime.now().isoformat()
+
+    with _get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO conversation_history
+                (session_id, knowledge_set, role, content, run_id, token_count, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, knowledge_set, "human", human_message, run_id, token_count, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO conversation_history
+                (session_id, knowledge_set, role, content, run_id, token_count, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, knowledge_set, "ai", ai_message, run_id, token_count, now),
+        )
+        conn.commit()
+
+
+def load_history(
+    session_id: str,
+    knowledge_set: str,
+    window_k: int = DEFAULT_WINDOW_K,
+) -> list[dict]:
+    """
+    Load the last `window_k` turns (pairs) from SQLite.
+    Returns a flat list of {role, content} dicts ordered oldest → newest.
+    Each turn = 2 rows (human + ai), so we fetch window_k * 2 rows.
+    """
+    _ensure_history_table()
+    rows = db_query(
+        """
+        SELECT role, content FROM conversation_history
+        WHERE session_id = ? AND knowledge_set = ?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (session_id, knowledge_set, window_k * 2),
+    )
+    # Rows come back newest-first; reverse to chronological order
+    return list(reversed(rows))
+
+
+def get_full_history(
+    session_id: str,
+    knowledge_set: str,
+) -> list[dict]:
+    """
+    Load complete conversation history for a session.
+    Returns full metadata including timestamps.
+    """
+    _ensure_history_table()
+    return db_query(
+        """
+        SELECT id, session_id, knowledge_set, role, content, run_id, token_count, created_at
+        FROM conversation_history
+        WHERE session_id = ? AND knowledge_set = ?
+        ORDER BY id ASC
+        """,
+        (session_id, knowledge_set),
+    )
+
+
+def clear_history(session_id: str, knowledge_set: str) -> int:
+    """
+    Delete all conversation history for a session.
+    Returns number of rows deleted.
+    """
+    _ensure_history_table()
+    with _get_conn() as conn:
+        cursor = conn.execute(
+            "DELETE FROM conversation_history WHERE session_id = ? AND knowledge_set = ?",
+            (session_id, knowledge_set),
+        )
+        conn.commit()
+        return cursor.rowcount
+
+
+def get_session_stats(session_id: str, knowledge_set: str) -> dict:
+    """Return summary stats for a session's conversation history."""
+    _ensure_history_table()
+    rows = db_query(
+        """
+        SELECT
+            COUNT(*) as total_messages,
+            SUM(CASE WHEN role='human' THEN 1 ELSE 0 END) as human_turns,
+            SUM(CASE WHEN role='ai'    THEN 1 ELSE 0 END) as ai_turns,
+            MIN(created_at) as first_message_at,
+            MAX(created_at) as last_message_at
+        FROM conversation_history
+        WHERE session_id = ? AND knowledge_set = ?
+        """,
+        (session_id, knowledge_set),
+    )
+    return rows[0] if rows else {}
+
+
+# ── LangChain memory builder ─────────────────────────────────────
+
+def build_langchain_memory(
+    session_id: str,
+    knowledge_set: str,
+    window_k: int = DEFAULT_WINDOW_K,
+) -> ConversationBufferWindowMemory:
+    """
+    Build a LangChain ConversationBufferWindowMemory pre-populated
+    with the last `window_k` turns loaded from SQLite.
+
+    This memory object is passed to ConversationalRetrievalChain
+    so the LLM has context of the entire recent conversation.
+    """
+    memory = ConversationBufferWindowMemory(
+        memory_key="chat_history",
+        return_messages=True,
+        k=window_k,
+        output_key="answer",
+    )
+
+    # Load recent history from SQLite and inject into memory
+    history = load_history(session_id, knowledge_set, window_k)
+
+    # Pair up human/ai messages and add to memory
+    i = 0
+    while i < len(history) - 1:
+        human_msg = history[i]
+        ai_msg    = history[i + 1]
+        if human_msg["role"] == "human" and ai_msg["role"] == "ai":
+            memory.save_context(
+                {"input": human_msg["content"]},
+                {"answer": ai_msg["content"]},
+            )
+            i += 2
+        else:
+            i += 1  # skip malformed pair
+
+    return memory
