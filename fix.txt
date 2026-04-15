@@ -1,209 +1,324 @@
 """
-services/memory.py
+services/rag.py
 
-SQLite-backed conversation memory for GovernGPT.
+Conversational RAG engine using:
+- ConversationalRetrievalChain (LangChain) for context-aware multi-turn Q&A
+- SQLite-backed memory (services/memory.py) for persistent conversation history
+- Multi-source MMR retriever for cross-file coverage
+- GPT-4o via AXA SecureGPT Hub
+"""
+import time
+import uuid
+from datetime import datetime
 
-Design:
-- Each conversation is identified by (knowledge_set, session_id)
-- session_id maps 1:1 to the frontend's Knowledge Set project ID
-- Messages are stored in the `conversation_history` table
-- Memory is loaded fresh on every API call — no in-process state
-- ConversationBufferWindowMemory window = last N turns (configurable)
+from langchain.chains import ConversationalRetrievalChain
+from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate, PromptTemplate
+from langchain_community.vectorstores import Chroma
+from langchain_core.documents import Document
 
-Table schema (auto-created via db.py dynamic schema):
-    conversation_history(
-        session_id    TEXT,
-        knowledge_set TEXT,
-        role          TEXT,   -- 'human' or 'ai'
-        content       TEXT,
-        run_id        TEXT,
-        created_at    TEXT
-    )
+from llm import get_llm
+from db import db_insert
+from config import CHAT_MODEL, RETRIEVAL_K
+from services.memory import build_langchain_memory, save_turn, DEFAULT_WINDOW_K
+
+
+# ── Governance system prompt ─────────────────────────────────────
+# Used as the system message in the combine_docs chain.
+# {context} = retrieved document chunks
+# {chat_history} = injected automatically by ConversationalRetrievalChain
+# {question} = the standalone (rephrased) question
+
+GOVERNANCE_SYSTEM_PROMPT = """\
+You are an expert Data Governance Advisor specialising in the insurance industry, \
+with deep knowledge of GDPR, Solvency II, IFRS 17, and enterprise data management.
+
+You have access to the following retrieved document context:
+{context}
+
+CONVERSATION HISTORY IS PROVIDED TO YOU. Use it to:
+- Refer back to findings from earlier in the conversation
+- Build on previously identified entities, owners, issues or recommendations
+- Avoid repeating analysis already done unless asked to expand
+- Connect insights across prompts (e.g. "Based on the PII I identified earlier...")
+
+When answering, structure your response as appropriate for the question type:
+- For analysis requests: Summary → Findings → Governance Signals → Recommended Actions
+- For modelling requests: include table definitions, data types, and transformation logic
+- For compliance requests: cite the specific regulation and article
+- For follow-up questions: reference and build on previous answers in this session
+
+Always cite which source file your insights are drawn from.
+If the answer cannot be found in the context or history, say so clearly. Do not hallucinate.
 """
 
-import json
-from datetime import datetime
-from langchain.memory import ConversationBufferWindowMemory
-from langchain.schema import HumanMessage, AIMessage, BaseMessage
-from db import db_insert, db_query, db_table_exists, _get_conn
+# Prompt for the question condensing step.
+# ConversationalRetrievalChain first rewrites the user's question
+# incorporating conversation history so it is self-contained before retrieval.
+CONDENSE_QUESTION_PROMPT = PromptTemplate.from_template("""\
+Given the following conversation history and a follow-up question, \
+rephrase the follow-up question to be a standalone question that captures \
+all relevant context from the conversation history.
 
-# How many past Q&A turns to include in context (1 turn = 1 human + 1 AI message)
-DEFAULT_WINDOW_K = 6
+Conversation History:
+{chat_history}
 
+Follow-up Question: {question}
 
-# ── Low-level SQLite helpers ─────────────────────────────────────
-
-def _ensure_history_table() -> None:
-    """Create conversation_history table if it doesn't exist."""
-    with _get_conn() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS conversation_history (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id    TEXT NOT NULL,
-                knowledge_set TEXT NOT NULL,
-                role          TEXT NOT NULL,
-                content       TEXT NOT NULL,
-                run_id        TEXT,
-                token_count   INTEGER,
-                created_at    TEXT NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_conv_session
-            ON conversation_history (session_id, knowledge_set, id)
-        """)
-        conn.commit()
+Standalone Question:""")
 
 
-def save_turn(
+# ── Multi-source retriever ───────────────────────────────────────
+
+def _build_retriever(vectordb: Chroma, k: int):
+    """
+    MMR retriever that guarantees at least one chunk per source file.
+    Returns a plain callable compatible with ConversationalRetrievalChain.
+    """
+    base = vectordb.as_retriever(
+        search_type="mmr",
+        search_kwargs={"k": k * 2, "fetch_k": k * 6},
+    )
+
+    def multi_source(query: str) -> list[Document]:
+        docs = base.invoke(query)
+        seen: dict[str, Document] = {}
+        for doc in docs:
+            src = doc.metadata.get("source_file", "unknown")
+            if src not in seen:
+                seen[src] = doc
+
+        # If only one source represented, force-fetch from all others
+        if len(seen) < 2:
+            all_srcs = list({
+                d.metadata.get("source_file", "unknown")
+                for d in vectordb.similarity_search("data governance summary", k=50)
+            })
+            for src in all_srcs:
+                if src not in seen:
+                    results = vectordb.similarity_search(
+                        query, k=2, filter={"source_file": src}
+                    )
+                    if results:
+                        seen[src] = results[0]
+
+        # Truncate each chunk to prevent context overflow on large prompts
+        truncated = []
+        for doc in seen.values():
+            if len(doc.page_content) > 1500:
+                doc = Document(
+                    page_content=doc.page_content[:1500] + "\n[...truncated]",
+                    metadata=doc.metadata,
+                )
+            truncated.append(doc)
+        return truncated
+
+    return multi_source
+
+
+# ── Chain builder ────────────────────────────────────────────────
+
+def build_conversational_chain(
+    vectordb: Chroma,
     session_id: str,
     knowledge_set: str,
-    human_message: str,
-    ai_message: str,
-    run_id: str = "",
-    token_count: int = 0,
-) -> None:
-    """
-    Persist one complete Q&A turn (human + AI) to SQLite.
-    Called after every successful LLM response.
-    """
-    _ensure_history_table()
-    now = datetime.now().isoformat()
-
-    with _get_conn() as conn:
-        conn.execute(
-            """
-            INSERT INTO conversation_history
-                (session_id, knowledge_set, role, content, run_id, token_count, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (session_id, knowledge_set, "human", human_message, run_id, token_count, now),
-        )
-        conn.execute(
-            """
-            INSERT INTO conversation_history
-                (session_id, knowledge_set, role, content, run_id, token_count, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (session_id, knowledge_set, "ai", ai_message, run_id, token_count, now),
-        )
-        conn.commit()
-
-
-def load_history(
-    session_id: str,
-    knowledge_set: str,
+    k: int = RETRIEVAL_K,
     window_k: int = DEFAULT_WINDOW_K,
-) -> list[dict]:
+) -> ConversationalRetrievalChain:
     """
-    Load the last `window_k` turns (pairs) from SQLite.
-    Returns a flat list of {role, content} dicts ordered oldest → newest.
-    Each turn = 2 rows (human + ai), so we fetch window_k * 2 rows.
+    Build a ConversationalRetrievalChain loaded with SQLite-persisted
+    conversation history for the given session.
+
+    Flow per query:
+    1. Load last window_k turns from SQLite → inject into memory
+    2. Condense question using history (standalone rephrasing)
+    3. Retrieve relevant chunks from ChromaDB using rephrased question
+    4. Pass chunks + history + question to GPT-4o
+    5. Return answer
     """
-    _ensure_history_table()
-    rows = db_query(
-        """
-        SELECT role, content FROM conversation_history
-        WHERE session_id = ? AND knowledge_set = ?
-        ORDER BY id DESC
-        LIMIT ?
-        """,
-        (session_id, knowledge_set, window_k * 2),
-    )
-    # Rows come back newest-first; reverse to chronological order
-    return list(reversed(rows))
+    llm    = get_llm()
+    memory = build_langchain_memory(session_id, knowledge_set, window_k)
 
+    # QA prompt — injected into the combine_docs step
+    qa_prompt = ChatPromptTemplate.from_messages([
+        SystemMessagePromptTemplate.from_template(GOVERNANCE_SYSTEM_PROMPT),
+        HumanMessagePromptTemplate.from_template("{question}"),
+    ])
 
-def get_full_history(
-    session_id: str,
-    knowledge_set: str,
-) -> list[dict]:
-    """
-    Load complete conversation history for a session.
-    Returns full metadata including timestamps.
-    """
-    _ensure_history_table()
-    return db_query(
-        """
-        SELECT id, session_id, knowledge_set, role, content, run_id, token_count, created_at
-        FROM conversation_history
-        WHERE session_id = ? AND knowledge_set = ?
-        ORDER BY id ASC
-        """,
-        (session_id, knowledge_set),
-    )
+    retriever = _build_retriever(vectordb, k)
 
-
-def clear_history(session_id: str, knowledge_set: str) -> int:
-    """
-    Delete all conversation history for a session.
-    Returns number of rows deleted.
-    """
-    _ensure_history_table()
-    with _get_conn() as conn:
-        cursor = conn.execute(
-            "DELETE FROM conversation_history WHERE session_id = ? AND knowledge_set = ?",
-            (session_id, knowledge_set),
-        )
-        conn.commit()
-        return cursor.rowcount
-
-
-def get_session_stats(session_id: str, knowledge_set: str) -> dict:
-    """Return summary stats for a session's conversation history."""
-    _ensure_history_table()
-    rows = db_query(
-        """
-        SELECT
-            COUNT(*) as total_messages,
-            SUM(CASE WHEN role='human' THEN 1 ELSE 0 END) as human_turns,
-            SUM(CASE WHEN role='ai'    THEN 1 ELSE 0 END) as ai_turns,
-            MIN(created_at) as first_message_at,
-            MAX(created_at) as last_message_at
-        FROM conversation_history
-        WHERE session_id = ? AND knowledge_set = ?
-        """,
-        (session_id, knowledge_set),
-    )
-    return rows[0] if rows else {}
-
-
-# ── LangChain memory builder ─────────────────────────────────────
-
-def build_langchain_memory(
-    session_id: str,
-    knowledge_set: str,
-    window_k: int = DEFAULT_WINDOW_K,
-) -> ConversationBufferWindowMemory:
-    """
-    Build a LangChain ConversationBufferWindowMemory pre-populated
-    with the last `window_k` turns loaded from SQLite.
-
-    This memory object is passed to ConversationalRetrievalChain
-    so the LLM has context of the entire recent conversation.
-    """
-    memory = ConversationBufferWindowMemory(
-        memory_key="chat_history",
-        return_messages=True,
-        k=window_k,
+    chain = ConversationalRetrievalChain.from_llm(
+        llm=llm,
+        retriever=retriever,
+        memory=memory,
+        condense_question_prompt=CONDENSE_QUESTION_PROMPT,
+        combine_docs_chain_kwargs={"prompt": qa_prompt},
+        return_source_documents=True,
+        return_generated_question=True,   # exposes the rephrased question in output
+        verbose=False,
         output_key="answer",
     )
+    return chain
 
-    # Load recent history from SQLite and inject into memory
-    history = load_history(session_id, knowledge_set, window_k)
 
-    # Pair up human/ai messages and add to memory
-    i = 0
-    while i < len(history) - 1:
-        human_msg = history[i]
-        ai_msg    = history[i + 1]
-        if human_msg["role"] == "human" and ai_msg["role"] == "ai":
-            memory.save_context(
-                {"input": human_msg["content"]},
-                {"answer": ai_msg["content"]},
-            )
-            i += 2
-        else:
-            i += 1  # skip malformed pair
+# ── Main query function ──────────────────────────────────────────
 
-    return memory
+def query_governance(
+    question: str,
+    vectordb: Chroma,
+    knowledge_set: str = "default",
+    session_id: str = "",
+    use_rag: bool = True,
+    k: int = RETRIEVAL_K,
+    window_k: int = DEFAULT_WINDOW_K,
+) -> dict:
+    """
+    Core query function called by the FastAPI router.
+
+    - use_rag=True  : ConversationalRetrievalChain with SQLite memory
+    - use_rag=False : Direct LLM call (still saves to conversation history)
+
+    Returns a clean dict suitable for JSON serialisation.
+    Token counts extracted from LLM response metadata where available.
+    """
+    start  = time.time()
+    run_id = str(uuid.uuid4())
+
+    # Ensure session_id is always set
+    if not session_id:
+        session_id = knowledge_set
+
+    result: dict = {}
+
+    if use_rag:
+        chain = build_conversational_chain(
+            vectordb=vectordb,
+            session_id=session_id,
+            knowledge_set=knowledge_set,
+            k=k,
+            window_k=window_k,
+        )
+
+        # Invoke — ConversationalRetrievalChain returns a dict
+        response = chain.invoke({"question": question})
+
+        answer              = response.get("answer", "")
+        source_docs         = response.get("source_documents", [])
+        rephrased_question  = response.get("generated_question", question)
+
+        sources = list({
+            doc.metadata.get("source_file", "unknown")
+            for doc in source_docs
+        })
+
+        # Extract token usage if available from the underlying LLM response
+        token_usage = _extract_token_usage(response)
+
+        result = {
+            "run_id"              : run_id,
+            "session_id"          : session_id,
+            "knowledge_set"       : knowledge_set,
+            "question"            : question,
+            "rephrased_question"  : rephrased_question,
+            "answer"              : answer,
+            "mode"                : "conversational_rag",
+            "sources_used"        : sources,
+            "chunks_retrieved"    : len(source_docs),
+            "model"               : CHAT_MODEL,
+            "prompt_tokens"       : token_usage.get("prompt_tokens", 0),
+            "completion_tokens"   : token_usage.get("completion_tokens", 0),
+            "total_tokens"        : token_usage.get("total_tokens", 0),
+            "created_at"          : datetime.now().isoformat(),
+            "duration_seconds"    : round(time.time() - start, 2),
+        }
+
+    else:
+        # Direct mode — still context-aware via history injection
+        from langchain_core.prompts import ChatPromptTemplate as CPT
+        from langchain_core.output_parsers import StrOutputParser
+
+        llm = get_llm()
+
+        # Build message list with history
+        from services.memory import load_history
+        history = load_history(session_id, knowledge_set, window_k)
+
+        messages = [("system",
+            "You are a Data Governance Expert for the insurance industry. "
+            "You have memory of the full conversation and should build on previous answers."
+        )]
+        for msg in history:
+            role = "human" if msg["role"] == "human" else "assistant"
+            messages.append((role, msg["content"]))
+        messages.append(("human", "{input}"))
+
+        prompt   = CPT.from_messages(messages)
+        response = (prompt | llm).invoke({"input": question})
+
+        answer = response.content
+
+        # Extract token metadata
+        meta         = response.response_metadata or {}
+        usage        = response.usage_metadata or {}
+        token_usage  = {
+            "prompt_tokens"    : usage.get("input_tokens", 0),
+            "completion_tokens": usage.get("output_tokens", 0),
+            "total_tokens"     : usage.get("total_tokens", 0),
+        }
+
+        result = {
+            "run_id"              : run_id,
+            "session_id"          : session_id,
+            "knowledge_set"       : knowledge_set,
+            "question"            : question,
+            "rephrased_question"  : question,
+            "answer"              : answer,
+            "mode"                : "direct",
+            "sources_used"        : [],
+            "chunks_retrieved"    : 0,
+            "model"               : meta.get("model_name", CHAT_MODEL),
+            "prompt_tokens"       : token_usage["prompt_tokens"],
+            "completion_tokens"   : token_usage["completion_tokens"],
+            "total_tokens"        : token_usage["total_tokens"],
+            "created_at"          : datetime.now().isoformat(),
+            "duration_seconds"    : round(time.time() - start, 2),
+        }
+
+    # ── Persist to SQLite ──────────────────────────────────────────
+    # 1. Full response log (llm_responses table)
+    db_insert("llm_responses", result)
+
+    # 2. Conversation memory (conversation_history table)
+    save_turn(
+        session_id=session_id,
+        knowledge_set=knowledge_set,
+        human_message=question,
+        ai_message=answer,
+        run_id=run_id,
+        token_count=result.get("total_tokens", 0),
+    )
+
+    return result
+
+
+# ── Token extraction helper ──────────────────────────────────────
+
+def _extract_token_usage(response: dict) -> dict:
+    """
+    Extract token counts from ConversationalRetrievalChain response.
+    The chain doesn't directly expose usage_metadata, so we check
+    multiple locations where LangChain might store it.
+    """
+    defaults = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    # Try LLM run metadata if present in response dict
+    if "llm_output" in response:
+        llm_output = response["llm_output"]
+        token_usage = llm_output.get("token_usage", {})
+        if token_usage:
+            return {
+                "prompt_tokens"    : token_usage.get("prompt_tokens", 0),
+                "completion_tokens": token_usage.get("completion_tokens", 0),
+                "total_tokens"     : token_usage.get("total_tokens", 0),
+            }
+
+    return defaults
