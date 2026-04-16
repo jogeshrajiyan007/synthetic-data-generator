@@ -1,447 +1,110 @@
-"""
-routers/databricks.py
-
-All Databricks-related API endpoints.
-
-Endpoint groups:
-  Connection management  — connect, list, delete, test
-  Catalog browser        — catalogs, schemas, tables, table detail
-  Profiling              — full statistical profile
-  Ingestion              — profile + chunk + vectorise into knowledge set
-"""
-
-import time
-from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
-from pydantic import BaseModel, Field
-from typing import Optional
-
-from services.databricks.client import (
-    DatabricksClient, save_connection, get_connection,
-    list_connections, delete_connection
+import re
+import uuid
+import json
+from datetime import datetime
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from db import db_insert_batch
+from config import (
+    CHUNK_SIZE, CHUNK_OVERLAP,
+    PII_SIGNALS, SENSITIVITY_TIERS,
+    DEPARTMENT_SIGNALS, GOVERNANCE_THEMES
 )
-from services.databricks.catalog import (
-    list_catalogs, list_schemas, list_tables, get_table_detail
-)
-from services.databricks.profiler import profile_table
-from services.databricks.ingestion import ingest_databricks_table
-from db import db_query, db_insert
-
-router = APIRouter(prefix="/api/databricks", tags=["Databricks"])
 
 
-# ── Request / Response models ────────────────────────────────────
-
-class ConnectRequest(BaseModel):
-    connection_name: str = Field(..., min_length=1, max_length=120,
-        description="Friendly name e.g. 'AXA Prod Databricks'")
-    workspace_url: str = Field(..., description="e.g. https://adb-xxxx.azuredatabricks.net")
-    pat: str = Field(..., min_length=10, description="Databricks Personal Access Token")
-    http_path: str = Field(..., description="e.g. /sql/1.0/warehouses/xxxx")
-    catalog: str = Field(default="hive_metastore",
-        description="Default catalog (use 'hive_metastore' for legacy)")
-    description: str = Field(default="")
-    knowledge_set: str = Field(default="",
-        description="Optional: associate connection with a knowledge set")
+def _detect_sensitivity(text: str) -> str:
+    lower = text.lower()
+    for tier, signals in SENSITIVITY_TIERS.items():
+        if any(s in lower for s in signals):
+            return tier
+    return "Public"
 
 
-class ConnectResponse(BaseModel):
-    connection_id: str
-    connection_name: str
-    workspace_url: str
-    catalog: str
-    status: str
-    current_user: Optional[str] = None
-    message: str
+def _detect_department(text: str) -> str:
+    lower  = text.lower()
+    scores = {
+        dept: sum(1 for s in signals if s in lower)
+        for dept, signals in DEPARTMENT_SIGNALS.items()
+    }
+    best = max(scores, key=scores.get)
+    return best if scores[best] > 0 else "General"
 
 
-class ConnectionInfo(BaseModel):
-    connection_id: str
-    connection_name: str
-    workspace_url: str
-    http_path: str
-    catalog: str
-    description: str
-    knowledge_set: str
-    status: str
-    last_tested_at: Optional[str]
-    created_at: str
+def _extract_keywords(text: str, top_n: int = 8) -> list[str]:
+    words = re.findall(r"\b[a-zA-Z]{4,}\b", text.lower())
+    stop  = {"that", "this", "with", "from", "have", "been", "will",
+             "they", "their", "which", "were", "also", "more", "than"}
+    counts: dict[str, int] = {}
+    for w in words:
+        if w not in stop:
+            counts[w] = counts.get(w, 0) + 1
+    return sorted(counts, key=counts.get, reverse=True)[:top_n]
 
 
-class IngestTableRequest(BaseModel):
-    knowledge_set: str = Field(..., min_length=1, max_length=60)
-    catalog: str       = Field(..., description="Catalog name")
-    schema: str        = Field(..., description="Schema / database name")
-    table: str         = Field(..., description="Table or view name")
-    sample_rows: int   = Field(default=500_000, ge=1000, le=5_000_000,
-        description="Max rows to profile for statistics")
-    rebuild: bool      = Field(default=False,
-        description="Drop existing collection before ingesting")
+def _detect_governance_themes(text: str) -> list[str]:
+    lower = text.lower()
+    return [t for t in GOVERNANCE_THEMES if t in lower]
 
 
-class IngestMultipleRequest(BaseModel):
-    knowledge_set: str
-    tables: list[dict] = Field(..., description="List of {catalog, schema, table} dicts")
-    sample_rows: int   = Field(default=500_000, ge=1000, le=5_000_000)
-    rebuild_first: bool = Field(default=False,
-        description="Drop collection before ingesting first table")
-
-
-# ── Connection management ────────────────────────────────────────
-
-@router.post("/connect", response_model=ConnectResponse)
-async def connect(request: ConnectRequest):
-    """
-    Test a Databricks connection, then save it with encrypted PAT.
-    Returns the connection_id for all subsequent API calls.
-    """
-    # Test connectivity before saving
-    test_client = None
-    try:
-        # Temporarily build a client without saving to test first
-        from databricks import sql as db_sql
-        import base64, requests as req
-
-        ws = request.workspace_url.rstrip("/")
-        if not ws.startswith("https://"):
-            ws = f"https://{ws}"
-
-        resp = req.get(
-            f"{ws}/api/2.0/clusters/list",
-            headers={"Authorization": f"Bearer {request.pat}"},
-            timeout=10,
-            verify=True,
-        )
-        if resp.status_code == 401:
-            raise HTTPException(status_code=401, detail="Invalid PAT — authentication failed.")
-        if resp.status_code not in (200, 403):
-            # 403 is fine — means auth works but no cluster access
-            raise HTTPException(
-                status_code=400,
-                detail=f"Workspace unreachable: {resp.status_code} {resp.text[:200]}"
-            )
-        current_user = resp.json().get("clusters", [{}])[0].get("creator_user_name", "unknown") \
-            if resp.status_code == 200 else "authenticated"
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Connection test failed: {str(e)}"
-        )
-
-    # Save encrypted connection
-    connection_id = save_connection(
-        connection_name=request.connection_name,
-        workspace_url=request.workspace_url,
-        pat=request.pat,
-        http_path=request.http_path,
-        catalog=request.catalog,
-        description=request.description,
-        knowledge_set=request.knowledge_set,
-    )
-
-    return ConnectResponse(
-        connection_id  =connection_id,
-        connection_name=request.connection_name,
-        workspace_url  =request.workspace_url.rstrip("/"),
-        catalog        =request.catalog,
-        status         ="connected",
-        current_user   =current_user,
-        message        =f"Connection saved. PAT encrypted and stored securely.",
-    )
-
-
-@router.get("/connections", response_model=list[ConnectionInfo])
-async def get_connections(
-    knowledge_set: Optional[str] = Query(default=None)
-):
-    """List all active Databricks connections."""
-    rows = list_connections(knowledge_set)
-    return [ConnectionInfo(**r) for r in rows]
-
-
-@router.delete("/connections/{connection_id}")
-async def remove_connection(connection_id: str):
-    """Soft-delete a Databricks connection."""
-    deleted = delete_connection(connection_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Connection not found.")
-    return {"status": "deleted", "connection_id": connection_id}
-
-
-@router.post("/connections/{connection_id}/test")
-async def test_connection(connection_id: str):
-    """Re-test an existing saved connection."""
-    try:
-        with DatabricksClient(connection_id) as client:
-            result = client.test_connection()
-        if not result["success"]:
-            raise HTTPException(status_code=400, detail=result.get("error"))
-        return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
-
-# ── Catalog browser ──────────────────────────────────────────────
-
-@router.get("/{connection_id}/catalogs")
-async def get_catalogs(connection_id: str):
-    """List all catalogs available in the workspace."""
-    try:
-        with DatabricksClient(connection_id) as client:
-            return {"catalogs": list_catalogs(client)}
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/{connection_id}/schemas")
-async def get_schemas(
-    connection_id: str,
-    catalog: str = Query(default="hive_metastore"),
-):
-    """List all schemas in a catalog."""
-    try:
-        with DatabricksClient(connection_id) as client:
-            return {"catalog": catalog, "schemas": list_schemas(client, catalog)}
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/{connection_id}/tables")
-async def get_tables(
-    connection_id: str,
-    catalog: str = Query(...),
-    schema:  str = Query(...),
-    include_views: bool = Query(default=True),
-):
-    """List all tables (and optionally views) in a schema."""
-    try:
-        with DatabricksClient(connection_id) as client:
-            tables = list_tables(client, catalog, schema, include_views)
-        return {
-            "catalog": catalog,
-            "schema" : schema,
-            "count"  : len(tables),
-            "tables" : tables,
-        }
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/{connection_id}/table-detail")
-async def get_table_detail_endpoint(
-    connection_id: str,
-    catalog: str = Query(...),
-    schema:  str = Query(...),
-    table:   str = Query(...),
-):
-    """
-    Get full column schema including parsed STRUCT/ARRAY/MAP types.
-    """
-    try:
-        with DatabricksClient(connection_id) as client:
-            detail = get_table_detail(client, catalog, schema, table)
-        return detail
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ── Profiling ────────────────────────────────────────────────────
-
-@router.post("/{connection_id}/profile")
-async def profile_table_endpoint(
-    connection_id: str,
-    catalog: str = Query(...),
-    schema:  str = Query(...),
-    table:   str = Query(...),
-    sample_rows: int = Query(default=500_000),
-):
-    """
-    Run a full statistical profile on a Databricks table.
-    Returns the profile as JSON — does NOT ingest into the vector store.
-    Use /ingest to also add to the RAG knowledge set.
-    """
-    try:
-        with DatabricksClient(connection_id) as client:
-            profile = profile_table(client, catalog, schema, table, sample_rows)
-        return profile
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ── Ingestion ────────────────────────────────────────────────────
-
-@router.post("/{connection_id}/ingest")
-async def ingest_table(
-    connection_id: str,
-    request: IngestTableRequest,
-):
-    """
-    Profile a table and ingest it into a GovernGPT knowledge set.
-    The table schema, statistics, and governance metadata become
-    searchable via the RAG engine.
-    """
-    try:
-        with DatabricksClient(connection_id) as client:
-            result = ingest_databricks_table(
-                client=client,
-                catalog=request.catalog,
-                schema=request.schema,
-                table=request.table,
-                knowledge_set=request.knowledge_set,
-                sample_rows=request.sample_rows,
-                rebuild=request.rebuild,
-            )
-        return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
-
-
-@router.post("/{connection_id}/ingest-multiple")
-async def ingest_multiple_tables(
-    connection_id: str,
-    request: IngestMultipleRequest,
-    background_tasks: BackgroundTasks,
-):
-    """
-    Ingest multiple tables from a Databricks schema into a knowledge set.
-    Tables are processed sequentially in the background.
-    Returns immediately with a job_id — poll /ingest-status/{job_id}.
-    """
-    import uuid as _uuid
-    job_id = str(_uuid.uuid4())
-
-    # Log job start
-    db_insert("databricks_batch_jobs", {
-        "job_id"        : job_id,
-        "connection_id" : connection_id,
-        "knowledge_set" : request.knowledge_set,
-        "table_count"   : len(request.tables),
-        "status"        : "queued",
-        "created_at"    : __import__("datetime").datetime.now().isoformat(),
-    })
-
-    background_tasks.add_task(
-        _run_batch_ingest,
-        job_id=job_id,
-        connection_id=connection_id,
-        request=request,
-    )
+def enrich_metadata(
+    chunk: Document,
+    chunk_index: int,
+    knowledge_set: str = "default",
+) -> dict:
+    text         = chunk.page_content
+    lower        = text.lower()
+    base         = chunk.metadata
+    contains_pii = any(p in lower for p in PII_SIGNALS)
 
     return {
-        "job_id"       : job_id,
-        "status"       : "queued",
-        "table_count"  : len(request.tables),
-        "knowledge_set": request.knowledge_set,
-        "message"      : f"Ingesting {len(request.tables)} table(s) in background. Poll /ingest-status/{job_id}",
+        "doc_id"            : str(uuid.uuid4()),
+        "chunk_index"       : chunk_index,
+        "knowledge_set"     : knowledge_set,
+        "source_file"       : base.get("source_file", base.get("source", "unknown")),
+        "file_type"         : base.get("file_type", "unknown"),
+        "source_type"       : base.get("source_type", "file"),   # 'file' | 'databricks'
+        "page"              : base.get("page"),
+        "sheet"             : base.get("sheet"),
+        # Databricks-specific passthrough
+        "catalog"           : base.get("catalog"),
+        "schema"            : base.get("schema"),
+        "table"             : base.get("table"),
+        "first_line"        : text.split("\n")[0][:120].strip() or "—",
+        "char_count"        : len(text),
+        "word_count"        : len(text.split()),
+        "summary"           : text[:200].replace("\n", " "),
+        "keywords"          : _extract_keywords(text),
+        "governance_themes" : _detect_governance_themes(text),
+        "department"        : _detect_department(text),
+        "sensitivity"       : _detect_sensitivity(text),
+        "contains_pii"      : contains_pii,
+        "owner"             : "DAAS DMG",
+        "domain"            : "Insurance",
+        "ingested_at"       : datetime.now().isoformat(),
+        "language"          : "en",
     }
 
 
-@router.get("/ingest-status/{job_id}")
-async def get_ingest_status(job_id: str):
-    """Poll the status of a background batch ingestion job."""
-    rows = db_query(
-        "SELECT * FROM databricks_batch_jobs WHERE job_id = ?",
-        (job_id,),
+def chunk_and_enrich(
+    raw_documents: list[Document],
+    knowledge_set: str = "default",
+) -> list[Document]:
+    """Split documents into enriched chunks and persist metadata to SQLite."""
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
+        separators=["\n\n", "\n", ". ", " ", ""]
     )
-    if not rows:
-        raise HTTPException(status_code=404, detail="Job not found.")
-    return rows[0]
+    chunks   = splitter.split_documents(raw_documents)
+    enriched = []
+    records  = []
 
+    for i, chunk in enumerate(chunks):
+        metadata       = enrich_metadata(chunk, i, knowledge_set=knowledge_set)
+        chunk.metadata = metadata
+        enriched.append(chunk)
+        records.append(metadata)
 
-@router.get("/{connection_id}/ingestion-log")
-async def get_ingestion_log(
-    connection_id: str,
-    knowledge_set: Optional[str] = Query(default=None),
-    limit: int = Query(default=50, ge=1, le=200),
-):
-    """Get the ingestion history for a connection."""
-    if knowledge_set:
-        rows = db_query(
-            "SELECT * FROM databricks_ingestion_log "
-            "WHERE connection_id=? AND knowledge_set=? "
-            "ORDER BY rowid DESC LIMIT ?",
-            (connection_id, knowledge_set, limit),
-        )
-    else:
-        rows = db_query(
-            "SELECT * FROM databricks_ingestion_log "
-            "WHERE connection_id=? ORDER BY rowid DESC LIMIT ?",
-            (connection_id, limit),
-        )
-    return {"records": rows, "count": len(rows)}
-
-
-# ── Background task ──────────────────────────────────────────────
-
-async def _run_batch_ingest(
-    job_id: str,
-    connection_id: str,
-    request: IngestMultipleRequest,
-) -> None:
-    """Background task for multi-table ingestion."""
-    from datetime import datetime
-    results   = []
-    failed    = []
-
-    try:
-        with DatabricksClient(connection_id) as client:
-            for i, tbl in enumerate(request.tables):
-                try:
-                    rebuild = request.rebuild_first and i == 0
-                    result  = ingest_databricks_table(
-                        client=client,
-                        catalog=tbl["catalog"],
-                        schema=tbl["schema"],
-                        table=tbl["table"],
-                        knowledge_set=request.knowledge_set,
-                        sample_rows=request.sample_rows,
-                        rebuild=rebuild,
-                    )
-                    results.append(result)
-                except Exception as e:
-                    failed.append({"table": tbl, "error": str(e)})
-
-        import json as _json
-        db_query(
-            "UPDATE databricks_batch_jobs SET status=?, completed_at=?, results=? WHERE job_id=?",
-        )
-        # Use raw connection for UPDATE
-        from db import _get_conn
-        with _get_conn() as conn:
-            conn.execute(
-                "UPDATE databricks_batch_jobs "
-                "SET status=?, completed_at=?, results=?, failed=? "
-                "WHERE job_id=?",
-                (
-                    "completed" if not failed else "partial",
-                    datetime.now().isoformat(),
-                    _json.dumps(results),
-                    _json.dumps(failed),
-                    job_id,
-                )
-            )
-            conn.commit()
-
-    except Exception as e:
-        from db import _get_conn
-        from datetime import datetime
-        with _get_conn() as conn:
-            conn.execute(
-                "UPDATE databricks_batch_jobs SET status='failed', error=?, completed_at=? WHERE job_id=?",
-                (str(e), datetime.now().isoformat(), job_id)
-            )
-            conn.commit()
+    # Batch insert to SQLite
+    db_insert_batch("document_chunks", records)
+    return enriched
