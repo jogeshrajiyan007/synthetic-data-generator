@@ -1,166 +1,60 @@
-'use client'
-import { useState, useEffect } from 'react'
-import { AnimatePresence } from 'framer-motion'
-import { SessionGrid } from '@/components/session/SessionGrid'
-import { Workspace } from '@/components/Workspace'
-import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
-import { ToastProvider, toast } from '@/components/ui/Toast'
-import { useStore } from '@/store'
-import { api } from '@/lib/api'
-import type { SourceFile } from '@/types'
+## Error Type
+Console Error
 
-export default function Home() {
-  // ── Mount guard ───────────────────────────────────────────────
-  // Server always renders the loading shell.
-  // Client flips to true after first paint — only then do we read
-  // from localStorage via the store. This guarantees server HTML
-  // and initial client HTML are identical, preventing hydration mismatch.
-  const [mounted, setMounted] = useState(false)
+## Error Message
+State loaded from storage couldn't be migrated since no migrate function was provided
 
-  useEffect(() => {
-    // Manually trigger Zustand persist rehydration from localStorage
-    useStore.persist.rehydrate()
-    setMounted(true)
-  }, [])
 
-  const {
-    sessions,
-    activeSessionId,
-    createSession,
-    deleteSession,
-    setActiveSession,
-    getActiveSession,
-    getSessionFiles,
-    getSessionChat,
-    addFiles,
-    updateFile,
-    removeFile,
-    addMessage,
-    updateMessage,
-    clearChat,
-  } = useStore()
+    at createConsoleError (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_115brz8._.js:2333:71)
+    at handleConsoleError (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_115brz8._.js:3119:54)
+    at console.error (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_115brz8._.js:3266:57)
+    at <unknown> (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_0d4zxju._.js:36606:33)
+    at <unknown> (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_0d4zxju._.js:36405:28)
+    at Object.then (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_0d4zxju._.js:36411:51)
+    at hydrate (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_0d4zxju._.js:36597:76)
+    at Object.rehydrate (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_0d4zxju._.js:36649:28)
+    at Home.useEffect (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/src_0qlnfm1._.js:3957:154)
+    at Object.react_stack_bottom_frame (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:15087:22)
+    at runWithFiberInDEV (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:965:74)
+    at commitHookEffectListMount (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:7255:167)
+    at commitHookPassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:7290:60)
+    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8689:33)
+    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
+    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8688:17)
+    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
+    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8688:17)
+    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
+    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8750:17)
+    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
+    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8750:17)
+    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
+    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8688:17)
+    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
+    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8693:17)
+    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
+    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8688:17)
+    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
+    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8693:17)
+    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
+    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8688:17)
+    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
+    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8688:17)
+    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
+    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8688:17)
+    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
+    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8693:17)
+    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
+    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8688:17)
+    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
+    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8688:17)
+    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
+    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8750:17)
+    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
+    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8750:17)
+    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
+    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8688:17)
+    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
+    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8688:17)
+    at ClientPageRoot (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_0tt2wve._.js:4461:50)
 
-  const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
-
-  const activeSession = mounted ? getActiveSession() : null
-  const activeFiles   = mounted && activeSessionId ? getSessionFiles(activeSessionId) : []
-  const activeChat    = mounted && activeSessionId ? getSessionChat(activeSessionId) : []
-
-  const handleCreate = (name: string, summary: string) => {
-    const session = createSession(name, summary)
-    setActiveSession(session.id)
-    toast('success', `Project "${name}" created`)
-  }
-
-  const handleOpen          = (id: string) => setActiveSession(id)
-  const handleBack          = () => setActiveSession(null)
-  const handleDeleteRequest = (id: string) => setDeleteTarget(id)
-
-  const handleDeleteConfirm = async () => {
-    if (!deleteTarget) return
-    const session = sessions.find(s => s.id === deleteTarget)
-    try { await api.deleteKnowledgeSet(deleteTarget) } catch (_) {}
-    deleteSession(deleteTarget)
-    setDeleteTarget(null)
-    toast('info', `Project "${session?.project_name}" deleted`)
-  }
-
-  const handleAddFiles = (files: SourceFile[]) => {
-    if (!activeSessionId) return
-    addFiles(activeSessionId, files)
-  }
-  const handleUpdateFile = (id: string, updates: Partial<SourceFile>) => {
-    if (!activeSessionId) return
-    updateFile(activeSessionId, id, updates)
-  }
-  const handleRemoveFile = (id: string) => {
-    if (!activeSessionId) return
-    removeFile(activeSessionId, id)
-  }
-  const handleAddMessage = (msg: Parameters<typeof addMessage>[1]) => {
-    if (!activeSessionId) return
-    addMessage(activeSessionId, msg)
-  }
-  const handleUpdateMessage = (msgId: string, updates: Parameters<typeof updateMessage>[2]) => {
-    if (!activeSessionId) return
-    updateMessage(activeSessionId, msgId, updates)
-  }
-  const handleClearChat = () => {
-    if (!activeSessionId) return
-    clearChat(activeSessionId)
-  }
-
-  const deleteTargetSession = sessions.find(s => s.id === deleteTarget)
-
-  // ── Pre-mount render — must match server HTML exactly ─────────
-  // Server renders this. Client renders this on first paint.
-  // After useEffect fires, mounted=true and we switch to real UI.
-  if (!mounted) {
-    return (
-      <div className="min-h-screen bg-ink-50 flex items-center justify-center">
-        <div className="flex flex-col items-center gap-4">
-          <div className="w-10 h-10 rounded-xl bg-axa-800 flex items-center justify-center shadow-axa">
-            <svg
-              className="w-5 h-5 text-white animate-spin"
-              fill="none" viewBox="0 0 24 24"
-            >
-              <circle
-                className="opacity-25" cx="12" cy="12" r="10"
-                stroke="currentColor" strokeWidth="4"
-              />
-              <path
-                className="opacity-75" fill="currentColor"
-                d="M4 12a8 8 0 018-8v8z"
-              />
-            </svg>
-          </div>
-          <p className="text-ink-400 text-xs font-semibold tracking-widest uppercase">
-            Initialising GovernGPT…
-          </p>
-        </div>
-      </div>
-    )
-  }
-
-  // ── Post-mount render — safe to use localStorage state ────────
-  return (
-    <>
-      <ToastProvider />
-
-      <AnimatePresence mode="wait">
-        {activeSession ? (
-          <Workspace
-            key="workspace"
-            session={activeSession}
-            files={activeFiles}
-            messages={activeChat}
-            onBack={handleBack}
-            onAddFiles={handleAddFiles}
-            onUpdateFile={handleUpdateFile}
-            onRemoveFile={handleRemoveFile}
-            onAddMessage={handleAddMessage}
-            onUpdateMessage={handleUpdateMessage}
-            onClearChat={handleClearChat}
-          />
-        ) : (
-          <SessionGrid
-            key="grid"
-            sessions={sessions}
-            onCreate={handleCreate}
-            onOpen={handleOpen}
-            onDelete={handleDeleteRequest}
-          />
-        )}
-      </AnimatePresence>
-
-      <ConfirmDialog
-        isOpen={!!deleteTarget}
-        title="Delete Project"
-        description={`Are you sure you want to delete "${deleteTargetSession?.project_name}"? This will remove all uploaded sources, chat history, and vector data. This action cannot be undone.`}
-        confirmLabel="Delete Project"
-        onConfirm={handleDeleteConfirm}
-        onCancel={() => setDeleteTarget(null)}
-      />
-    </>
-  )
-}
+Next.js version: 16.2.3 (Turbopack)
