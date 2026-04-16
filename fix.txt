@@ -1,228 +1,387 @@
 'use client'
-import { create } from 'zustand'
-import { persist, createJSONStorage } from 'zustand/middleware'
-import type { KnowledgeSet, SourceFile, ChatMessage } from '@/types'
-import { slugify } from '@/lib/utils'
+import { useState, useRef, useEffect, useCallback } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+import { Send, Shield, Sparkles, RotateCcw, Sliders, Brain, Zap } from 'lucide-react'
+import { MessageBubble, TypingIndicator } from './MessageBubble'
+import type { KnowledgeSet, ChatMessage } from '@/types'
+import { api } from '@/lib/api'
+import { useStore } from '@/store'
+import { cn } from '@/lib/utils'
 
-// ── Session token usage tracker ──────────────────────────────────
-export interface SessionTokenUsage {
-  prompt_tokens: number
-  completion_tokens: number
-  total_tokens: number
-  turn_count: number
+const SUGGESTED = [
+  'What are these documents about? Provide a high-level summary.',
+  'What PII data is present and how should it be governed?',
+  'What regulatory frameworks are referenced (GDPR, Solvency II, IFRS 17)?',
+  'Propose a star schema for data modelling based on the uploaded datasets.',
+  'What data quality issues can you identify?',
+]
+
+interface ChatWindowProps {
+  session: KnowledgeSet
+  messages: ChatMessage[]
+  onAddMessage: (msg: ChatMessage) => void
+  onUpdateMessage: (id: string, updates: Partial<ChatMessage>) => void
+  onClearChat: () => void
 }
 
-interface SessionState {
-  // ── Knowledge Sets ─────────────────────────────────────────────
-  sessions: KnowledgeSet[]
-  activeSessionId: string | null
+export function ChatWindow({
+  session, messages, onAddMessage, onUpdateMessage, onClearChat
+}: ChatWindowProps) {
+  const [input, setInput]               = useState('')
+  const [isLoading, setIsLoading]       = useState(false)
+  const [useRag, setUseRag]             = useState(true)
+  const [k, setK]                       = useState(5)
+  const [windowK, setWindowK]           = useState(6)
+  const [showSettings, setShowSettings] = useState(false)
+  const [isClearingMemory, setIsClearingMemory] = useState(false)
+  const bottomRef = useRef<HTMLDivElement>(null)
+  const inputRef  = useRef<HTMLTextAreaElement>(null)
 
-  // ── Files per session ──────────────────────────────────────────
-  files: Record<string, SourceFile[]>
+  const { addTokenUsage, getSessionTokenUsage, resetTokenUsage } = useStore()
+  const tokenUsage = getSessionTokenUsage(session.id)
 
-  // ── Chat per session ───────────────────────────────────────────
-  chats: Record<string, ChatMessage[]>
+  // Count how many real assistant turns exist (memory depth indicator)
+  const assistantTurns = messages.filter(m => m.role === 'assistant' && m.content).length
 
-  // ── Token usage per session ────────────────────────────────────
-  // Accumulated totals — updated after every successful LLM response
-  tokenUsage: Record<string, SessionTokenUsage>
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages, isLoading])
 
-  // ── Actions ────────────────────────────────────────────────────
-  createSession: (name: string, summary: string) => KnowledgeSet
-  updateSession: (id: string, updates: Partial<KnowledgeSet>) => void
-  deleteSession: (id: string) => void
-  setActiveSession: (id: string | null) => void
-  getActiveSession: () => KnowledgeSet | null
+  const sendMessage = useCallback(async (question: string) => {
+    if (!question.trim() || isLoading) return
+    setInput('')
+    setShowSettings(false)
 
-  addFiles: (sessionId: string, files: SourceFile[]) => void
-  updateFile: (sessionId: string, fileId: string, updates: Partial<SourceFile>) => void
-  removeFile: (sessionId: string, fileId: string) => void
-  getSessionFiles: (sessionId: string) => SourceFile[]
-
-  addMessage: (sessionId: string, msg: ChatMessage) => void
-  updateMessage: (sessionId: string, msgId: string, updates: Partial<ChatMessage>) => void
-  clearChat: (sessionId: string) => void
-  getSessionChat: (sessionId: string) => ChatMessage[]
-
-  // Accumulate token usage from a response
-  addTokenUsage: (sessionId: string, usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number }) => void
-  getSessionTokenUsage: (sessionId: string) => SessionTokenUsage
-  resetTokenUsage: (sessionId: string) => void
-}
-
-const DEFAULT_TOKEN_USAGE: SessionTokenUsage = {
-  prompt_tokens: 0,
-  completion_tokens: 0,
-  total_tokens: 0,
-  turn_count: 0,
-}
-
-export const useStore = create<SessionState>()(
-  persist(
-    (set, get) => ({
-      sessions: [],
-      activeSessionId: null,
-      files: {},
-      chats: {},
-      tokenUsage: {},
-
-      // ── Sessions ─────────────────────────────────────────────────
-      createSession: (name, summary) => {
-        const id = slugify(name) + '_' + Date.now().toString(36)
-        const session: KnowledgeSet = {
-          id,
-          project_name: name,
-          summary,
-          created_at: new Date().toISOString(),
-          file_count: 0,
-          vector_count: 0,
-          collection_name: `ks_${id}`,
-        }
-        set(s => ({ sessions: [session, ...s.sessions] }))
-        return session
-      },
-
-      updateSession: (id, updates) =>
-        set(s => ({
-          sessions: s.sessions.map(sess =>
-            sess.id === id ? { ...sess, ...updates } : sess
-          ),
-        })),
-
-      deleteSession: (id) =>
-        set(s => {
-          const { [id]: _f, ...files }      = s.files
-          const { [id]: _c, ...chats }      = s.chats
-          const { [id]: _t, ...tokenUsage } = s.tokenUsage
-          return {
-            sessions: s.sessions.filter(sess => sess.id !== id),
-            activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
-            files,
-            chats,
-            tokenUsage,
-          }
-        }),
-
-      setActiveSession: (id) => set({ activeSessionId: id }),
-
-      getActiveSession: () => {
-        const { sessions, activeSessionId } = get()
-        return sessions.find(s => s.id === activeSessionId) ?? null
-      },
-
-      // ── Files ─────────────────────────────────────────────────────
-      addFiles: (sessionId, newFiles) =>
-        set(s => ({
-          files: {
-            ...s.files,
-            [sessionId]: [...(s.files[sessionId] ?? []), ...newFiles],
-          },
-          sessions: s.sessions.map(sess =>
-            sess.id === sessionId
-              ? { ...sess, file_count: (s.files[sessionId]?.length ?? 0) + newFiles.length }
-              : sess
-          ),
-        })),
-
-      updateFile: (sessionId, fileId, updates) =>
-        set(s => ({
-          files: {
-            ...s.files,
-            [sessionId]: (s.files[sessionId] ?? []).map(f =>
-              f.id === fileId ? { ...f, ...updates } : f
-            ),
-          },
-        })),
-
-      removeFile: (sessionId, fileId) =>
-        set(s => {
-          const updated = (s.files[sessionId] ?? []).filter(f => f.id !== fileId)
-          return {
-            files: { ...s.files, [sessionId]: updated },
-            sessions: s.sessions.map(sess =>
-              sess.id === sessionId ? { ...sess, file_count: updated.length } : sess
-            ),
-          }
-        }),
-
-      getSessionFiles: (sessionId) => get().files[sessionId] ?? [],
-
-      // ── Chat ──────────────────────────────────────────────────────
-      addMessage: (sessionId, msg) =>
-        set(s => ({
-          chats: {
-            ...s.chats,
-            [sessionId]: [...(s.chats[sessionId] ?? []), msg],
-          },
-        })),
-
-      updateMessage: (sessionId, msgId, updates) =>
-        set(s => ({
-          chats: {
-            ...s.chats,
-            [sessionId]: (s.chats[sessionId] ?? []).map(m =>
-              m.id === msgId ? { ...m, ...updates } : m
-            ),
-          },
-        })),
-
-      clearChat: (sessionId) =>
-        set(s => ({ chats: { ...s.chats, [sessionId]: [] } })),
-
-      getSessionChat: (sessionId) => get().chats[sessionId] ?? [],
-
-      // ── Token usage ───────────────────────────────────────────────
-      addTokenUsage: (sessionId, usage) =>
-        set(s => {
-          const prev = s.tokenUsage[sessionId] ?? { ...DEFAULT_TOKEN_USAGE }
-          return {
-            tokenUsage: {
-              ...s.tokenUsage,
-              [sessionId]: {
-                prompt_tokens    : prev.prompt_tokens     + (usage.prompt_tokens     ?? 0),
-                completion_tokens: prev.completion_tokens + (usage.completion_tokens ?? 0),
-                total_tokens     : prev.total_tokens      + (usage.total_tokens      ?? 0),
-                turn_count       : prev.turn_count        + 1,
-              },
-            },
-          }
-        }),
-
-      getSessionTokenUsage: (sessionId) =>
-        get().tokenUsage[sessionId] ?? { ...DEFAULT_TOKEN_USAGE },
-
-      resetTokenUsage: (sessionId) =>
-        set(s => ({
-          tokenUsage: {
-            ...s.tokenUsage,
-            [sessionId]: { ...DEFAULT_TOKEN_USAGE },
-          },
-        })),
-    }),
-    {
-      name: 'governgpt-store',
-      version: 2,                    // bumped — new tokenUsage field
-      storage: createJSONStorage(() => {
-        if (typeof window === 'undefined') {
-          return {
-            getItem: () => null,
-            setItem: () => {},
-            removeItem: () => {},
-          }
-        }
-        return localStorage
-      }),
-      // ── CRITICAL: never persist activeSessionId ──────────────────
-      // Server renders with null → SessionGrid.
-      // Persisting it causes SSR/client tree mismatch → blank page.
-      partialize: (state) => ({
-        sessions  : state.sessions,
-        files     : state.files,
-        chats     : state.chats,
-        tokenUsage: state.tokenUsage,
-        // activeSessionId intentionally excluded
-      }),
-      skipHydration: true,
+    const userMsg: ChatMessage = {
+      id       : Math.random().toString(36).slice(2),
+      role     : 'user',
+      content  : question.trim(),
+      timestamp: new Date().toISOString(),
     }
+    onAddMessage(userMsg)
+    setIsLoading(true)
+
+    const assistantId = Math.random().toString(36).slice(2)
+    onAddMessage({
+      id: assistantId, role: 'assistant',
+      content: '', timestamp: new Date().toISOString(),
+    })
+
+    try {
+      const result = await api.query({
+        knowledge_set: session.id,
+        session_id   : session.id,   // ← memory key — same as project ID
+        question     : question.trim(),
+        use_rag      : useRag,
+        k,
+        window_k     : windowK,
+      })
+
+      // Update assistant message with full response metadata
+      onUpdateMessage(assistantId, {
+        content            : result.answer,
+        sources_used       : result.sources_used,
+        chunks_retrieved   : result.chunks_retrieved,
+        duration_seconds   : result.duration_seconds,
+        run_id             : result.run_id,
+        rephrased_question : result.rephrased_question,
+        prompt_tokens      : result.prompt_tokens,
+        completion_tokens  : result.completion_tokens,
+        total_tokens       : result.total_tokens,
+        mode               : result.mode,
+      })
+
+      // Accumulate token usage in store
+      addTokenUsage(session.id, {
+        prompt_tokens    : result.prompt_tokens,
+        completion_tokens: result.completion_tokens,
+        total_tokens     : result.total_tokens,
+      })
+
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Request failed'
+      onUpdateMessage(assistantId, {
+        content: `**Error:** ${msg}\n\nPlease ensure the backend is running and this knowledge set has been indexed.`,
+      })
+    } finally {
+      setIsLoading(false)
+      setTimeout(() => inputRef.current?.focus(), 100)
+    }
+  }, [isLoading, session.id, useRag, k, windowK, onAddMessage, onUpdateMessage, addTokenUsage])
+
+  // Clear both frontend state and backend SQLite memory
+  const handleClearChat = async () => {
+    setIsClearingMemory(true)
+    try {
+      await api.clearConversationHistory(session.id, session.id)
+    } catch (_) {
+      // Non-fatal — clear frontend regardless
+    } finally {
+      onClearChat()
+      resetTokenUsage(session.id)
+      setIsClearingMemory(false)
+    }
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(input) }
+  }
+
+  const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInput(e.target.value)
+    e.target.style.height = 'auto'
+    e.target.style.height = Math.min(e.target.scrollHeight, 140) + 'px'
+  }
+
+  const visibleMessages = messages.filter(m => m.content !== '' || m.role === 'user')
+  const isTyping        = isLoading && messages[messages.length - 1]?.content === ''
+
+  return (
+    <div className="h-full flex flex-col bg-ink-50">
+
+      {/* ── Header ─────────────────────────────────────────────── */}
+      <div className="flex-shrink-0 px-6 py-3 border-b border-ink-200 bg-white">
+        <div className="flex items-center justify-between">
+          {/* Left — identity */}
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-axa-800 flex items-center justify-center">
+              <Shield className="w-4 h-4 text-white" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-semibold text-ink-800 font-display">
+                  GovernGPT Agent
+                </span>
+                <span className="axa-badge">GPT-4o</span>
+                {/* Memory depth indicator */}
+                {assistantTurns > 0 && (
+                  <span className="flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-axa-50 border border-axa-100 text-axa-800">
+                    <Brain className="w-2.5 h-2.5" />
+                    {assistantTurns} turn{assistantTurns !== 1 ? 's' : ''} in memory
+                  </span>
+                )}
+              </div>
+              <p className="text-[10px] text-ink-400">{session.project_name}</p>
+            </div>
+          </div>
+
+          {/* Right — token counter + actions */}
+          <div className="flex items-center gap-1.5">
+            {/* Session token usage */}
+            {tokenUsage.total_tokens > 0 && (
+              <div className="hidden md:flex items-center gap-1.5 text-[10px] text-ink-400 bg-ink-50 border border-ink-100 px-2.5 py-1.5 rounded-lg">
+                <Zap className="w-3 h-3 text-axa-400" />
+                <span className="font-mono font-medium text-ink-600">
+                  {tokenUsage.total_tokens.toLocaleString()}
+                </span>
+                <span>tokens</span>
+              </div>
+            )}
+
+            <button
+              onClick={() => setShowSettings(s => !s)}
+              className={cn(
+                'p-2 rounded-lg transition-colors text-ink-400',
+                showSettings
+                  ? 'bg-axa-50 text-axa-800 border border-axa-100'
+                  : 'hover:bg-ink-100 hover:text-ink-700'
+              )}
+              title="Query settings"
+            >
+              <Sliders className="w-4 h-4" />
+            </button>
+
+            {messages.length > 0 && (
+              <button
+                onClick={handleClearChat}
+                disabled={isClearingMemory}
+                className="p-2 rounded-lg hover:bg-axared-50 text-ink-400 hover:text-axared-500 transition-colors disabled:opacity-50"
+                title="Clear chat and reset memory"
+              >
+                <RotateCcw className={cn('w-4 h-4', isClearingMemory && 'animate-spin')} />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Settings panel */}
+        <AnimatePresence>
+          {showSettings && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="mt-3 overflow-hidden"
+            >
+              <div className="flex items-center flex-wrap gap-5 py-2.5 px-3 bg-axa-50 rounded-xl border border-axa-100">
+                {/* RAG toggle */}
+                <label className="flex items-center gap-2 text-xs text-ink-600 cursor-pointer select-none">
+                  <div
+                    onClick={() => setUseRag(v => !v)}
+                    className={cn(
+                      'w-8 h-4 rounded-full transition-colors relative cursor-pointer',
+                      useRag ? 'bg-axa-800' : 'bg-ink-200'
+                    )}
+                  >
+                    <div className={cn(
+                      'absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform shadow-sm',
+                      useRag ? 'translate-x-4' : 'translate-x-0.5'
+                    )} />
+                  </div>
+                  <span className="font-medium">Use RAG</span>
+                </label>
+
+                {/* Top-K */}
+                <label className="flex items-center gap-2 text-xs text-ink-600">
+                  <span className="font-medium">Top-K</span>
+                  <select
+                    value={k}
+                    onChange={e => setK(Number(e.target.value))}
+                    className="bg-white border border-ink-200 rounded-lg px-2 py-0.5 text-xs text-ink-700 focus:outline-none focus:border-axa-400"
+                  >
+                    {[3, 5, 8, 10, 15, 20].map(v => (
+                      <option key={v} value={v}>{v}</option>
+                    ))}
+                  </select>
+                </label>
+
+                {/* Memory window */}
+                <label className="flex items-center gap-2 text-xs text-ink-600">
+                  <Brain className="w-3.5 h-3.5 text-axa-700" />
+                  <span className="font-medium">Memory turns</span>
+                  <select
+                    value={windowK}
+                    onChange={e => setWindowK(Number(e.target.value))}
+                    className="bg-white border border-ink-200 rounded-lg px-2 py-0.5 text-xs text-ink-700 focus:outline-none focus:border-axa-400"
+                  >
+                    {[2, 4, 6, 8, 10, 12].map(v => (
+                      <option key={v} value={v}>{v}</option>
+                    ))}
+                  </select>
+                </label>
+
+                {/* Token counter breakdown */}
+                {tokenUsage.turn_count > 0 && (
+                  <div className="ml-auto flex items-center gap-3 text-[10px] text-ink-500 font-mono">
+                    <span>↑{tokenUsage.prompt_tokens.toLocaleString()}</span>
+                    <span>↓{tokenUsage.completion_tokens.toLocaleString()}</span>
+                    <span className="font-semibold text-axa-800">
+                      ={tokenUsage.total_tokens.toLocaleString()} total
+                    </span>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {/* ── Messages ───────────────────────────────────────────── */}
+      <div className="flex-1 overflow-y-auto px-6 py-6 space-y-5">
+        {messages.length === 0 ? (
+          <WelcomeScreen sessionName={session.project_name} onSuggest={sendMessage} />
+        ) : (
+          <>
+            {visibleMessages.map((msg, i) =>
+              isTyping && i === visibleMessages.length - 1 && msg.role === 'assistant' ? (
+                <TypingIndicator key={msg.id} />
+              ) : (
+                <MessageBubble key={msg.id} message={msg} index={i} />
+              )
+            )}
+            <div ref={bottomRef} />
+          </>
+        )}
+      </div>
+
+      {/* ── Input ──────────────────────────────────────────────── */}
+      <div className="flex-shrink-0 px-6 pb-6 pt-3 border-t border-ink-200 bg-white">
+        <div className={cn(
+          'flex items-end gap-3 bg-white border rounded-xl px-4 py-3 transition-all',
+          'focus-within:border-axa-400 focus-within:ring-2 focus-within:ring-axa-50 border-ink-200'
+        )}>
+          <textarea
+            ref={inputRef}
+            value={input}
+            onChange={handleInput}
+            onKeyDown={handleKeyDown}
+            placeholder="Ask a governance question — I remember our full conversation…"
+            disabled={isLoading}
+            rows={1}
+            maxLength={32000}
+            className="flex-1 bg-transparent text-sm text-ink-800 placeholder-ink-300 resize-none focus:outline-none leading-relaxed py-0.5 max-h-36 disabled:opacity-60"
+            style={{ height: '24px' }}
+          />
+          <button
+            onClick={() => sendMessage(input)}
+            disabled={!input.trim() || isLoading}
+            className={cn(
+              'w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 transition-all',
+              input.trim() && !isLoading
+                ? 'bg-axa-800 text-white hover:bg-axa-700 shadow-axa'
+                : 'bg-ink-100 text-ink-300 cursor-not-allowed'
+            )}
+          >
+            <Send className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        <div className="flex items-center justify-between mt-1.5 px-1">
+          <p className="text-[10px] text-ink-300">
+            <kbd className="font-mono bg-ink-100 px-1 rounded text-ink-400">Enter</kbd> send ·{' '}
+            <kbd className="font-mono bg-ink-100 px-1 rounded text-ink-400">Shift+Enter</kbd> new line
+          </p>
+          {input.length > 500 && (
+            <p className="text-[10px] text-ink-400 font-mono">
+              {input.length.toLocaleString()} / 32,000
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
   )
-)
+}
+
+// ── Welcome screen ───────────────────────────────────────────────
+function WelcomeScreen({
+  sessionName, onSuggest,
+}: { sessionName: string; onSuggest: (q: string) => void }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="flex flex-col items-center justify-center min-h-[60%] text-center py-8"
+    >
+      <div className="w-14 h-14 rounded-2xl bg-axa-800 flex items-center justify-center mb-5 shadow-axa">
+        <Sparkles className="w-7 h-7 text-white" />
+      </div>
+      <h2 className="font-display text-2xl text-ink-800 mb-2">Ask GovernGPT</h2>
+      <p className="text-ink-500 text-sm max-w-sm mb-2 leading-relaxed">
+        Query your{' '}
+        <span className="text-axa-800 font-semibold">{sessionName}</span>{' '}
+        knowledge set with AI-powered governance intelligence.
+      </p>
+      <p className="flex items-center gap-1.5 text-[11px] text-axa-700 bg-axa-50 border border-axa-100 px-3 py-1.5 rounded-full mb-8">
+        <Brain className="w-3 h-3" />
+        Conversational memory active — each answer builds on previous ones
+      </p>
+      <div className="w-full max-w-lg space-y-2">
+        <p className="text-[10px] font-semibold text-ink-400 uppercase tracking-widest mb-3">
+          Suggested queries
+        </p>
+        {SUGGESTED.map((q, i) => (
+          <motion.button
+            key={i}
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: i * 0.07 }}
+            onClick={() => onSuggest(q)}
+            className="w-full text-left px-4 py-2.5 rounded-xl bg-white border border-ink-200 text-xs text-ink-600 hover:border-axa-300 hover:text-axa-800 hover:bg-axa-50 transition-all"
+          >
+            {q}
+          </motion.button>
+        ))}
+      </div>
+    </motion.div>
+  )
+}
