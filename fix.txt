@@ -1,122 +1,150 @@
-import urllib3
-from contextlib import asynccontextmanager
-from datetime import datetime
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+// ── Knowledge Set / Session ─────────────────────────────────────
+export interface KnowledgeSet {
+  id: string              // used as knowledge_set + session_id in API calls
+  project_name: string
+  summary: string
+  created_at: string
+  file_count: number
+  vector_count: number
+  collection_name: string
+}
 
-from routers.all_routers import (
-    sources_router, logs_router,
-    profile_router, reset_router,
-    ks_router
-)
-from routers.ingest import router as ingest_router
-from routers.query  import router as query_router
-from services.vectorstore import load_vector_store, get_vector_count
-from services.memory import _ensure_history_table
-from db import db_count, db_table_exists
-from models.schemas import HealthResponse
+export interface CreateKnowledgeSetPayload {
+  project_name: string
+  summary: string
+}
 
-# Suppress corporate SSL warnings
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+// ── Files / Sources ─────────────────────────────────────────────
+export interface SourceFile {
+  id: string
+  name: string
+  size: number
+  type: string
+  extension: string
+  status: 'uploading' | 'processing' | 'ready' | 'error'
+  progress: number
+  error?: string
+  ingested_at?: string
+  chunk_count?: number
+  department?: string
+  sensitivity?: string
+  pii_chunks?: number
+}
 
+export interface IngestResponse {
+  status: string
+  knowledge_set: string
+  collection_name: string
+  files_processed: number
+  files_failed: number
+  total_chunks: number
+  total_vectors: number
+  file_details: FileDetail[]
+  duration_seconds: number
+  ingested_at: string
+}
 
-# ── Startup / shutdown ──────────────────────────────────────────
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    print("🏛️  Data Governance RAG API starting...")
+export interface FileDetail {
+  file: string
+  type: string
+  status: string
+  docs: number
+  error?: string
+}
 
-    # Pre-load embeddings model (avoids cold start on first query)
-    from llm import get_embeddings_singleton
-    get_embeddings_singleton()
-    print("✅ Embeddings model loaded.")
+// ── Chat ─────────────────────────────────────────────────────────
+export interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  timestamp: string
+  // Response metadata (populated for assistant messages)
+  sources_used?: string[]
+  chunks_retrieved?: number
+  duration_seconds?: number
+  run_id?: string
+  rephrased_question?: string   // ← what the LLM actually searched for
+  prompt_tokens?: number        // ← token tracking
+  completion_tokens?: number
+  total_tokens?: number
+  mode?: string                 // 'conversational_rag' | 'direct'
+}
 
-    # Ensure conversation_history table exists in SQLite
-    _ensure_history_table()
-    print("✅ Conversation history table ready.")
+export interface QueryRequest {
+  knowledge_set: string
+  session_id: string            // ← required for conversational memory
+  question: string
+  use_rag: boolean
+  k: number
+  window_k?: number             // ← how many past turns to include
+}
 
-    yield
-    print("👋 Shutting down.")
+export interface QueryResponse {
+  run_id: string
+  session_id: string
+  knowledge_set: string
+  question: string
+  rephrased_question: string    // ← standalone question after condensing
+  answer: string
+  mode: string
+  sources_used: string[]
+  chunks_retrieved: number
+  model: string
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  created_at: string
+  duration_seconds: number
+}
 
+// ── Conversation History ─────────────────────────────────────────
+export interface ConversationMessage {
+  id: number
+  session_id: string
+  knowledge_set: string
+  role: 'human' | 'ai'
+  content: string
+  run_id?: string
+  token_count?: number
+  created_at: string
+}
 
-# ── App ──────────────────────────────────────────────────────────
-app = FastAPI(
-    title="Data Governance RAG API",
-    description=(
-        "AI-powered Data Governance framework for the insurance industry. "
-        "Reads unstructured documents and generates governance intelligence "
-        "using RAG over AXA SecureGPT (GPT-4o). "
-        "Supports persistent multi-turn conversational memory via SQLite."
-    ),
-    version="2.0.0",
-    lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc"
-)
+export interface ConversationHistoryResponse {
+  session_id: string
+  knowledge_set: string
+  total_messages: number
+  turns: number
+  messages: ConversationMessage[]
+}
 
-# ── CORS ─────────────────────────────────────────────────────────
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+export interface ConversationStatsResponse {
+  session_id: string
+  knowledge_set: string
+  total_messages: number
+  human_turns: number
+  ai_turns: number
+  first_message_at?: string
+  last_message_at?: string
+}
 
-# ── Routers ──────────────────────────────────────────────────────
-app.include_router(ingest_router)
-app.include_router(query_router)
-app.include_router(sources_router)
-app.include_router(logs_router)
-app.include_router(profile_router)
-app.include_router(reset_router)
-app.include_router(ks_router)
+// ── Stats ────────────────────────────────────────────────────────
+export interface GovernanceStats {
+  knowledge_set: string
+  total_chunks: number
+  total_llm_responses: number
+  pii_chunks: number
+  pii_percentage: number
+  sensitivity_distribution: { sensitivity: string; count: number }[]
+  department_distribution: { department: string; count: number }[]
+}
 
+export interface KnowledgeSetInfo {
+  knowledge_set: string
+  collection_name: string
+  vector_count: number
+}
 
-# ── Health check ─────────────────────────────────────────────────
-@app.get("/health", response_model=HealthResponse, tags=["Health"])
-async def health():
-    chroma_count  = 0
-    sources_count = 0
-    try:
-        vdb = load_vector_store()
-        chroma_count = get_vector_count(vdb)
-        if db_table_exists("document_chunks"):
-            from db import db_query
-            sources_count = len(db_query(
-                "SELECT DISTINCT source_file FROM document_chunks"
-            ))
-    except Exception:
-        pass
-
-    return HealthResponse(
-        status="healthy",
-        version="2.0.0",
-        chroma_vectors=chroma_count,
-        sqlite_chunks=db_count("document_chunks"),
-        sqlite_responses=db_count("llm_responses"),
-        sqlite_conversation_messages=db_count("conversation_history"),
-        sources_loaded=sources_count,
-        timestamp=datetime.now().isoformat()
-    )
-
-
-@app.get("/", tags=["Health"])
-async def root():
-    return {
-        "service" : "Data Governance RAG API",
-        "version" : "2.0.0",
-        "docs"    : "/docs",
-        "health"  : "/health",
-        "features": [
-            "Conversational RAG with SQLite-persisted memory",
-            "Multi-knowledge-set isolation",
-            "Token usage tracking",
-            "Multi-format document ingestion",
-            "Data governance intelligence for insurance"
-        ]
-    }
+export interface KnowledgeSetListResponse {
+  total: number
+  knowledge_sets: KnowledgeSetInfo[]
+}
