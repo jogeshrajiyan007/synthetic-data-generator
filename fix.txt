@@ -1,204 +1,154 @@
-from pydantic import BaseModel, Field
-from typing import Any, Optional
-from datetime import datetime
+from fastapi import APIRouter, HTTPException, Query
+from services.rag import query_governance
+from services.vectorstore import load_vector_store
+from services.memory import (
+    get_full_history, get_session_stats,
+    clear_history, DEFAULT_WINDOW_K
+)
+from models.schemas import (
+    QueryRequest, QueryResponse,
+    ConversationHistoryResponse, ConversationMessage,
+    ConversationStatsResponse, ClearHistoryResponse
+)
+
+router = APIRouter(prefix="/api/query", tags=["Query"])
 
 
-# ── Ingest ──────────────────────────────────────────────────────
-
-class IngestRequest(BaseModel):
-    knowledge_set: str = Field(
-        ..., min_length=1, max_length=60,
-        description="Unique name for this knowledge set e.g. 'hr_analytics', 'claims_2024'"
-    )
-    rebuild: bool = Field(
-        default=False,
-        description="If True, drops the existing collection and rebuilds from scratch"
-    )
-
-
-class IngestResponse(BaseModel):
-    status: str
-    knowledge_set: str
-    collection_name: str
-    files_processed: int
-    files_failed: int
-    total_chunks: int
-    total_vectors: int
-    file_details: list[dict]
-    duration_seconds: float
-    ingested_at: str
-
-
-# ── Query ───────────────────────────────────────────────────────
-
-class QueryRequest(BaseModel):
-    knowledge_set: str = Field(
-        ..., min_length=1, max_length=60,
-        description="Which knowledge set to query against"
-    )
-    session_id: str = Field(
-        ..., min_length=1, max_length=120,
-        description=(
-            "Unique conversation session ID. Use the Knowledge Set project ID "
-            "from the frontend. All messages with the same session_id share "
-            "conversation memory."
+def _get_vectordb(knowledge_set: str):
+    """Load the vector store for the requested knowledge set."""
+    try:
+        return load_vector_store(knowledge_set)
+    except Exception:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Knowledge set '{knowledge_set}' not found or not yet initialised. "
+                f"Please call POST /api/ingest first with this knowledge_set name."
+            )
         )
+
+
+@router.post("/", response_model=QueryResponse)
+async def query_endpoint(request: QueryRequest):
+    """
+    Send a governance question against a specific knowledge set.
+    Conversation history is automatically loaded from SQLite using session_id.
+    Each answer is aware of all previous Q&A in this session.
+
+    Request body:
+    {
+        "knowledge_set": "claims_2024",
+        "session_id":    "claims_2024",
+        "question":      "What PII data is present?",
+        "use_rag":       true,
+        "k":             5,
+        "window_k":      6
+    }
+    """
+    vectordb = _get_vectordb(request.knowledge_set)
+    result   = query_governance(
+        question      = request.question,
+        vectordb      = vectordb,
+        knowledge_set = request.knowledge_set,
+        session_id    = request.session_id,
+        use_rag       = request.use_rag,
+        k             = request.k,
+        window_k      = request.window_k,
     )
-    question: str = Field(..., min_length=3, max_length=32000)
-    use_rag: bool = True
-    k: int = Field(default=5, ge=1, le=20)
-    window_k: int = Field(
-        default=6, ge=1, le=20,
-        description="Number of past Q&A turns to include as memory context"
+    return QueryResponse(**result)
+
+
+@router.post("/batch", response_model=list[QueryResponse])
+async def batch_query(requests: list[QueryRequest]):
+    """
+    Run multiple queries sequentially. Each query in the batch has its own
+    session_id, so memory is maintained per-session across the batch.
+    Max 20 queries per batch.
+    """
+    if len(requests) > 20:
+        raise HTTPException(status_code=400, detail="Max 20 queries per batch.")
+
+    results = []
+    for req in requests:
+        vectordb = _get_vectordb(req.knowledge_set)
+        result   = query_governance(
+            question      = req.question,
+            vectordb      = vectordb,
+            knowledge_set = req.knowledge_set,
+            session_id    = req.session_id,
+            use_rag       = req.use_rag,
+            k             = req.k,
+            window_k      = req.window_k,
+        )
+        results.append(QueryResponse(**result))
+    return results
+
+
+# ── Conversation History Endpoints ───────────────────────────────
+
+@router.get("/history", response_model=ConversationHistoryResponse)
+async def get_conversation_history(
+    session_id:    str = Query(..., description="Session / project ID"),
+    knowledge_set: str = Query(..., description="Knowledge set name"),
+):
+    """
+    Retrieve the full conversation history for a session.
+    Used by the frontend to render past messages on page reload.
+    """
+    rows = get_full_history(session_id, knowledge_set)
+    messages = [
+        ConversationMessage(
+            id            = row["id"],
+            session_id    = row["session_id"],
+            knowledge_set = row["knowledge_set"],
+            role          = row["role"],
+            content       = row["content"],
+            run_id        = row.get("run_id"),
+            token_count   = row.get("token_count"),
+            created_at    = row["created_at"],
+        )
+        for row in rows
+    ]
+    return ConversationHistoryResponse(
+        session_id    = session_id,
+        knowledge_set = knowledge_set,
+        total_messages= len(messages),
+        turns         = len(messages) // 2,
+        messages      = messages,
     )
 
 
-class QueryResponse(BaseModel):
-    run_id: str
-    session_id: str
-    knowledge_set: str
-    question: str
-    rephrased_question: str        # ← standalone question after history condensing
-    answer: str
-    mode: str
-    sources_used: list[str]
-    chunks_retrieved: int
-    model: str
-    # ── Token tracking ─────────────────────────────────────────
-    prompt_tokens: int
-    completion_tokens: int
-    total_tokens: int
-    # ──────────────────────────────────────────────────────────
-    created_at: str
-    duration_seconds: float
+@router.get("/history/stats", response_model=ConversationStatsResponse)
+async def get_conversation_stats(
+    session_id:    str = Query(..., description="Session / project ID"),
+    knowledge_set: str = Query(..., description="Knowledge set name"),
+):
+    """Return summary statistics for a conversation session."""
+    stats = get_session_stats(session_id, knowledge_set)
+    return ConversationStatsResponse(
+        session_id        = session_id,
+        knowledge_set     = knowledge_set,
+        total_messages    = int(stats.get("total_messages") or 0),
+        human_turns       = int(stats.get("human_turns") or 0),
+        ai_turns          = int(stats.get("ai_turns") or 0),
+        first_message_at  = stats.get("first_message_at"),
+        last_message_at   = stats.get("last_message_at"),
+    )
 
 
-# ── Conversation History ─────────────────────────────────────────
-
-class ConversationMessage(BaseModel):
-    id: int
-    session_id: str
-    knowledge_set: str
-    role: str                      # 'human' | 'ai'
-    content: str
-    run_id: Optional[str] = None
-    token_count: Optional[int] = None
-    created_at: str
-
-
-class ConversationHistoryResponse(BaseModel):
-    session_id: str
-    knowledge_set: str
-    total_messages: int
-    turns: int                     # total_messages / 2
-    messages: list[ConversationMessage]
-
-
-class ConversationStatsResponse(BaseModel):
-    session_id: str
-    knowledge_set: str
-    total_messages: int
-    human_turns: int
-    ai_turns: int
-    first_message_at: Optional[str] = None
-    last_message_at: Optional[str] = None
-
-
-class ClearHistoryResponse(BaseModel):
-    status: str
-    session_id: str
-    knowledge_set: str
-    messages_deleted: int
-
-
-# ── Sources ─────────────────────────────────────────────────────
-
-class SourceFile(BaseModel):
-    source_file: str
-    file_type: str
-    chunk_count: int
-    department: str
-    sensitivity: str
-    pii_chunks: int
-    ingested_at: str
-
-
-class SourcesResponse(BaseModel):
-    knowledge_set: str
-    total_sources: int
-    total_chunks: int
-    sources: list[SourceFile]
-
-
-# ── Profile ─────────────────────────────────────────────────────
-
-class ColumnProfile(BaseModel):
-    column_name: str
-    dtype: str
-    null_count: int
-    null_pct: float
-    unique_count: int
-    col_type: str
-    stats: dict[str, Any]
-
-
-class FileProfileResponse(BaseModel):
-    source_file: str
-    row_count: int
-    col_count: int
-    duplicate_rows: int
-    total_nulls: int
-    columns: list[ColumnProfile]
-    strong_correlations: list[dict]
-    governance: dict[str, Any]
-
-
-# ── Logs ────────────────────────────────────────────────────────
-
-class LogsResponse(BaseModel):
-    table: str
-    knowledge_set: Optional[str] = None
-    total_records: int
-    limit: int
-    offset: int
-    records: list[dict]
-
-
-# ── Reset ───────────────────────────────────────────────────────
-
-class ResetResponse(BaseModel):
-    status: str
-    message: str
-    cleared: list[str]
-
-
-# ── Health ──────────────────────────────────────────────────────
-
-class HealthResponse(BaseModel):
-    status: str
-    version: str
-    chroma_vectors: int
-    sqlite_chunks: int
-    sqlite_responses: int
-    sqlite_conversation_messages: int   # ← new
-    sources_loaded: int
-    timestamp: str
-
-
-# ── Knowledge Sets ───────────────────────────────────────────────
-
-class KnowledgeSetInfo(BaseModel):
-    knowledge_set: str
-    collection_name: str
-    vector_count: int
-
-
-class KnowledgeSetListResponse(BaseModel):
-    total: int
-    knowledge_sets: list[KnowledgeSetInfo]
-
-
-class KnowledgeSetDeleteResponse(BaseModel):
-    status: str
-    knowledge_set: str
-    message: str
+@router.delete("/history", response_model=ClearHistoryResponse)
+async def clear_conversation_history(
+    session_id:    str = Query(..., description="Session / project ID"),
+    knowledge_set: str = Query(..., description="Knowledge set name"),
+):
+    """
+    Clear all conversation memory for a session.
+    The LLM will start fresh on the next query — no prior context.
+    """
+    deleted = clear_history(session_id, knowledge_set)
+    return ClearHistoryResponse(
+        status           = "cleared",
+        session_id       = session_id,
+        knowledge_set    = knowledge_set,
+        messages_deleted = deleted,
+    )
