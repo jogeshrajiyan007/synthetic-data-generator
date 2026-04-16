@@ -1,472 +1,356 @@
 """
-services/databricks/profiler.py
+services/databricks/ingestion.py
 
-Full statistical profiling of Databricks tables.
+Converts a Databricks table profile into LangChain Documents
+and feeds them through the existing chunking → vectorstore pipeline.
 
-Handles:
-- Primitive types: string, int, bigint, double, float, boolean, date, timestamp
-- Complex types: STRUCT (flattened), ARRAY (size stats), MAP (key/value samples)
-- Nested STRUCTs up to any depth via dot-notation SQL
-- PII detection, sensitivity classification, governance tagging
-- Efficient sampling via TABLESAMPLE or LIMIT for large tables
+The profile document is structured to maximise RAG retrieval quality:
+- Schema section (column names, types, comments)
+- Statistics section (per-column numerical/categorical stats)
+- Governance section (PII, sensitivity, regulatory signals)
+- Sample data section (5 random rows for context)
 
-Profiling approach:
-1. Get column schema from DESCRIBE TABLE EXTENDED
-2. Flatten complex types to leaf paths
-3. Run targeted SQL per column type
-4. Aggregate into a rich governance-aware profile document
+Each table produces 1 primary profile Document + optional sub-Documents
+for deeply nested STRUCTs (one per top-level struct column).
 """
 
 from __future__ import annotations
 import json
 from datetime import datetime
 
+from langchain_core.documents import Document
+
 from services.databricks.client import DatabricksClient
-from services.databricks.catalog import (
-    get_table_detail, flatten_schema, _fqn
-)
-from config import PII_SIGNALS, SENSITIVITY_TIERS, DEPARTMENT_SIGNALS, GOVERNANCE_THEMES
-
-
-# ── Profiling config ─────────────────────────────────────────────
-SAMPLE_ROWS        = 500_000    # row limit for stats queries on large tables
-TOP_N_VALUES       = 20         # top N values for categorical columns
-HIGH_CARDINALITY   = 50         # unique count above which we skip value enumeration
-NULL_SAMPLE_LIMIT  = 1_000_000  # row limit for null/completeness checks
+from services.databricks.profiler import profile_table
+from services.databricks.catalog import _fqn
+from services.chunking import chunk_and_enrich
+from services.vectorstore import build_vector_store, add_to_vector_store, load_vector_store
+from db import db_insert
 
 
 # ── Public entry point ───────────────────────────────────────────
 
-def profile_table(
+def ingest_databricks_table(
     client: DatabricksClient,
     catalog: str,
     schema: str,
     table: str,
-    sample_rows: int = SAMPLE_ROWS,
+    knowledge_set: str,
+    sample_rows: int = 500_000,
+    rebuild: bool = False,
 ) -> dict:
     """
-    Run a full governance-aware statistical profile on a Databricks table.
+    Full pipeline: profile → document → chunk → embed → vectorstore.
 
-    Returns a rich dict containing:
-    - Schema (columns with parsed types including nested STRUCT/ARRAY)
-    - Row / column counts
-    - Per-column statistics (min, max, mean, stddev, nulls, unique, top values)
-    - ARRAY column size statistics
-    - STRUCT column nested field summary
-    - PII signals, sensitivity classification, governance tags
-    - Data quality indicators
+    Returns a summary dict with ingestion stats.
     """
-    fqn    = _fqn(catalog, schema, table)
-    detail = get_table_detail(client, catalog, schema, table)
+    start = datetime.now()
 
-    # ── Row count ─────────────────────────────────────────────────
-    row_count = _safe_scalar(client, f"SELECT COUNT(*) FROM {fqn}", 0)
+    # ── 1. Profile the table ──────────────────────────────────────
+    profile = profile_table(client, catalog, schema, table, sample_rows)
 
-    # ── Sample subquery for expensive stats ───────────────────────
-    sample_sql = (
-        f"(SELECT * FROM {fqn} LIMIT {sample_rows})"
-        if row_count > sample_rows
-        else fqn
-    )
+    # ── 2. Convert profile to Documents ──────────────────────────
+    documents = profile_to_documents(profile)
 
-    # ── Flatten schema to leaf columns ────────────────────────────
-    flat_cols = flatten_schema(detail["columns"])
+    # ── 3. Fetch sample rows ──────────────────────────────────────
+    sample_doc = _fetch_sample_document(client, catalog, schema, table)
+    if sample_doc:
+        documents.append(sample_doc)
 
-    # ── Profile each column ───────────────────────────────────────
-    col_profiles = []
-    for flat in flat_cols:
-        path  = flat["path"]
-        dtype = flat["data_type"].lower()
+    # ── 4. Chunk and enrich with governance metadata ───────────────
+    chunks = chunk_and_enrich(documents, knowledge_set=knowledge_set)
 
-        if flat.get("is_array"):
-            cp = _profile_array_col(client, sample_sql, path, row_count)
-        elif flat["is_leaf"]:
-            cp = _profile_leaf_col(client, sample_sql, path, dtype, row_count)
-        else:
-            cp = _profile_complex_leaf(path, dtype)
+    # ── 5. Store vectors ──────────────────────────────────────────
+    if rebuild:
+        from services.vectorstore import delete_vector_store
+        delete_vector_store(knowledge_set)
 
-        cp["governance"] = _column_governance(path, dtype, cp)
-        col_profiles.append(cp)
+    try:
+        vectordb = load_vector_store(knowledge_set)
+        add_to_vector_store(vectordb, chunks)
+    except Exception:
+        vectordb = build_vector_store(chunks, knowledge_set=knowledge_set)
 
-    # ── Table-level governance signals ────────────────────────────
-    all_text      = " ".join(
-        [c["column_name"] for c in detail["columns"]] +
-        [detail.get("comment", "")]
-    ).lower()
-    table_gov     = _table_governance(all_text, col_profiles, detail)
-
-    # ── Duplicate estimate (on sample) ────────────────────────────
-    dup_estimate  = _estimate_duplicates(client, fqn, detail["columns"], row_count)
-
-    return {
-        "source_type"     : "databricks",
+    # ── 6. Log ingestion to SQLite ────────────────────────────────
+    duration = (datetime.now() - start).total_seconds()
+    log = {
+        "ingestion_type"  : "databricks",
+        "knowledge_set"   : knowledge_set,
+        "connection_id"   : client.connection_id,
+        "source"          : f"{catalog}.{schema}.{table}",
         "catalog"         : catalog,
         "schema"          : schema,
         "table"           : table,
-        "full_name"       : fqn,
-        "table_type"      : detail["table_type"],
-        "provider"        : detail["provider"],
-        "row_count"       : row_count,
-        "column_count"    : detail["column_count"],
-        "sampled"         : row_count > sample_rows,
-        "sample_rows"     : min(row_count, sample_rows),
-        "partition_cols"  : detail["partition_cols"],
-        "columns"         : detail["columns"],     # raw schema
-        "flat_columns"    : flat_cols,             # flattened leaf paths
-        "column_profiles" : col_profiles,          # per-column stats
-        "duplicate_estimate": dup_estimate,
-        "governance"      : table_gov,
-        "profiled_at"     : datetime.now().isoformat(),
+        "row_count"       : profile["row_count"],
+        "column_count"    : profile["column_count"],
+        "chunks_created"  : len(chunks),
+        "documents"       : len(documents),
+        "sampled"         : str(profile["sampled"]),
+        "duration_seconds": str(round(duration, 2)),
+        "ingested_at"     : datetime.now().isoformat(),
     }
-
-
-# ── Per-column profilers ─────────────────────────────────────────
-
-def _profile_leaf_col(
-    client: DatabricksClient,
-    sample_sql: str,
-    path: str,
-    dtype: str,
-    total_rows: int,
-) -> dict:
-    """Profile a primitive (leaf) column: nulls, unique count, stats."""
-    safe_path  = _safe_col_ref(path)
-    null_count = _safe_scalar(
-        client,
-        f"SELECT COUNT(*) FROM {sample_sql} t WHERE {safe_path} IS NULL",
-        0
-    )
-    null_pct   = round(null_count / total_rows * 100, 2) if total_rows else 0
-    unique_cnt = _safe_scalar(
-        client,
-        f"SELECT COUNT(DISTINCT {safe_path}) FROM {sample_sql} t",
-        0
-    )
-
-    profile = {
-        "column_name" : path,
-        "data_type"   : dtype,
-        "null_count"  : null_count,
-        "null_pct"    : null_pct,
-        "unique_count": unique_cnt,
-        "col_type"    : _classify_col_type(dtype, unique_cnt, total_rows),
-        "stats"       : {},
-    }
-
-    # Numeric stats
-    if _is_numeric(dtype):
-        stats = _numeric_stats(client, sample_sql, safe_path, dtype)
-        profile["stats"] = stats
-        profile["col_type"] = "numerical"
-
-    # Date / timestamp stats
-    elif _is_datetime(dtype):
-        stats = _datetime_stats(client, sample_sql, safe_path)
-        profile["stats"] = stats
-        profile["col_type"] = "datetime"
-
-    # Categorical: enumerate values if low cardinality
-    elif unique_cnt <= HIGH_CARDINALITY:
-        stats = _categorical_stats(client, sample_sql, safe_path, total_rows)
-        profile["stats"] = stats
-        profile["col_type"] = "categorical"
-
-    # High cardinality string — just length stats
-    else:
-        stats = _string_length_stats(client, sample_sql, safe_path)
-        profile["stats"] = stats
-        profile["col_type"] = "text"
-
-    return profile
-
-
-def _profile_array_col(
-    client: DatabricksClient,
-    sample_sql: str,
-    path: str,
-    total_rows: int,
-) -> dict:
-    """Profile an ARRAY column: null arrays, size distribution."""
-    safe_path  = _safe_col_ref(path)
-    null_count = _safe_scalar(
-        client,
-        f"SELECT COUNT(*) FROM {sample_sql} t WHERE {safe_path} IS NULL",
-        0
-    )
-    # Array size stats using SIZE() function
-    size_stats = {}
-    try:
-        rows = client.execute_query(
-            f"SELECT "
-            f"  MIN(SIZE({safe_path}))  AS min_size, "
-            f"  MAX(SIZE({safe_path}))  AS max_size, "
-            f"  AVG(SIZE({safe_path}))  AS avg_size, "
-            f"  COUNT(CASE WHEN SIZE({safe_path}) = 0 THEN 1 END) AS empty_arrays "
-            f"FROM {sample_sql} t WHERE {safe_path} IS NOT NULL"
-        )
-        if rows:
-            size_stats = rows[0]
-    except Exception:
-        pass
+    db_insert("databricks_ingestion_log", log)
 
     return {
-        "column_name" : path,
-        "data_type"   : "array",
-        "null_count"  : null_count,
-        "null_pct"    : round(null_count / total_rows * 100, 2) if total_rows else 0,
-        "unique_count": None,
-        "col_type"    : "array",
-        "stats"       : {
-            "array_size_min"   : size_stats.get("min_size"),
-            "array_size_max"   : size_stats.get("max_size"),
-            "array_size_avg"   : round(float(size_stats.get("avg_size") or 0), 2),
-            "empty_array_count": size_stats.get("empty_arrays"),
-        },
+        "status"         : "success",
+        "source"         : f"{catalog}.{schema}.{table}",
+        "knowledge_set"  : knowledge_set,
+        "row_count"      : profile["row_count"],
+        "column_count"   : profile["column_count"],
+        "documents"      : len(documents),
+        "chunks"         : len(chunks),
+        "sampled"        : profile["sampled"],
+        "duration_seconds": round(duration, 2),
+        "profiled_at"    : profile["profiled_at"],
     }
 
 
-def _profile_complex_leaf(path: str, dtype: str) -> dict:
-    """Placeholder profile for MAP or deeply nested types we don't traverse."""
-    return {
-        "column_name" : path,
-        "data_type"   : dtype,
-        "null_count"  : None,
-        "null_pct"    : None,
-        "unique_count": None,
-        "col_type"    : "complex",
-        "stats"       : {"note": "Complex type — detailed profiling not supported"},
-    }
+# ── Profile → Documents ──────────────────────────────────────────
 
+def profile_to_documents(profile: dict) -> list[Document]:
+    """
+    Convert a table profile dict into one or more LangChain Documents.
 
-# ── Stats helpers ────────────────────────────────────────────────
+    Structure:
+    - Doc 1: Schema + governance overview (always created)
+    - Doc 2: Column statistics narrative (always created)
+    - Doc N: One additional doc per top-level STRUCT column (if present)
+    """
+    docs = []
 
-def _numeric_stats(client, sample_sql, safe_path, dtype) -> dict:
-    try:
-        rows = client.execute_query(
-            f"SELECT "
-            f"  MIN({safe_path})                          AS min_val, "
-            f"  MAX({safe_path})                          AS max_val, "
-            f"  AVG(CAST({safe_path} AS DOUBLE))          AS mean_val, "
-            f"  STDDEV(CAST({safe_path} AS DOUBLE))       AS stddev_val, "
-            f"  PERCENTILE_APPROX({safe_path}, 0.25)      AS p25, "
-            f"  PERCENTILE_APPROX({safe_path}, 0.50)      AS median, "
-            f"  PERCENTILE_APPROX({safe_path}, 0.75)      AS p75, "
-            f"  SKEWNESS(CAST({safe_path} AS DOUBLE))     AS skewness, "
-            f"  KURTOSIS(CAST({safe_path} AS DOUBLE))     AS kurtosis "
-            f"FROM {sample_sql} t WHERE {safe_path} IS NOT NULL"
+    fqn      = profile["full_name"]
+    gov      = profile["governance"]
+    cols     = profile["columns"]
+    profiles = profile["column_profiles"]
+
+    # ── Document 1: Schema + Overview ────────────────────────────
+    schema_sections = [
+        f"TABLE: {fqn}",
+        f"SOURCE TYPE: Databricks {'Unity Catalog' if '.' in fqn.replace('`','') else 'Hive Metastore'}",
+        f"TABLE TYPE: {profile['table_type']} | FORMAT: {profile['provider']}",
+        f"ROWS: {profile['row_count']:,} | COLUMNS: {profile['column_count']}",
+        f"SAMPLED: {'Yes (statistics based on sample)' if profile['sampled'] else 'No (full table)'}",
+        f"PARTITIONED BY: {', '.join(profile['partition_cols']) or 'None'}",
+        f"",
+        f"GOVERNANCE CLASSIFICATION:",
+        f"  Sensitivity    : {gov['sensitivity']}",
+        f"  Department     : {gov['department']}",
+        f"  PII Columns    : {gov['pii_column_count']} column(s) — {', '.join(gov['pii_columns']) or 'None detected'}",
+        f"  Themes         : {', '.join(gov['governance_themes']) or 'None detected'}",
+        f"  Recommended Owner: {gov['recommended_owner']}",
+        f"",
+        f"COLUMN SCHEMA ({profile['column_count']} columns):",
+    ]
+
+    for col in cols:
+        pii_flag = " ⚠️ PII" if col["column_name"] in gov["pii_columns"] else ""
+        complex_flag = " [COMPLEX]" if col["is_complex"] else ""
+        schema_sections.append(
+            f"  {col['column_name']} : {col['data_type']}{complex_flag}{pii_flag}"
+            + (f" — {col['comment']}" if col.get('comment') else "")
         )
-        if rows:
-            return {k: (_round(v) if isinstance(v, float) else v) for k, v in rows[0].items()}
-    except Exception:
-        pass
-    return {}
 
-
-def _datetime_stats(client, sample_sql, safe_path) -> dict:
-    try:
-        rows = client.execute_query(
-            f"SELECT "
-            f"  MIN({safe_path}) AS earliest, "
-            f"  MAX({safe_path}) AS latest, "
-            f"  COUNT(DISTINCT DATE({safe_path})) AS distinct_dates "
-            f"FROM {sample_sql} t WHERE {safe_path} IS NOT NULL"
-        )
-        if rows:
-            r = rows[0]
-            earliest = str(r.get("earliest", ""))
-            latest   = str(r.get("latest", ""))
-            return {
-                "earliest"      : earliest,
-                "latest"        : latest,
-                "distinct_dates": r.get("distinct_dates"),
-            }
-    except Exception:
-        pass
-    return {}
-
-
-def _categorical_stats(client, sample_sql, safe_path, total_rows) -> dict:
-    try:
-        rows = client.execute_query(
-            f"SELECT {safe_path} AS val, COUNT(*) AS cnt "
-            f"FROM {sample_sql} t "
-            f"WHERE {safe_path} IS NOT NULL "
-            f"GROUP BY {safe_path} "
-            f"ORDER BY cnt DESC "
-            f"LIMIT {TOP_N_VALUES}"
-        )
-        value_counts = {str(r["val"]): int(r["cnt"]) for r in rows}
-        value_pcts   = {
-            k: round(v / total_rows * 100, 1) for k, v in value_counts.items()
+    docs.append(Document(
+        page_content="\n".join(schema_sections),
+        metadata={
+            "source_file" : fqn,
+            "source_type" : "databricks",
+            "file_type"   : "databricks_schema",
+            "catalog"     : profile["catalog"],
+            "schema"      : profile["schema"],
+            "table"       : profile["table"],
+            "row_count"   : str(profile["row_count"]),
+            "col_count"   : str(profile["column_count"]),
+            "sensitivity" : gov["sensitivity"],
+            "department"  : gov["department"],
+            "has_pii"     : str(gov["pii_column_count"] > 0),
+            "profiled_at" : profile["profiled_at"],
         }
-        return {"value_counts": value_counts, "value_percentages": value_pcts}
-    except Exception:
-        return {}
+    ))
+
+    # ── Document 2: Column Statistics ────────────────────────────
+    stats_sections = [
+        f"COLUMN STATISTICS FOR: {fqn}",
+        f"Profiled at: {profile['profiled_at']}",
+        f"",
+    ]
+
+    for cp in profiles:
+        col_name = cp["column_name"]
+        dtype    = cp["data_type"]
+        null_pct = cp.get("null_pct")
+        col_type = cp.get("col_type", "unknown")
+        stats    = cp.get("stats", {})
+        gov_col  = cp.get("governance", {})
+
+        section = [f"\nCOLUMN: {col_name} | TYPE: {dtype} | CATEGORY: {col_type}"]
+
+        if null_pct is not None:
+            section.append(f"  Null Rate: {null_pct}%  ({cp.get('null_count', 'N/A')} nulls)")
+        if cp.get("unique_count") is not None:
+            section.append(f"  Unique Values: {cp['unique_count']:,}")
+
+        if col_type == "numerical" and stats:
+            section.append(
+                f"  Mean: {stats.get('mean_val')}  Median: {stats.get('median')}"
+                f"  StdDev: {stats.get('stddev_val')}"
+                f"  Min: {stats.get('min_val')}  Max: {stats.get('max_val')}"
+            )
+            if stats.get("skewness") is not None:
+                section.append(f"  Skewness: {stats.get('skewness')}  Kurtosis: {stats.get('kurtosis')}")
+
+        elif col_type == "categorical" and stats.get("value_counts"):
+            vc = stats["value_counts"]
+            vp = stats.get("value_percentages", {})
+            vals = " | ".join(
+                f"{k}: {v} ({vp.get(k, '?')}%)" for k, v in list(vc.items())[:10]
+            )
+            section.append(f"  Top Values: {vals}")
+
+        elif col_type == "datetime" and stats:
+            section.append(
+                f"  Earliest: {stats.get('earliest')}  "
+                f"Latest: {stats.get('latest')}  "
+                f"Distinct Dates: {stats.get('distinct_dates')}"
+            )
+
+        elif col_type == "array" and stats:
+            section.append(
+                f"  Array Size — Min: {stats.get('array_size_min')}  "
+                f"Max: {stats.get('array_size_max')}  "
+                f"Avg: {stats.get('array_size_avg')}"
+            )
+
+        if gov_col.get("contains_pii"):
+            section.append(
+                f"  ⚠️  PII: {gov_col.get('pii_type', 'DETECTED')} — "
+                f"Masking: {gov_col.get('masking_technique', 'required')}"
+            )
+
+        stats_sections.extend(section)
+
+    # Data quality summary
+    dup = profile.get("duplicate_estimate", {})
+    stats_sections.extend([
+        f"",
+        f"DATA QUALITY SUMMARY:",
+        f"  Duplicate Rows (estimate): "
+        f"{dup.get('duplicate_count', 'N/A')} "
+        f"({dup.get('duplicate_pct', 'N/A')}%)",
+        f"  PII Column Count: {gov['pii_column_count']}",
+        f"  Sensitivity: {gov['sensitivity']}",
+    ])
+
+    docs.append(Document(
+        page_content="\n".join(stats_sections),
+        metadata={
+            "source_file" : fqn,
+            "source_type" : "databricks",
+            "file_type"   : "databricks_stats",
+            "catalog"     : profile["catalog"],
+            "schema"      : profile["schema"],
+            "table"       : profile["table"],
+            "sensitivity" : gov["sensitivity"],
+            "profiled_at" : profile["profiled_at"],
+        }
+    ))
+
+    # ── Extra docs for top-level STRUCT columns ───────────────────
+    for col in cols:
+        if col["is_complex"] and col["data_type"].lower().startswith("struct<"):
+            struct_doc = _struct_column_document(fqn, col, profile)
+            if struct_doc:
+                docs.append(struct_doc)
+
+    return docs
 
 
-def _string_length_stats(client, sample_sql, safe_path) -> dict:
+def _struct_column_document(fqn: str, col: dict, profile: dict) -> Document | None:
+    """Create a dedicated document for a STRUCT column's nested schema."""
+    parsed = col.get("parsed_type", {})
+    if parsed.get("type") != "struct":
+        return None
+
+    lines = [
+        f"NESTED STRUCT SCHEMA: {fqn}.{col['column_name']}",
+        f"Parent Table: {fqn}",
+        f"Column: {col['column_name']} ({col['data_type']})",
+        f"",
+        f"STRUCT FIELDS:",
+    ]
+
+    def _render_fields(fields: dict, indent: int = 2) -> None:
+        prefix = "  " * indent
+        for fname, ftype in fields.items():
+            if isinstance(ftype, dict):
+                t = ftype.get("type", "unknown")
+                if t == "struct":
+                    lines.append(f"{prefix}{fname}: STRUCT")
+                    _render_fields(ftype.get("fields", {}), indent + 1)
+                elif t == "array":
+                    elem = ftype.get("element", {})
+                    lines.append(f"{prefix}{fname}: ARRAY<{elem.get('type', '?')}>")
+                else:
+                    lines.append(f"{prefix}{fname}: {t}")
+            else:
+                lines.append(f"{prefix}{fname}: {ftype}")
+
+    _render_fields(parsed.get("fields", {}))
+
+    return Document(
+        page_content="\n".join(lines),
+        metadata={
+            "source_file"     : fqn,
+            "source_type"     : "databricks",
+            "file_type"       : "databricks_struct",
+            "struct_column"   : col["column_name"],
+            "catalog"         : profile["catalog"],
+            "schema"          : profile["schema"],
+            "table"           : profile["table"],
+            "profiled_at"     : profile["profiled_at"],
+        }
+    )
+
+
+def _fetch_sample_document(
+    client: DatabricksClient,
+    catalog: str,
+    schema: str,
+    table: str,
+    n: int = 5,
+) -> Document | None:
+    """Fetch a small random sample for contextual RAG grounding."""
+    fqn = _fqn(catalog, schema, table)
     try:
         rows = client.execute_query(
-            f"SELECT "
-            f"  MIN(LENGTH({safe_path}))  AS min_len, "
-            f"  MAX(LENGTH({safe_path}))  AS max_len, "
-            f"  AVG(LENGTH({safe_path}))  AS avg_len "
-            f"FROM {sample_sql} t WHERE {safe_path} IS NOT NULL"
+            f"SELECT * FROM {fqn} ORDER BY RAND() LIMIT {n}"
         )
-        if rows:
-            return {k: _round(v) if isinstance(v, float) else v for k, v in rows[0].items()}
-    except Exception:
-        pass
-    return {}
+        if not rows:
+            return None
 
-
-def _estimate_duplicates(client, fqn, columns, row_count) -> dict:
-    """Estimate duplicate rows using a sample of key columns."""
-    if row_count == 0:
-        return {"duplicate_count": 0, "duplicate_pct": 0}
-    try:
-        # Use first 5 non-complex columns as dedup key
-        key_cols = [
-            f"`{c['column_name']}`"
-            for c in columns[:5]
-            if not c["is_complex"]
+        lines = [
+            f"SAMPLE ROWS FROM: {fqn}",
+            f"(Random sample of {len(rows)} rows for context)",
+            f"",
         ]
-        if not key_cols:
-            return {"duplicate_count": None, "duplicate_pct": None}
+        for i, row in enumerate(rows, 1):
+            # Truncate long values for embedding efficiency
+            clean_row = {
+                k: (str(v)[:100] if v is not None else "NULL")
+                for k, v in row.items()
+            }
+            lines.append(f"Row {i}: {json.dumps(clean_row, ensure_ascii=False)}")
 
-        cols_str = ", ".join(key_cols)
-        dup_count = _safe_scalar(
-            client,
-            f"SELECT SUM(cnt - 1) FROM "
-            f"(SELECT COUNT(*) AS cnt FROM {fqn} GROUP BY {cols_str}) t "
-            f"WHERE cnt > 1",
-            0
+        return Document(
+            page_content="\n".join(lines),
+            metadata={
+                "source_file": fqn,
+                "source_type": "databricks",
+                "file_type"  : "databricks_sample",
+                "catalog"    : catalog,
+                "schema"     : schema,
+                "table"      : table,
+            }
         )
-        return {
-            "duplicate_count": dup_count,
-            "duplicate_pct"  : round(dup_count / row_count * 100, 2) if row_count else 0,
-        }
     except Exception:
-        return {"duplicate_count": None, "duplicate_pct": None}
-
-
-# ── Governance classifiers ───────────────────────────────────────
-
-def _column_governance(path: str, dtype: str, profile: dict) -> dict:
-    lower = path.lower()
-    contains_pii = any(p in lower for p in PII_SIGNALS)
-
-    # Additional PII patterns from value samples
-    if not contains_pii and profile.get("stats", {}).get("value_counts"):
-        sample_vals = " ".join(str(k) for k in profile["stats"]["value_counts"].keys()).lower()
-        contains_pii = any(p in sample_vals for p in PII_SIGNALS)
-
-    return {
-        "contains_pii"      : contains_pii,
-        "pii_type"          : _detect_pii_type(lower),
-        "masking_suggested" : contains_pii,
-        "masking_technique" : _suggest_masking(lower, dtype) if contains_pii else None,
-    }
-
-
-def _table_governance(all_text: str, col_profiles: list, detail: dict) -> dict:
-    sensitivity = "Public"
-    for tier, signals in SENSITIVITY_TIERS.items():
-        if any(s in all_text for s in signals):
-            sensitivity = tier
-            break
-
-    scores   = {dept: sum(1 for s in sigs if s in all_text) for dept, sigs in DEPARTMENT_SIGNALS.items()}
-    best_dep = max(scores, key=scores.get)
-    department = best_dep if scores[best_dep] > 0 else "General"
-
-    themes   = [t for t in GOVERNANCE_THEMES if t in all_text]
-    pii_cols = [c["column_name"] for c in col_profiles if c.get("governance", {}).get("contains_pii")]
-
-    return {
-        "sensitivity"         : sensitivity,
-        "department"          : department,
-        "governance_themes"   : themes,
-        "pii_columns"         : pii_cols,
-        "pii_column_count"    : len(pii_cols),
-        "table_format"        : detail.get("provider", "delta"),
-        "partition_cols"      : detail.get("partition_cols", []),
-        "location"            : detail.get("location", ""),
-        "recommended_owner"   : "DAAS DMG",
-    }
-
-
-def _detect_pii_type(col_name: str) -> str | None:
-    mapping = {
-        "email": "EMAIL", "phone": "PHONE", "mobile": "PHONE",
-        "ssn": "SSN", "social": "SSN", "aadhar": "NATIONAL_ID",
-        "passport": "NATIONAL_ID", "dob": "DATE_OF_BIRTH",
-        "birth": "DATE_OF_BIRTH", "name": "NAME", "address": "ADDRESS",
-        "postcode": "ADDRESS", "zipcode": "ADDRESS", "ip_": "IP_ADDRESS",
-        "credit_card": "PAYMENT", "bank_account": "PAYMENT",
-    }
-    for pattern, pii_type in mapping.items():
-        if pattern in col_name:
-            return pii_type
-    return None
-
-
-def _suggest_masking(col_name: str, dtype: str) -> str:
-    if "email" in col_name:
-        return "partial_mask (keep domain)"
-    if "phone" in col_name or "mobile" in col_name:
-        return "partial_mask (keep last 4 digits)"
-    if "name" in col_name:
-        return "pseudonymisation (hash or synthetic name)"
-    if "dob" in col_name or "birth" in col_name:
-        return "generalisation (year only)"
-    if "ssn" in col_name or "aadhar" in col_name:
-        return "tokenisation (reversible)"
-    if "bank" in col_name or "card" in col_name:
-        return "tokenisation (PCI-DSS compliant)"
-    return "suppression"
-
-
-# ── SQL helpers ──────────────────────────────────────────────────
-
-def _safe_col_ref(path: str) -> str:
-    """Convert dot-notation path to backtick-quoted SQL reference."""
-    parts = path.split(".")
-    return ".".join(f"`{p}`" for p in parts)
-
-
-def _safe_scalar(client, sql: str, default):
-    try:
-        result = client.execute_scalar(sql)
-        return result if result is not None else default
-    except Exception:
-        return default
-
-
-def _is_numeric(dtype: str) -> bool:
-    d = dtype.lower()
-    return any(t in d for t in ("int", "long", "bigint", "smallint", "tinyint",
-                                 "float", "double", "decimal", "numeric"))
-
-
-def _is_datetime(dtype: str) -> bool:
-    d = dtype.lower()
-    return "date" in d or "timestamp" in d
-
-
-def _classify_col_type(dtype: str, unique_cnt: int, total_rows: int) -> str:
-    if _is_numeric(dtype):
-        return "numerical"
-    if _is_datetime(dtype):
-        return "datetime"
-    if unique_cnt is not None and total_rows > 0:
-        if unique_cnt <= HIGH_CARDINALITY:
-            return "categorical"
-    return "text"
-
-
-def _round(v, n=4):
-    try:
-        return round(float(v), n)
-    except (TypeError, ValueError):
-        return v
+        return None
