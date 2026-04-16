@@ -1,199 +1,166 @@
 'use client'
-import { motion } from 'framer-motion'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import { User, Bot, Clock, FileText, Copy, Check, Brain, Zap } from 'lucide-react'
-import { useState } from 'react'
-import type { ChatMessage } from '@/types'
-import { formatTime, cn } from '@/lib/utils'
+import { useState, useEffect } from 'react'
+import { AnimatePresence } from 'framer-motion'
+import { SessionGrid } from '@/components/session/SessionGrid'
+import { Workspace } from '@/components/Workspace'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { ToastProvider, toast } from '@/components/ui/Toast'
+import { useStore } from '@/store'
+import { api } from '@/lib/api'
+import type { SourceFile } from '@/types'
 
-interface MessageBubbleProps {
-  message: ChatMessage
-  index: number
-}
+export default function Home() {
+  // ── Mount guard ───────────────────────────────────────────────
+  // Server always renders the loading shell.
+  // Client flips to true after first paint — only then do we read
+  // from localStorage via the store. This guarantees server HTML
+  // and initial client HTML are identical, preventing hydration mismatch.
+  const [mounted, setMounted] = useState(false)
 
-export function MessageBubble({ message, index }: MessageBubbleProps) {
-  const [copied, setCopied]           = useState(false)
-  const [showMeta, setShowMeta]       = useState(false)
-  const isUser                        = message.role === 'user'
+  useEffect(() => {
+    // Manually trigger Zustand persist rehydration from localStorage
+    useStore.persist.rehydrate()
+    setMounted(true)
+  }, [])
 
-  const handleCopy = async () => {
-    await navigator.clipboard.writeText(message.content)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+  const {
+    sessions,
+    activeSessionId,
+    createSession,
+    deleteSession,
+    setActiveSession,
+    getActiveSession,
+    getSessionFiles,
+    getSessionChat,
+    addFiles,
+    updateFile,
+    removeFile,
+    addMessage,
+    updateMessage,
+    clearChat,
+  } = useStore()
+
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+
+  const activeSession = mounted ? getActiveSession() : null
+  const activeFiles   = mounted && activeSessionId ? getSessionFiles(activeSessionId) : []
+  const activeChat    = mounted && activeSessionId ? getSessionChat(activeSessionId) : []
+
+  const handleCreate = (name: string, summary: string) => {
+    const session = createSession(name, summary)
+    setActiveSession(session.id)
+    toast('success', `Project "${name}" created`)
   }
 
-  // Show rephrased question only when it differs meaningfully from original
-  const showRephrased =
-    !isUser &&
-    message.rephrased_question &&
-    message.rephrased_question !== message.content &&
-    message.rephrased_question.length > 0
+  const handleOpen          = (id: string) => setActiveSession(id)
+  const handleBack          = () => setActiveSession(null)
+  const handleDeleteRequest = (id: string) => setDeleteTarget(id)
 
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: Math.min(index * 0.04, 0.25), duration: 0.3 }}
-      className={cn('flex gap-3 group', isUser ? 'flex-row-reverse' : 'flex-row')}
-    >
-      {/* Avatar */}
-      <div className={cn(
-        'w-8 h-8 rounded-lg flex-shrink-0 flex items-center justify-center mt-0.5',
-        isUser ? 'bg-axa-800' : 'bg-white border border-ink-200 shadow-sm'
-      )}>
-        {isUser
-          ? <User className="w-4 h-4 text-white" />
-          : <Bot className="w-4 h-4 text-axa-800" />
-        }
-      </div>
+  const handleDeleteConfirm = async () => {
+    if (!deleteTarget) return
+    const session = sessions.find(s => s.id === deleteTarget)
+    try { await api.deleteKnowledgeSet(deleteTarget) } catch (_) {}
+    deleteSession(deleteTarget)
+    setDeleteTarget(null)
+    toast('info', `Project "${session?.project_name}" deleted`)
+  }
 
-      {/* Bubble + meta */}
-      <div className={cn(
-        'flex-1 min-w-0 max-w-[85%] flex flex-col gap-1',
-        isUser ? 'items-end' : 'items-start'
-      )}>
+  const handleAddFiles = (files: SourceFile[]) => {
+    if (!activeSessionId) return
+    addFiles(activeSessionId, files)
+  }
+  const handleUpdateFile = (id: string, updates: Partial<SourceFile>) => {
+    if (!activeSessionId) return
+    updateFile(activeSessionId, id, updates)
+  }
+  const handleRemoveFile = (id: string) => {
+    if (!activeSessionId) return
+    removeFile(activeSessionId, id)
+  }
+  const handleAddMessage = (msg: Parameters<typeof addMessage>[1]) => {
+    if (!activeSessionId) return
+    addMessage(activeSessionId, msg)
+  }
+  const handleUpdateMessage = (msgId: string, updates: Parameters<typeof updateMessage>[2]) => {
+    if (!activeSessionId) return
+    updateMessage(activeSessionId, msgId, updates)
+  }
+  const handleClearChat = () => {
+    if (!activeSessionId) return
+    clearChat(activeSessionId)
+  }
 
-        {/* Rephrased question badge — shown above AI response */}
-        {showRephrased && (
-          <div className="flex items-center gap-1.5 mb-0.5">
-            <Brain className="w-3 h-3 text-axa-600 flex-shrink-0" />
-            <span className="text-[10px] text-axa-700 bg-axa-50 border border-axa-100 px-2 py-0.5 rounded-full italic">
-              Searched: "{message.rephrased_question}"
-            </span>
+  const deleteTargetSession = sessions.find(s => s.id === deleteTarget)
+
+  // ── Pre-mount render — must match server HTML exactly ─────────
+  // Server renders this. Client renders this on first paint.
+  // After useEffect fires, mounted=true and we switch to real UI.
+  if (!mounted) {
+    return (
+      <div className="min-h-screen bg-ink-50 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-10 h-10 rounded-xl bg-axa-800 flex items-center justify-center shadow-axa">
+            <svg
+              className="w-5 h-5 text-white animate-spin"
+              fill="none" viewBox="0 0 24 24"
+            >
+              <circle
+                className="opacity-25" cx="12" cy="12" r="10"
+                stroke="currentColor" strokeWidth="4"
+              />
+              <path
+                className="opacity-75" fill="currentColor"
+                d="M4 12a8 8 0 018-8v8z"
+              />
+            </svg>
           </div>
-        )}
-
-        {/* Message bubble */}
-        <div className={cn(
-          'relative rounded-2xl px-4 py-3 text-sm w-full',
-          isUser
-            ? 'bg-axa-800 text-white rounded-tr-sm ml-auto'
-            : 'bg-white border border-ink-200 shadow-sm rounded-tl-sm'
-        )}>
-          {isUser ? (
-            <p className="text-white leading-relaxed">{message.content}</p>
-          ) : (
-            <div className="prose-governance">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {message.content}
-              </ReactMarkdown>
-            </div>
-          )}
-
-          {/* Copy button — AI messages only */}
-          {!isUser && message.content && (
-            <button
-              onClick={handleCopy}
-              className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1 rounded-lg bg-ink-50 hover:bg-ink-100 text-ink-400 hover:text-ink-700 transition-all border border-ink-200"
-              title="Copy response"
-            >
-              {copied
-                ? <Check className="w-3 h-3 text-emerald-500" />
-                : <Copy className="w-3 h-3" />
-              }
-            </button>
-          )}
+          <p className="text-ink-400 text-xs font-semibold tracking-widest uppercase">
+            Initialising GovernGPT…
+          </p>
         </div>
-
-        {/* Meta row */}
-        <div className={cn(
-          'flex items-center gap-3 px-1 flex-wrap',
-          isUser ? 'flex-row-reverse' : 'flex-row'
-        )}>
-          {/* Timestamp */}
-          <span className="text-[10px] text-ink-400 flex items-center gap-1 flex-shrink-0">
-            <Clock className="w-2.5 h-2.5" />
-            {formatTime(message.timestamp)}
-          </span>
-
-          {/* Source citations */}
-          {!isUser && message.sources_used && message.sources_used.length > 0 && (
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <FileText className="w-2.5 h-2.5 text-ink-400 flex-shrink-0" />
-              {message.sources_used.map(src => (
-                <span
-                  key={src}
-                  className="text-[10px] font-mono text-axa-800 bg-axa-50 px-1.5 py-0.5 rounded border border-axa-100"
-                >
-                  {src}
-                </span>
-              ))}
-            </div>
-          )}
-
-          {/* Duration */}
-          {!isUser && message.duration_seconds && (
-            <span className="text-[10px] text-ink-300 flex-shrink-0">
-              {message.duration_seconds}s
-            </span>
-          )}
-
-          {/* Token count — clickable to toggle breakdown */}
-          {!isUser && message.total_tokens && message.total_tokens > 0 && (
-            <button
-              onClick={() => setShowMeta(v => !v)}
-              className="flex items-center gap-1 text-[10px] text-ink-400 hover:text-axa-700 transition-colors flex-shrink-0"
-              title="Show token breakdown"
-            >
-              <Zap className="w-2.5 h-2.5" />
-              <span className="font-mono">{message.total_tokens.toLocaleString()}</span>
-            </button>
-          )}
-        </div>
-
-        {/* Expandable token breakdown */}
-        {!isUser && showMeta && message.total_tokens && message.total_tokens > 0 && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            className="px-1 overflow-hidden"
-          >
-            <div className="flex items-center gap-3 text-[10px] font-mono text-ink-400 bg-ink-50 border border-ink-100 rounded-lg px-3 py-2 mt-1">
-              <span>↑ {(message.prompt_tokens ?? 0).toLocaleString()} prompt</span>
-              <span className="text-ink-200">·</span>
-              <span>↓ {(message.completion_tokens ?? 0).toLocaleString()} completion</span>
-              <span className="text-ink-200">·</span>
-              <span className="font-semibold text-axa-700">
-                = {(message.total_tokens ?? 0).toLocaleString()} total
-              </span>
-              {message.mode && (
-                <>
-                  <span className="text-ink-200">·</span>
-                  <span className="text-ink-500">{message.mode}</span>
-                </>
-              )}
-            </div>
-          </motion.div>
-        )}
       </div>
-    </motion.div>
-  )
-}
+    )
+  }
 
-// ── Typing indicator ─────────────────────────────────────────────
-export function TypingIndicator() {
+  // ── Post-mount render — safe to use localStorage state ────────
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: 8 }}
-      className="flex gap-3"
-    >
-      <div className="w-8 h-8 rounded-lg bg-white border border-ink-200 shadow-sm flex items-center justify-center flex-shrink-0">
-        <Bot className="w-4 h-4 text-axa-800" />
-      </div>
-      <div className="bg-white border border-ink-200 shadow-sm rounded-2xl rounded-tl-sm px-4 py-3 flex items-center gap-1.5">
-        {[0, 0.2, 0.4].map((delay, i) => (
-          <motion.div
-            key={i}
-            className="w-1.5 h-1.5 rounded-full bg-axa-800"
-            animate={{ scale: [1, 1.4, 1], opacity: [0.3, 1, 0.3] }}
-            transition={{ duration: 0.8, delay, repeat: Infinity }}
+    <>
+      <ToastProvider />
+
+      <AnimatePresence mode="wait">
+        {activeSession ? (
+          <Workspace
+            key="workspace"
+            session={activeSession}
+            files={activeFiles}
+            messages={activeChat}
+            onBack={handleBack}
+            onAddFiles={handleAddFiles}
+            onUpdateFile={handleUpdateFile}
+            onRemoveFile={handleRemoveFile}
+            onAddMessage={handleAddMessage}
+            onUpdateMessage={handleUpdateMessage}
+            onClearChat={handleClearChat}
           />
-        ))}
-      </div>
-    </motion.div>
+        ) : (
+          <SessionGrid
+            key="grid"
+            sessions={sessions}
+            onCreate={handleCreate}
+            onOpen={handleOpen}
+            onDelete={handleDeleteRequest}
+          />
+        )}
+      </AnimatePresence>
+
+      <ConfirmDialog
+        isOpen={!!deleteTarget}
+        title="Delete Project"
+        description={`Are you sure you want to delete "${deleteTargetSession?.project_name}"? This will remove all uploaded sources, chat history, and vector data. This action cannot be undone.`}
+        confirmLabel="Delete Project"
+        onConfirm={handleDeleteConfirm}
+        onCancel={() => setDeleteTarget(null)}
+      />
+    </>
   )
 }
