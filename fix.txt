@@ -1,60 +1,199 @@
-## Error Type
-Console Error
+'use client'
+import { motion } from 'framer-motion'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import { User, Bot, Clock, FileText, Copy, Check, Brain, Zap } from 'lucide-react'
+import { useState } from 'react'
+import type { ChatMessage } from '@/types'
+import { formatTime, cn } from '@/lib/utils'
 
-## Error Message
-State loaded from storage couldn't be migrated since no migrate function was provided
+interface MessageBubbleProps {
+  message: ChatMessage
+  index: number
+}
 
+export function MessageBubble({ message, index }: MessageBubbleProps) {
+  const [copied, setCopied]           = useState(false)
+  const [showMeta, setShowMeta]       = useState(false)
+  const isUser                        = message.role === 'user'
 
-    at createConsoleError (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_115brz8._.js:2333:71)
-    at handleConsoleError (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_115brz8._.js:3119:54)
-    at console.error (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_115brz8._.js:3266:57)
-    at <unknown> (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_0d4zxju._.js:36606:33)
-    at <unknown> (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_0d4zxju._.js:36405:28)
-    at Object.then (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_0d4zxju._.js:36411:51)
-    at hydrate (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_0d4zxju._.js:36597:76)
-    at Object.rehydrate (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_0d4zxju._.js:36649:28)
-    at Home.useEffect (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/src_0qlnfm1._.js:3957:154)
-    at Object.react_stack_bottom_frame (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:15087:22)
-    at runWithFiberInDEV (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:965:74)
-    at commitHookEffectListMount (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:7255:167)
-    at commitHookPassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:7290:60)
-    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8689:33)
-    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
-    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8688:17)
-    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
-    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8688:17)
-    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
-    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8750:17)
-    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
-    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8750:17)
-    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
-    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8688:17)
-    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
-    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8693:17)
-    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
-    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8688:17)
-    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
-    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8693:17)
-    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
-    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8688:17)
-    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
-    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8688:17)
-    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
-    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8688:17)
-    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
-    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8693:17)
-    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
-    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8688:17)
-    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
-    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8688:17)
-    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
-    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8750:17)
-    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
-    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8750:17)
-    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
-    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8688:17)
-    at recursivelyTraversePassiveMountEffects (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8676:316)
-    at commitPassiveMountOnFiber (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:8688:17)
-    at ClientPageRoot (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_0tt2wve._.js:4461:50)
+  const handleCopy = async () => {
+    await navigator.clipboard.writeText(message.content)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
 
-Next.js version: 16.2.3 (Turbopack)
+  // Show rephrased question only when it differs meaningfully from original
+  const showRephrased =
+    !isUser &&
+    message.rephrased_question &&
+    message.rephrased_question !== message.content &&
+    message.rephrased_question.length > 0
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: Math.min(index * 0.04, 0.25), duration: 0.3 }}
+      className={cn('flex gap-3 group', isUser ? 'flex-row-reverse' : 'flex-row')}
+    >
+      {/* Avatar */}
+      <div className={cn(
+        'w-8 h-8 rounded-lg flex-shrink-0 flex items-center justify-center mt-0.5',
+        isUser ? 'bg-axa-800' : 'bg-white border border-ink-200 shadow-sm'
+      )}>
+        {isUser
+          ? <User className="w-4 h-4 text-white" />
+          : <Bot className="w-4 h-4 text-axa-800" />
+        }
+      </div>
+
+      {/* Bubble + meta */}
+      <div className={cn(
+        'flex-1 min-w-0 max-w-[85%] flex flex-col gap-1',
+        isUser ? 'items-end' : 'items-start'
+      )}>
+
+        {/* Rephrased question badge — shown above AI response */}
+        {showRephrased && (
+          <div className="flex items-center gap-1.5 mb-0.5">
+            <Brain className="w-3 h-3 text-axa-600 flex-shrink-0" />
+            <span className="text-[10px] text-axa-700 bg-axa-50 border border-axa-100 px-2 py-0.5 rounded-full italic">
+              Searched: "{message.rephrased_question}"
+            </span>
+          </div>
+        )}
+
+        {/* Message bubble */}
+        <div className={cn(
+          'relative rounded-2xl px-4 py-3 text-sm w-full',
+          isUser
+            ? 'bg-axa-800 text-white rounded-tr-sm ml-auto'
+            : 'bg-white border border-ink-200 shadow-sm rounded-tl-sm'
+        )}>
+          {isUser ? (
+            <p className="text-white leading-relaxed">{message.content}</p>
+          ) : (
+            <div className="prose-governance">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {message.content}
+              </ReactMarkdown>
+            </div>
+          )}
+
+          {/* Copy button — AI messages only */}
+          {!isUser && message.content && (
+            <button
+              onClick={handleCopy}
+              className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1 rounded-lg bg-ink-50 hover:bg-ink-100 text-ink-400 hover:text-ink-700 transition-all border border-ink-200"
+              title="Copy response"
+            >
+              {copied
+                ? <Check className="w-3 h-3 text-emerald-500" />
+                : <Copy className="w-3 h-3" />
+              }
+            </button>
+          )}
+        </div>
+
+        {/* Meta row */}
+        <div className={cn(
+          'flex items-center gap-3 px-1 flex-wrap',
+          isUser ? 'flex-row-reverse' : 'flex-row'
+        )}>
+          {/* Timestamp */}
+          <span className="text-[10px] text-ink-400 flex items-center gap-1 flex-shrink-0">
+            <Clock className="w-2.5 h-2.5" />
+            {formatTime(message.timestamp)}
+          </span>
+
+          {/* Source citations */}
+          {!isUser && message.sources_used && message.sources_used.length > 0 && (
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <FileText className="w-2.5 h-2.5 text-ink-400 flex-shrink-0" />
+              {message.sources_used.map(src => (
+                <span
+                  key={src}
+                  className="text-[10px] font-mono text-axa-800 bg-axa-50 px-1.5 py-0.5 rounded border border-axa-100"
+                >
+                  {src}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* Duration */}
+          {!isUser && message.duration_seconds && (
+            <span className="text-[10px] text-ink-300 flex-shrink-0">
+              {message.duration_seconds}s
+            </span>
+          )}
+
+          {/* Token count — clickable to toggle breakdown */}
+          {!isUser && message.total_tokens && message.total_tokens > 0 && (
+            <button
+              onClick={() => setShowMeta(v => !v)}
+              className="flex items-center gap-1 text-[10px] text-ink-400 hover:text-axa-700 transition-colors flex-shrink-0"
+              title="Show token breakdown"
+            >
+              <Zap className="w-2.5 h-2.5" />
+              <span className="font-mono">{message.total_tokens.toLocaleString()}</span>
+            </button>
+          )}
+        </div>
+
+        {/* Expandable token breakdown */}
+        {!isUser && showMeta && message.total_tokens && message.total_tokens > 0 && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="px-1 overflow-hidden"
+          >
+            <div className="flex items-center gap-3 text-[10px] font-mono text-ink-400 bg-ink-50 border border-ink-100 rounded-lg px-3 py-2 mt-1">
+              <span>↑ {(message.prompt_tokens ?? 0).toLocaleString()} prompt</span>
+              <span className="text-ink-200">·</span>
+              <span>↓ {(message.completion_tokens ?? 0).toLocaleString()} completion</span>
+              <span className="text-ink-200">·</span>
+              <span className="font-semibold text-axa-700">
+                = {(message.total_tokens ?? 0).toLocaleString()} total
+              </span>
+              {message.mode && (
+                <>
+                  <span className="text-ink-200">·</span>
+                  <span className="text-ink-500">{message.mode}</span>
+                </>
+              )}
+            </div>
+          </motion.div>
+        )}
+      </div>
+    </motion.div>
+  )
+}
+
+// ── Typing indicator ─────────────────────────────────────────────
+export function TypingIndicator() {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: 8 }}
+      className="flex gap-3"
+    >
+      <div className="w-8 h-8 rounded-lg bg-white border border-ink-200 shadow-sm flex items-center justify-center flex-shrink-0">
+        <Bot className="w-4 h-4 text-axa-800" />
+      </div>
+      <div className="bg-white border border-ink-200 shadow-sm rounded-2xl rounded-tl-sm px-4 py-3 flex items-center gap-1.5">
+        {[0, 0.2, 0.4].map((delay, i) => (
+          <motion.div
+            key={i}
+            className="w-1.5 h-1.5 rounded-full bg-axa-800"
+            animate={{ scale: [1, 1.4, 1], opacity: [0.3, 1, 0.3] }}
+            transition={{ duration: 0.8, delay, repeat: Infinity }}
+          />
+        ))}
+      </div>
+    </motion.div>
+  )
+}
