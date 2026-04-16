@@ -1,356 +1,447 @@
 """
-services/databricks/ingestion.py
+routers/databricks.py
 
-Converts a Databricks table profile into LangChain Documents
-and feeds them through the existing chunking → vectorstore pipeline.
+All Databricks-related API endpoints.
 
-The profile document is structured to maximise RAG retrieval quality:
-- Schema section (column names, types, comments)
-- Statistics section (per-column numerical/categorical stats)
-- Governance section (PII, sensitivity, regulatory signals)
-- Sample data section (5 random rows for context)
-
-Each table produces 1 primary profile Document + optional sub-Documents
-for deeply nested STRUCTs (one per top-level struct column).
+Endpoint groups:
+  Connection management  — connect, list, delete, test
+  Catalog browser        — catalogs, schemas, tables, table detail
+  Profiling              — full statistical profile
+  Ingestion              — profile + chunk + vectorise into knowledge set
 """
 
-from __future__ import annotations
-import json
-from datetime import datetime
+import time
+from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
+from pydantic import BaseModel, Field
+from typing import Optional
 
-from langchain_core.documents import Document
-
-from services.databricks.client import DatabricksClient
+from services.databricks.client import (
+    DatabricksClient, save_connection, get_connection,
+    list_connections, delete_connection
+)
+from services.databricks.catalog import (
+    list_catalogs, list_schemas, list_tables, get_table_detail
+)
 from services.databricks.profiler import profile_table
-from services.databricks.catalog import _fqn
-from services.chunking import chunk_and_enrich
-from services.vectorstore import build_vector_store, add_to_vector_store, load_vector_store
-from db import db_insert
+from services.databricks.ingestion import ingest_databricks_table
+from db import db_query, db_insert
+
+router = APIRouter(prefix="/api/databricks", tags=["Databricks"])
 
 
-# ── Public entry point ───────────────────────────────────────────
+# ── Request / Response models ────────────────────────────────────
 
-def ingest_databricks_table(
-    client: DatabricksClient,
-    catalog: str,
-    schema: str,
-    table: str,
-    knowledge_set: str,
-    sample_rows: int = 500_000,
-    rebuild: bool = False,
-) -> dict:
+class ConnectRequest(BaseModel):
+    connection_name: str = Field(..., min_length=1, max_length=120,
+        description="Friendly name e.g. 'AXA Prod Databricks'")
+    workspace_url: str = Field(..., description="e.g. https://adb-xxxx.azuredatabricks.net")
+    pat: str = Field(..., min_length=10, description="Databricks Personal Access Token")
+    http_path: str = Field(..., description="e.g. /sql/1.0/warehouses/xxxx")
+    catalog: str = Field(default="hive_metastore",
+        description="Default catalog (use 'hive_metastore' for legacy)")
+    description: str = Field(default="")
+    knowledge_set: str = Field(default="",
+        description="Optional: associate connection with a knowledge set")
+
+
+class ConnectResponse(BaseModel):
+    connection_id: str
+    connection_name: str
+    workspace_url: str
+    catalog: str
+    status: str
+    current_user: Optional[str] = None
+    message: str
+
+
+class ConnectionInfo(BaseModel):
+    connection_id: str
+    connection_name: str
+    workspace_url: str
+    http_path: str
+    catalog: str
+    description: str
+    knowledge_set: str
+    status: str
+    last_tested_at: Optional[str]
+    created_at: str
+
+
+class IngestTableRequest(BaseModel):
+    knowledge_set: str = Field(..., min_length=1, max_length=60)
+    catalog: str       = Field(..., description="Catalog name")
+    schema: str        = Field(..., description="Schema / database name")
+    table: str         = Field(..., description="Table or view name")
+    sample_rows: int   = Field(default=500_000, ge=1000, le=5_000_000,
+        description="Max rows to profile for statistics")
+    rebuild: bool      = Field(default=False,
+        description="Drop existing collection before ingesting")
+
+
+class IngestMultipleRequest(BaseModel):
+    knowledge_set: str
+    tables: list[dict] = Field(..., description="List of {catalog, schema, table} dicts")
+    sample_rows: int   = Field(default=500_000, ge=1000, le=5_000_000)
+    rebuild_first: bool = Field(default=False,
+        description="Drop collection before ingesting first table")
+
+
+# ── Connection management ────────────────────────────────────────
+
+@router.post("/connect", response_model=ConnectResponse)
+async def connect(request: ConnectRequest):
     """
-    Full pipeline: profile → document → chunk → embed → vectorstore.
-
-    Returns a summary dict with ingestion stats.
+    Test a Databricks connection, then save it with encrypted PAT.
+    Returns the connection_id for all subsequent API calls.
     """
-    start = datetime.now()
-
-    # ── 1. Profile the table ──────────────────────────────────────
-    profile = profile_table(client, catalog, schema, table, sample_rows)
-
-    # ── 2. Convert profile to Documents ──────────────────────────
-    documents = profile_to_documents(profile)
-
-    # ── 3. Fetch sample rows ──────────────────────────────────────
-    sample_doc = _fetch_sample_document(client, catalog, schema, table)
-    if sample_doc:
-        documents.append(sample_doc)
-
-    # ── 4. Chunk and enrich with governance metadata ───────────────
-    chunks = chunk_and_enrich(documents, knowledge_set=knowledge_set)
-
-    # ── 5. Store vectors ──────────────────────────────────────────
-    if rebuild:
-        from services.vectorstore import delete_vector_store
-        delete_vector_store(knowledge_set)
-
+    # Test connectivity before saving
+    test_client = None
     try:
-        vectordb = load_vector_store(knowledge_set)
-        add_to_vector_store(vectordb, chunks)
-    except Exception:
-        vectordb = build_vector_store(chunks, knowledge_set=knowledge_set)
+        # Temporarily build a client without saving to test first
+        from databricks import sql as db_sql
+        import base64, requests as req
 
-    # ── 6. Log ingestion to SQLite ────────────────────────────────
-    duration = (datetime.now() - start).total_seconds()
-    log = {
-        "ingestion_type"  : "databricks",
-        "knowledge_set"   : knowledge_set,
-        "connection_id"   : client.connection_id,
-        "source"          : f"{catalog}.{schema}.{table}",
-        "catalog"         : catalog,
-        "schema"          : schema,
-        "table"           : table,
-        "row_count"       : profile["row_count"],
-        "column_count"    : profile["column_count"],
-        "chunks_created"  : len(chunks),
-        "documents"       : len(documents),
-        "sampled"         : str(profile["sampled"]),
-        "duration_seconds": str(round(duration, 2)),
-        "ingested_at"     : datetime.now().isoformat(),
-    }
-    db_insert("databricks_ingestion_log", log)
+        ws = request.workspace_url.rstrip("/")
+        if not ws.startswith("https://"):
+            ws = f"https://{ws}"
 
-    return {
-        "status"         : "success",
-        "source"         : f"{catalog}.{schema}.{table}",
-        "knowledge_set"  : knowledge_set,
-        "row_count"      : profile["row_count"],
-        "column_count"   : profile["column_count"],
-        "documents"      : len(documents),
-        "chunks"         : len(chunks),
-        "sampled"        : profile["sampled"],
-        "duration_seconds": round(duration, 2),
-        "profiled_at"    : profile["profiled_at"],
-    }
+        resp = req.get(
+            f"{ws}/api/2.0/clusters/list",
+            headers={"Authorization": f"Bearer {request.pat}"},
+            timeout=10,
+            verify=True,
+        )
+        if resp.status_code == 401:
+            raise HTTPException(status_code=401, detail="Invalid PAT — authentication failed.")
+        if resp.status_code not in (200, 403):
+            # 403 is fine — means auth works but no cluster access
+            raise HTTPException(
+                status_code=400,
+                detail=f"Workspace unreachable: {resp.status_code} {resp.text[:200]}"
+            )
+        current_user = resp.json().get("clusters", [{}])[0].get("creator_user_name", "unknown") \
+            if resp.status_code == 200 else "authenticated"
 
-
-# ── Profile → Documents ──────────────────────────────────────────
-
-def profile_to_documents(profile: dict) -> list[Document]:
-    """
-    Convert a table profile dict into one or more LangChain Documents.
-
-    Structure:
-    - Doc 1: Schema + governance overview (always created)
-    - Doc 2: Column statistics narrative (always created)
-    - Doc N: One additional doc per top-level STRUCT column (if present)
-    """
-    docs = []
-
-    fqn      = profile["full_name"]
-    gov      = profile["governance"]
-    cols     = profile["columns"]
-    profiles = profile["column_profiles"]
-
-    # ── Document 1: Schema + Overview ────────────────────────────
-    schema_sections = [
-        f"TABLE: {fqn}",
-        f"SOURCE TYPE: Databricks {'Unity Catalog' if '.' in fqn.replace('`','') else 'Hive Metastore'}",
-        f"TABLE TYPE: {profile['table_type']} | FORMAT: {profile['provider']}",
-        f"ROWS: {profile['row_count']:,} | COLUMNS: {profile['column_count']}",
-        f"SAMPLED: {'Yes (statistics based on sample)' if profile['sampled'] else 'No (full table)'}",
-        f"PARTITIONED BY: {', '.join(profile['partition_cols']) or 'None'}",
-        f"",
-        f"GOVERNANCE CLASSIFICATION:",
-        f"  Sensitivity    : {gov['sensitivity']}",
-        f"  Department     : {gov['department']}",
-        f"  PII Columns    : {gov['pii_column_count']} column(s) — {', '.join(gov['pii_columns']) or 'None detected'}",
-        f"  Themes         : {', '.join(gov['governance_themes']) or 'None detected'}",
-        f"  Recommended Owner: {gov['recommended_owner']}",
-        f"",
-        f"COLUMN SCHEMA ({profile['column_count']} columns):",
-    ]
-
-    for col in cols:
-        pii_flag = " ⚠️ PII" if col["column_name"] in gov["pii_columns"] else ""
-        complex_flag = " [COMPLEX]" if col["is_complex"] else ""
-        schema_sections.append(
-            f"  {col['column_name']} : {col['data_type']}{complex_flag}{pii_flag}"
-            + (f" — {col['comment']}" if col.get('comment') else "")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Connection test failed: {str(e)}"
         )
 
-    docs.append(Document(
-        page_content="\n".join(schema_sections),
-        metadata={
-            "source_file" : fqn,
-            "source_type" : "databricks",
-            "file_type"   : "databricks_schema",
-            "catalog"     : profile["catalog"],
-            "schema"      : profile["schema"],
-            "table"       : profile["table"],
-            "row_count"   : str(profile["row_count"]),
-            "col_count"   : str(profile["column_count"]),
-            "sensitivity" : gov["sensitivity"],
-            "department"  : gov["department"],
-            "has_pii"     : str(gov["pii_column_count"] > 0),
-            "profiled_at" : profile["profiled_at"],
-        }
-    ))
+    # Save encrypted connection
+    connection_id = save_connection(
+        connection_name=request.connection_name,
+        workspace_url=request.workspace_url,
+        pat=request.pat,
+        http_path=request.http_path,
+        catalog=request.catalog,
+        description=request.description,
+        knowledge_set=request.knowledge_set,
+    )
 
-    # ── Document 2: Column Statistics ────────────────────────────
-    stats_sections = [
-        f"COLUMN STATISTICS FOR: {fqn}",
-        f"Profiled at: {profile['profiled_at']}",
-        f"",
-    ]
-
-    for cp in profiles:
-        col_name = cp["column_name"]
-        dtype    = cp["data_type"]
-        null_pct = cp.get("null_pct")
-        col_type = cp.get("col_type", "unknown")
-        stats    = cp.get("stats", {})
-        gov_col  = cp.get("governance", {})
-
-        section = [f"\nCOLUMN: {col_name} | TYPE: {dtype} | CATEGORY: {col_type}"]
-
-        if null_pct is not None:
-            section.append(f"  Null Rate: {null_pct}%  ({cp.get('null_count', 'N/A')} nulls)")
-        if cp.get("unique_count") is not None:
-            section.append(f"  Unique Values: {cp['unique_count']:,}")
-
-        if col_type == "numerical" and stats:
-            section.append(
-                f"  Mean: {stats.get('mean_val')}  Median: {stats.get('median')}"
-                f"  StdDev: {stats.get('stddev_val')}"
-                f"  Min: {stats.get('min_val')}  Max: {stats.get('max_val')}"
-            )
-            if stats.get("skewness") is not None:
-                section.append(f"  Skewness: {stats.get('skewness')}  Kurtosis: {stats.get('kurtosis')}")
-
-        elif col_type == "categorical" and stats.get("value_counts"):
-            vc = stats["value_counts"]
-            vp = stats.get("value_percentages", {})
-            vals = " | ".join(
-                f"{k}: {v} ({vp.get(k, '?')}%)" for k, v in list(vc.items())[:10]
-            )
-            section.append(f"  Top Values: {vals}")
-
-        elif col_type == "datetime" and stats:
-            section.append(
-                f"  Earliest: {stats.get('earliest')}  "
-                f"Latest: {stats.get('latest')}  "
-                f"Distinct Dates: {stats.get('distinct_dates')}"
-            )
-
-        elif col_type == "array" and stats:
-            section.append(
-                f"  Array Size — Min: {stats.get('array_size_min')}  "
-                f"Max: {stats.get('array_size_max')}  "
-                f"Avg: {stats.get('array_size_avg')}"
-            )
-
-        if gov_col.get("contains_pii"):
-            section.append(
-                f"  ⚠️  PII: {gov_col.get('pii_type', 'DETECTED')} — "
-                f"Masking: {gov_col.get('masking_technique', 'required')}"
-            )
-
-        stats_sections.extend(section)
-
-    # Data quality summary
-    dup = profile.get("duplicate_estimate", {})
-    stats_sections.extend([
-        f"",
-        f"DATA QUALITY SUMMARY:",
-        f"  Duplicate Rows (estimate): "
-        f"{dup.get('duplicate_count', 'N/A')} "
-        f"({dup.get('duplicate_pct', 'N/A')}%)",
-        f"  PII Column Count: {gov['pii_column_count']}",
-        f"  Sensitivity: {gov['sensitivity']}",
-    ])
-
-    docs.append(Document(
-        page_content="\n".join(stats_sections),
-        metadata={
-            "source_file" : fqn,
-            "source_type" : "databricks",
-            "file_type"   : "databricks_stats",
-            "catalog"     : profile["catalog"],
-            "schema"      : profile["schema"],
-            "table"       : profile["table"],
-            "sensitivity" : gov["sensitivity"],
-            "profiled_at" : profile["profiled_at"],
-        }
-    ))
-
-    # ── Extra docs for top-level STRUCT columns ───────────────────
-    for col in cols:
-        if col["is_complex"] and col["data_type"].lower().startswith("struct<"):
-            struct_doc = _struct_column_document(fqn, col, profile)
-            if struct_doc:
-                docs.append(struct_doc)
-
-    return docs
-
-
-def _struct_column_document(fqn: str, col: dict, profile: dict) -> Document | None:
-    """Create a dedicated document for a STRUCT column's nested schema."""
-    parsed = col.get("parsed_type", {})
-    if parsed.get("type") != "struct":
-        return None
-
-    lines = [
-        f"NESTED STRUCT SCHEMA: {fqn}.{col['column_name']}",
-        f"Parent Table: {fqn}",
-        f"Column: {col['column_name']} ({col['data_type']})",
-        f"",
-        f"STRUCT FIELDS:",
-    ]
-
-    def _render_fields(fields: dict, indent: int = 2) -> None:
-        prefix = "  " * indent
-        for fname, ftype in fields.items():
-            if isinstance(ftype, dict):
-                t = ftype.get("type", "unknown")
-                if t == "struct":
-                    lines.append(f"{prefix}{fname}: STRUCT")
-                    _render_fields(ftype.get("fields", {}), indent + 1)
-                elif t == "array":
-                    elem = ftype.get("element", {})
-                    lines.append(f"{prefix}{fname}: ARRAY<{elem.get('type', '?')}>")
-                else:
-                    lines.append(f"{prefix}{fname}: {t}")
-            else:
-                lines.append(f"{prefix}{fname}: {ftype}")
-
-    _render_fields(parsed.get("fields", {}))
-
-    return Document(
-        page_content="\n".join(lines),
-        metadata={
-            "source_file"     : fqn,
-            "source_type"     : "databricks",
-            "file_type"       : "databricks_struct",
-            "struct_column"   : col["column_name"],
-            "catalog"         : profile["catalog"],
-            "schema"          : profile["schema"],
-            "table"           : profile["table"],
-            "profiled_at"     : profile["profiled_at"],
-        }
+    return ConnectResponse(
+        connection_id  =connection_id,
+        connection_name=request.connection_name,
+        workspace_url  =request.workspace_url.rstrip("/"),
+        catalog        =request.catalog,
+        status         ="connected",
+        current_user   =current_user,
+        message        =f"Connection saved. PAT encrypted and stored securely.",
     )
 
 
-def _fetch_sample_document(
-    client: DatabricksClient,
-    catalog: str,
-    schema: str,
-    table: str,
-    n: int = 5,
-) -> Document | None:
-    """Fetch a small random sample for contextual RAG grounding."""
-    fqn = _fqn(catalog, schema, table)
+@router.get("/connections", response_model=list[ConnectionInfo])
+async def get_connections(
+    knowledge_set: Optional[str] = Query(default=None)
+):
+    """List all active Databricks connections."""
+    rows = list_connections(knowledge_set)
+    return [ConnectionInfo(**r) for r in rows]
+
+
+@router.delete("/connections/{connection_id}")
+async def remove_connection(connection_id: str):
+    """Soft-delete a Databricks connection."""
+    deleted = delete_connection(connection_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Connection not found.")
+    return {"status": "deleted", "connection_id": connection_id}
+
+
+@router.post("/connections/{connection_id}/test")
+async def test_connection(connection_id: str):
+    """Re-test an existing saved connection."""
     try:
-        rows = client.execute_query(
-            f"SELECT * FROM {fqn} ORDER BY RAND() LIMIT {n}"
-        )
-        if not rows:
-            return None
+        with DatabricksClient(connection_id) as client:
+            result = client.test_connection()
+        if not result["success"]:
+            raise HTTPException(status_code=400, detail=result.get("error"))
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
-        lines = [
-            f"SAMPLE ROWS FROM: {fqn}",
-            f"(Random sample of {len(rows)} rows for context)",
-            f"",
-        ]
-        for i, row in enumerate(rows, 1):
-            # Truncate long values for embedding efficiency
-            clean_row = {
-                k: (str(v)[:100] if v is not None else "NULL")
-                for k, v in row.items()
-            }
-            lines.append(f"Row {i}: {json.dumps(clean_row, ensure_ascii=False)}")
 
-        return Document(
-            page_content="\n".join(lines),
-            metadata={
-                "source_file": fqn,
-                "source_type": "databricks",
-                "file_type"  : "databricks_sample",
-                "catalog"    : catalog,
-                "schema"     : schema,
-                "table"      : table,
-            }
+# ── Catalog browser ──────────────────────────────────────────────
+
+@router.get("/{connection_id}/catalogs")
+async def get_catalogs(connection_id: str):
+    """List all catalogs available in the workspace."""
+    try:
+        with DatabricksClient(connection_id) as client:
+            return {"catalogs": list_catalogs(client)}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{connection_id}/schemas")
+async def get_schemas(
+    connection_id: str,
+    catalog: str = Query(default="hive_metastore"),
+):
+    """List all schemas in a catalog."""
+    try:
+        with DatabricksClient(connection_id) as client:
+            return {"catalog": catalog, "schemas": list_schemas(client, catalog)}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{connection_id}/tables")
+async def get_tables(
+    connection_id: str,
+    catalog: str = Query(...),
+    schema:  str = Query(...),
+    include_views: bool = Query(default=True),
+):
+    """List all tables (and optionally views) in a schema."""
+    try:
+        with DatabricksClient(connection_id) as client:
+            tables = list_tables(client, catalog, schema, include_views)
+        return {
+            "catalog": catalog,
+            "schema" : schema,
+            "count"  : len(tables),
+            "tables" : tables,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{connection_id}/table-detail")
+async def get_table_detail_endpoint(
+    connection_id: str,
+    catalog: str = Query(...),
+    schema:  str = Query(...),
+    table:   str = Query(...),
+):
+    """
+    Get full column schema including parsed STRUCT/ARRAY/MAP types.
+    """
+    try:
+        with DatabricksClient(connection_id) as client:
+            detail = get_table_detail(client, catalog, schema, table)
+        return detail
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Profiling ────────────────────────────────────────────────────
+
+@router.post("/{connection_id}/profile")
+async def profile_table_endpoint(
+    connection_id: str,
+    catalog: str = Query(...),
+    schema:  str = Query(...),
+    table:   str = Query(...),
+    sample_rows: int = Query(default=500_000),
+):
+    """
+    Run a full statistical profile on a Databricks table.
+    Returns the profile as JSON — does NOT ingest into the vector store.
+    Use /ingest to also add to the RAG knowledge set.
+    """
+    try:
+        with DatabricksClient(connection_id) as client:
+            profile = profile_table(client, catalog, schema, table, sample_rows)
+        return profile
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Ingestion ────────────────────────────────────────────────────
+
+@router.post("/{connection_id}/ingest")
+async def ingest_table(
+    connection_id: str,
+    request: IngestTableRequest,
+):
+    """
+    Profile a table and ingest it into a GovernGPT knowledge set.
+    The table schema, statistics, and governance metadata become
+    searchable via the RAG engine.
+    """
+    try:
+        with DatabricksClient(connection_id) as client:
+            result = ingest_databricks_table(
+                client=client,
+                catalog=request.catalog,
+                schema=request.schema,
+                table=request.table,
+                knowledge_set=request.knowledge_set,
+                sample_rows=request.sample_rows,
+                rebuild=request.rebuild,
+            )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
+
+
+@router.post("/{connection_id}/ingest-multiple")
+async def ingest_multiple_tables(
+    connection_id: str,
+    request: IngestMultipleRequest,
+    background_tasks: BackgroundTasks,
+):
+    """
+    Ingest multiple tables from a Databricks schema into a knowledge set.
+    Tables are processed sequentially in the background.
+    Returns immediately with a job_id — poll /ingest-status/{job_id}.
+    """
+    import uuid as _uuid
+    job_id = str(_uuid.uuid4())
+
+    # Log job start
+    db_insert("databricks_batch_jobs", {
+        "job_id"        : job_id,
+        "connection_id" : connection_id,
+        "knowledge_set" : request.knowledge_set,
+        "table_count"   : len(request.tables),
+        "status"        : "queued",
+        "created_at"    : __import__("datetime").datetime.now().isoformat(),
+    })
+
+    background_tasks.add_task(
+        _run_batch_ingest,
+        job_id=job_id,
+        connection_id=connection_id,
+        request=request,
+    )
+
+    return {
+        "job_id"       : job_id,
+        "status"       : "queued",
+        "table_count"  : len(request.tables),
+        "knowledge_set": request.knowledge_set,
+        "message"      : f"Ingesting {len(request.tables)} table(s) in background. Poll /ingest-status/{job_id}",
+    }
+
+
+@router.get("/ingest-status/{job_id}")
+async def get_ingest_status(job_id: str):
+    """Poll the status of a background batch ingestion job."""
+    rows = db_query(
+        "SELECT * FROM databricks_batch_jobs WHERE job_id = ?",
+        (job_id,),
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return rows[0]
+
+
+@router.get("/{connection_id}/ingestion-log")
+async def get_ingestion_log(
+    connection_id: str,
+    knowledge_set: Optional[str] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """Get the ingestion history for a connection."""
+    if knowledge_set:
+        rows = db_query(
+            "SELECT * FROM databricks_ingestion_log "
+            "WHERE connection_id=? AND knowledge_set=? "
+            "ORDER BY rowid DESC LIMIT ?",
+            (connection_id, knowledge_set, limit),
         )
-    except Exception:
-        return None
+    else:
+        rows = db_query(
+            "SELECT * FROM databricks_ingestion_log "
+            "WHERE connection_id=? ORDER BY rowid DESC LIMIT ?",
+            (connection_id, limit),
+        )
+    return {"records": rows, "count": len(rows)}
+
+
+# ── Background task ──────────────────────────────────────────────
+
+async def _run_batch_ingest(
+    job_id: str,
+    connection_id: str,
+    request: IngestMultipleRequest,
+) -> None:
+    """Background task for multi-table ingestion."""
+    from datetime import datetime
+    results   = []
+    failed    = []
+
+    try:
+        with DatabricksClient(connection_id) as client:
+            for i, tbl in enumerate(request.tables):
+                try:
+                    rebuild = request.rebuild_first and i == 0
+                    result  = ingest_databricks_table(
+                        client=client,
+                        catalog=tbl["catalog"],
+                        schema=tbl["schema"],
+                        table=tbl["table"],
+                        knowledge_set=request.knowledge_set,
+                        sample_rows=request.sample_rows,
+                        rebuild=rebuild,
+                    )
+                    results.append(result)
+                except Exception as e:
+                    failed.append({"table": tbl, "error": str(e)})
+
+        import json as _json
+        db_query(
+            "UPDATE databricks_batch_jobs SET status=?, completed_at=?, results=? WHERE job_id=?",
+        )
+        # Use raw connection for UPDATE
+        from db import _get_conn
+        with _get_conn() as conn:
+            conn.execute(
+                "UPDATE databricks_batch_jobs "
+                "SET status=?, completed_at=?, results=?, failed=? "
+                "WHERE job_id=?",
+                (
+                    "completed" if not failed else "partial",
+                    datetime.now().isoformat(),
+                    _json.dumps(results),
+                    _json.dumps(failed),
+                    job_id,
+                )
+            )
+            conn.commit()
+
+    except Exception as e:
+        from db import _get_conn
+        from datetime import datetime
+        with _get_conn() as conn:
+            conn.execute(
+                "UPDATE databricks_batch_jobs SET status='failed', error=?, completed_at=? WHERE job_id=?",
+                (str(e), datetime.now().isoformat(), job_id)
+            )
+            conn.commit()
