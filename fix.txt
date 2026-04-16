@@ -1,198 +1,315 @@
 """
-services/memory.py
+services/rag.py
 
-SQLite-backed conversation memory for GovernGPT.
+Conversational RAG using LCEL (LangChain Expression Language).
+Compatible with LangChain >= 0.2.x — no deprecated chains used.
 
-Design:
-- Each conversation is identified by (knowledge_set, session_id)
-- session_id maps 1:1 to the frontend Knowledge Set project ID
-- Messages stored in conversation_history table (auto-created on first use)
-- History loaded fresh on every API call — no in-process state
-- Compatible with LangChain >= 0.2.x (uses only langchain_core)
+Pipeline per query (use_rag=True):
+  Step 1 — Load history from SQLite as LangChain message objects
+  Step 2 — Condense: rewrite follow-up question into standalone question
+  Step 3 — Retrieve: fetch relevant chunks from ChromaDB using rephrased question
+  Step 4 — Answer: generate response with context + history + question
+  Step 5 — Persist: save turn to conversation_history and log to llm_responses
 
-Table schema:
-    conversation_history(
-        id            INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id    TEXT NOT NULL,
-        knowledge_set TEXT NOT NULL,
-        role          TEXT NOT NULL,   -- 'human' or 'ai'
-        content       TEXT NOT NULL,
-        run_id        TEXT,
-        token_count   INTEGER,
-        created_at    TEXT NOT NULL
-    )
+All steps use plain LCEL (prompt | llm | parser) — fully transparent,
+no black-box chain wrappers.
 """
 
+import time
+import uuid
 from datetime import datetime
+
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
-from db import db_query, _get_conn
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.documents import Document
+from langchain_community.vectorstores import Chroma
 
-# How many past Q&A turns to include as context window
-# 1 turn = 1 human message + 1 AI message = 2 rows
-DEFAULT_WINDOW_K = 6
-
-
-# ── Table management ─────────────────────────────────────────────
-
-def _ensure_history_table() -> None:
-    """Create conversation_history table and index if not present."""
-    with _get_conn() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS conversation_history (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id    TEXT NOT NULL,
-                knowledge_set TEXT NOT NULL,
-                role          TEXT NOT NULL,
-                content       TEXT NOT NULL,
-                run_id        TEXT,
-                token_count   INTEGER DEFAULT 0,
-                created_at    TEXT NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_conv_session
-            ON conversation_history (session_id, knowledge_set, id)
-        """)
-        conn.commit()
+from llm import get_llm
+from db import db_insert
+from config import CHAT_MODEL, RETRIEVAL_K
+from services.memory import (
+    save_turn,
+    load_history_as_messages,
+    DEFAULT_WINDOW_K,
+)
 
 
-# ── Write ────────────────────────────────────────────────────────
+# ── Prompts ──────────────────────────────────────────────────────
 
-def save_turn(
-    session_id: str,
-    knowledge_set: str,
-    human_message: str,
-    ai_message: str,
-    run_id: str = "",
-    token_count: int = 0,
-) -> None:
+# Step 2 — Condense follow-up question into a self-contained question.
+# Only runs when chat_history is non-empty.
+CONDENSE_PROMPT = ChatPromptTemplate.from_messages([
+    (
+        "system",
+        "You are a question rewriter. "
+        "Given the conversation history below and a follow-up question, "
+        "rewrite the follow-up question into a fully self-contained standalone question "
+        "that captures all relevant context from the history. "
+        "Return ONLY the rewritten question — no explanation, no preamble.",
+    ),
+    MessagesPlaceholder(variable_name="chat_history"),
+    ("human", "{question}"),
+])
+
+# Step 4 — Final answer generation with context + history + question.
+QA_PROMPT = ChatPromptTemplate.from_messages([
+    (
+        "system",
+        """You are an expert Data Governance Advisor specialising in the insurance industry, \
+with deep knowledge of GDPR, Solvency II, IFRS 17, and enterprise data management.
+
+You have been provided with retrieved document context below. \
+Use it as your primary source of evidence.
+
+--- RETRIEVED CONTEXT ---
+{context}
+--- END CONTEXT ---
+
+You also have the full conversation history for this session. Use it to:
+- Refer back to findings from earlier in the conversation
+- Build on previously identified entities, owners, issues, or recommendations
+- Avoid repeating analysis already covered unless asked to expand
+- Explicitly reference prior findings when relevant \
+  (e.g. "Building on the PII findings from earlier...")
+
+Response structure (adapt based on question type):
+- Analysis questions : Summary → Key Findings → Governance Signals → Recommended Actions
+- Modelling questions: Propose tables, columns, data types, transformation logic
+- Compliance questions: Cite the specific regulation and article number
+- Follow-up questions : Reference and build on previous answers in this session
+
+Always state which source file your insights are drawn from.
+If the answer is not in the context or history, say so clearly. Do not hallucinate.""",
+    ),
+    MessagesPlaceholder(variable_name="chat_history"),
+    ("human", "{question}"),
+])
+
+
+# ── Retriever ────────────────────────────────────────────────────
+
+def _build_retriever(vectordb: Chroma, k: int):
     """
-    Persist one complete Q&A turn (human + AI) to SQLite.
-    Both messages are written in a single transaction.
-    Called after every successful LLM response.
+    MMR retriever that guarantees representation from every source file.
+    Returns a plain Python callable — no LangChain wrapper needed for LCEL.
     """
-    _ensure_history_table()
-    now = datetime.now().isoformat()
-
-    with _get_conn() as conn:
-        conn.execute(
-            """
-            INSERT INTO conversation_history
-                (session_id, knowledge_set, role, content, run_id, token_count, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (session_id, knowledge_set, "human", human_message, run_id, token_count, now),
-        )
-        conn.execute(
-            """
-            INSERT INTO conversation_history
-                (session_id, knowledge_set, role, content, run_id, token_count, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (session_id, knowledge_set, "ai", ai_message, run_id, token_count, now),
-        )
-        conn.commit()
-
-
-# ── Read ─────────────────────────────────────────────────────────
-
-def load_history(
-    session_id: str,
-    knowledge_set: str,
-    window_k: int = DEFAULT_WINDOW_K,
-) -> list[dict]:
-    """
-    Load the last `window_k` Q&A turns from SQLite.
-    Returns flat list of {role, content} dicts in chronological order (oldest first).
-    window_k turns = window_k * 2 rows (each turn has 1 human + 1 AI row).
-    """
-    _ensure_history_table()
-    rows = db_query(
-        """
-        SELECT role, content FROM (
-            SELECT role, content, id
-            FROM conversation_history
-            WHERE session_id = ? AND knowledge_set = ?
-            ORDER BY id DESC
-            LIMIT ?
-        )
-        ORDER BY id ASC
-        """,
-        (session_id, knowledge_set, window_k * 2),
+    base = vectordb.as_retriever(
+        search_type="mmr",
+        search_kwargs={"k": k * 2, "fetch_k": k * 6},
     )
-    return rows
+
+    def multi_source_retrieve(query: str) -> list[Document]:
+        docs = base.invoke(query)
+
+        # Deduplicate by source, keeping first hit per file
+        seen: dict[str, Document] = {}
+        for doc in docs:
+            src = doc.metadata.get("source_file", "unknown")
+            if src not in seen:
+                seen[src] = doc
+
+        # If only one source represented, force-fetch from all other files
+        if len(seen) < 2:
+            try:
+                all_srcs = list({
+                    d.metadata.get("source_file", "unknown")
+                    for d in vectordb.similarity_search(
+                        "data governance summary", k=50
+                    )
+                })
+                for src in all_srcs:
+                    if src not in seen:
+                        results = vectordb.similarity_search(
+                            query, k=2, filter={"source_file": src}
+                        )
+                        if results:
+                            seen[src] = results[0]
+            except Exception:
+                pass  # non-fatal — proceed with what we have
+
+        # Truncate large chunks to prevent context window overflow
+        truncated: list[Document] = []
+        for doc in seen.values():
+            if len(doc.page_content) > 1500:
+                doc = Document(
+                    page_content=doc.page_content[:1500] + "\n[...truncated]",
+                    metadata=doc.metadata,
+                )
+            truncated.append(doc)
+
+        return truncated
+
+    return multi_source_retrieve
 
 
-def load_history_as_messages(
-    session_id: str,
-    knowledge_set: str,
+def _format_docs(docs: list[Document]) -> str:
+    """Format retrieved documents into a single context string."""
+    parts = []
+    for doc in docs:
+        src = doc.metadata.get("source_file", "unknown")
+        parts.append(f"[Source: {src}]\n{doc.page_content}")
+    return "\n\n---\n\n".join(parts)
+
+
+# ── Token extraction ─────────────────────────────────────────────
+
+def _extract_tokens(llm_response) -> dict:
+    """
+    Safely extract token counts from an LLM AIMessage response.
+    AzureChatOpenAI stores usage in response_metadata and usage_metadata.
+    Returns zeros if not available (e.g. streaming or missing fields).
+    """
+    try:
+        usage = getattr(llm_response, "usage_metadata", None) or {}
+        return {
+            "prompt_tokens"    : int(usage.get("input_tokens",  0)),
+            "completion_tokens": int(usage.get("output_tokens", 0)),
+            "total_tokens"     : int(usage.get("total_tokens",  0)),
+        }
+    except Exception:
+        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+
+# ── Main query function ──────────────────────────────────────────
+
+def query_governance(
+    question: str,
+    vectordb: Chroma,
+    knowledge_set: str = "default",
+    session_id: str = "",
+    use_rag: bool = True,
+    k: int = RETRIEVAL_K,
     window_k: int = DEFAULT_WINDOW_K,
-) -> list[BaseMessage]:
+) -> dict:
     """
-    Load history and return as LangChain message objects.
-    Used directly by LCEL chains via MessagesPlaceholder.
-    HumanMessage for role='human', AIMessage for role='ai'.
+    Core query function called by the FastAPI router.
+
+    use_rag=True  → 3-step LCEL pipeline: condense → retrieve → answer
+    use_rag=False → direct LLM call with history context only
+
+    Both modes persist the turn to SQLite conversation_history.
+    Both modes log the full response to llm_responses.
     """
-    rows = load_history(session_id, knowledge_set, window_k)
-    messages: list[BaseMessage] = []
-    for row in rows:
-        if row["role"] == "human":
-            messages.append(HumanMessage(content=row["content"]))
+    start     = time.time()
+    run_id    = str(uuid.uuid4())
+    answer    = ""
+    llm       = get_llm()
+    parser    = StrOutputParser()
+
+    if not session_id:
+        session_id = knowledge_set
+
+    # ── Step 1: Load conversation history from SQLite ─────────────
+    chat_history: list[BaseMessage] = load_history_as_messages(
+        session_id, knowledge_set, window_k
+    )
+
+    if use_rag:
+
+        # ── Step 2: Condense question ─────────────────────────────
+        # Only run if there is prior history — no point condensing a
+        # first message with no context to reference.
+        if chat_history:
+            condense_chain  = CONDENSE_PROMPT | llm | parser
+            rephrased       = condense_chain.invoke({
+                "chat_history": chat_history,
+                "question"    : question,
+            })
         else:
-            messages.append(AIMessage(content=row["content"]))
-    return messages
+            rephrased = question
 
+        # ── Step 3: Retrieve relevant chunks ─────────────────────
+        retriever_fn = _build_retriever(vectordb, k)
+        source_docs  = retriever_fn(rephrased)
+        context      = _format_docs(source_docs)
+        sources      = list({
+            doc.metadata.get("source_file", "unknown")
+            for doc in source_docs
+        })
 
-def get_full_history(session_id: str, knowledge_set: str) -> list[dict]:
-    """
-    Load complete conversation history for a session with all metadata.
-    Used by GET /api/query/history endpoint.
-    """
-    _ensure_history_table()
-    return db_query(
-        """
-        SELECT id, session_id, knowledge_set, role, content,
-               run_id, token_count, created_at
-        FROM conversation_history
-        WHERE session_id = ? AND knowledge_set = ?
-        ORDER BY id ASC
-        """,
-        (session_id, knowledge_set),
-    )
-
-
-def get_session_stats(session_id: str, knowledge_set: str) -> dict:
-    """Return summary statistics for a conversation session."""
-    _ensure_history_table()
-    rows = db_query(
-        """
-        SELECT
-            COUNT(*)                                          AS total_messages,
-            SUM(CASE WHEN role = 'human' THEN 1 ELSE 0 END)  AS human_turns,
-            SUM(CASE WHEN role = 'ai'    THEN 1 ELSE 0 END)  AS ai_turns,
-            MIN(created_at)                                   AS first_message_at,
-            MAX(created_at)                                   AS last_message_at
-        FROM conversation_history
-        WHERE session_id = ? AND knowledge_set = ?
-        """,
-        (session_id, knowledge_set),
-    )
-    return rows[0] if rows else {}
-
-
-# ── Delete ───────────────────────────────────────────────────────
-
-def clear_history(session_id: str, knowledge_set: str) -> int:
-    """
-    Delete all conversation history for a session.
-    Returns the number of rows deleted.
-    Used by DELETE /api/query/history endpoint.
-    """
-    _ensure_history_table()
-    with _get_conn() as conn:
-        cursor = conn.execute(
-            "DELETE FROM conversation_history WHERE session_id = ? AND knowledge_set = ?",
-            (session_id, knowledge_set),
+        # ── Step 4: Generate answer ───────────────────────────────
+        # Invoke LLM directly (not through parser) so we can read
+        # token metadata from the AIMessage response object.
+        qa_messages = QA_PROMPT.format_messages(
+            context     = context,
+            chat_history= chat_history,
+            question    = question,
         )
-        conn.commit()
-        return cursor.rowcount
+        llm_response   = llm.invoke(qa_messages)
+        answer         = llm_response.content
+        token_usage    = _extract_tokens(llm_response)
+
+        result = {
+            "run_id"             : run_id,
+            "session_id"         : session_id,
+            "knowledge_set"      : knowledge_set,
+            "question"           : question,
+            "rephrased_question" : rephrased,
+            "answer"             : answer,
+            "mode"               : "conversational_rag",
+            "sources_used"       : sources,
+            "chunks_retrieved"   : len(source_docs),
+            "model"              : CHAT_MODEL,
+            "prompt_tokens"      : token_usage["prompt_tokens"],
+            "completion_tokens"  : token_usage["completion_tokens"],
+            "total_tokens"       : token_usage["total_tokens"],
+            "created_at"         : datetime.now().isoformat(),
+            "duration_seconds"   : round(time.time() - start, 2),
+        }
+
+    else:
+        # ── Direct mode (no retrieval) ────────────────────────────
+        # Still context-aware — history is injected via MessagesPlaceholder.
+        direct_prompt = ChatPromptTemplate.from_messages([
+            (
+                "system",
+                "You are a Data Governance Expert for the insurance industry. "
+                "You have full memory of this conversation. "
+                "Build on previous answers when relevant.",
+            ),
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("human", "{question}"),
+        ])
+
+        direct_messages = direct_prompt.format_messages(
+            chat_history=chat_history,
+            question=question,
+        )
+        llm_response = llm.invoke(direct_messages)
+        answer       = llm_response.content
+        token_usage  = _extract_tokens(llm_response)
+
+        result = {
+            "run_id"             : run_id,
+            "session_id"         : session_id,
+            "knowledge_set"      : knowledge_set,
+            "question"           : question,
+            "rephrased_question" : question,
+            "answer"             : answer,
+            "mode"               : "direct",
+            "sources_used"       : [],
+            "chunks_retrieved"   : 0,
+            "model"              : CHAT_MODEL,
+            "prompt_tokens"      : token_usage["prompt_tokens"],
+            "completion_tokens"  : token_usage["completion_tokens"],
+            "total_tokens"       : token_usage["total_tokens"],
+            "created_at"         : datetime.now().isoformat(),
+            "duration_seconds"   : round(time.time() - start, 2),
+        }
+
+    # ── Step 5: Persist to SQLite ─────────────────────────────────
+    # Log full response metadata
+    db_insert("llm_responses", result)
+
+    # Save Q&A turn to conversation memory
+    save_turn(
+        session_id    = session_id,
+        knowledge_set = knowledge_set,
+        human_message = question,
+        ai_message    = answer,
+        run_id        = run_id,
+        token_count   = result["total_tokens"],
+    )
+
+    return result
