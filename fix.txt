@@ -1,154 +1,122 @@
-from fastapi import APIRouter, HTTPException, Query
-from services.rag import query_governance
-from services.vectorstore import load_vector_store
-from services.memory import (
-    get_full_history, get_session_stats,
-    clear_history, DEFAULT_WINDOW_K
+import urllib3
+from contextlib import asynccontextmanager
+from datetime import datetime
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from routers.all_routers import (
+    sources_router, logs_router,
+    profile_router, reset_router,
+    ks_router
 )
-from models.schemas import (
-    QueryRequest, QueryResponse,
-    ConversationHistoryResponse, ConversationMessage,
-    ConversationStatsResponse, ClearHistoryResponse
+from routers.ingest import router as ingest_router
+from routers.query  import router as query_router
+from services.vectorstore import load_vector_store, get_vector_count
+from services.memory import _ensure_history_table
+from db import db_count, db_table_exists
+from models.schemas import HealthResponse
+
+# Suppress corporate SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+# ── Startup / shutdown ──────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("🏛️  Data Governance RAG API starting...")
+
+    # Pre-load embeddings model (avoids cold start on first query)
+    from llm import get_embeddings_singleton
+    get_embeddings_singleton()
+    print("✅ Embeddings model loaded.")
+
+    # Ensure conversation_history table exists in SQLite
+    _ensure_history_table()
+    print("✅ Conversation history table ready.")
+
+    yield
+    print("👋 Shutting down.")
+
+
+# ── App ──────────────────────────────────────────────────────────
+app = FastAPI(
+    title="Data Governance RAG API",
+    description=(
+        "AI-powered Data Governance framework for the insurance industry. "
+        "Reads unstructured documents and generates governance intelligence "
+        "using RAG over AXA SecureGPT (GPT-4o). "
+        "Supports persistent multi-turn conversational memory via SQLite."
+    ),
+    version="2.0.0",
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
 
-router = APIRouter(prefix="/api/query", tags=["Query"])
+# ── CORS ─────────────────────────────────────────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Routers ──────────────────────────────────────────────────────
+app.include_router(ingest_router)
+app.include_router(query_router)
+app.include_router(sources_router)
+app.include_router(logs_router)
+app.include_router(profile_router)
+app.include_router(reset_router)
+app.include_router(ks_router)
 
 
-def _get_vectordb(knowledge_set: str):
-    """Load the vector store for the requested knowledge set."""
+# ── Health check ─────────────────────────────────────────────────
+@app.get("/health", response_model=HealthResponse, tags=["Health"])
+async def health():
+    chroma_count  = 0
+    sources_count = 0
     try:
-        return load_vector_store(knowledge_set)
+        vdb = load_vector_store()
+        chroma_count = get_vector_count(vdb)
+        if db_table_exists("document_chunks"):
+            from db import db_query
+            sources_count = len(db_query(
+                "SELECT DISTINCT source_file FROM document_chunks"
+            ))
     except Exception:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                f"Knowledge set '{knowledge_set}' not found or not yet initialised. "
-                f"Please call POST /api/ingest first with this knowledge_set name."
-            )
-        )
+        pass
+
+    return HealthResponse(
+        status="healthy",
+        version="2.0.0",
+        chroma_vectors=chroma_count,
+        sqlite_chunks=db_count("document_chunks"),
+        sqlite_responses=db_count("llm_responses"),
+        sqlite_conversation_messages=db_count("conversation_history"),
+        sources_loaded=sources_count,
+        timestamp=datetime.now().isoformat()
+    )
 
 
-@router.post("/", response_model=QueryResponse)
-async def query_endpoint(request: QueryRequest):
-    """
-    Send a governance question against a specific knowledge set.
-    Conversation history is automatically loaded from SQLite using session_id.
-    Each answer is aware of all previous Q&A in this session.
-
-    Request body:
-    {
-        "knowledge_set": "claims_2024",
-        "session_id":    "claims_2024",
-        "question":      "What PII data is present?",
-        "use_rag":       true,
-        "k":             5,
-        "window_k":      6
+@app.get("/", tags=["Health"])
+async def root():
+    return {
+        "service" : "Data Governance RAG API",
+        "version" : "2.0.0",
+        "docs"    : "/docs",
+        "health"  : "/health",
+        "features": [
+            "Conversational RAG with SQLite-persisted memory",
+            "Multi-knowledge-set isolation",
+            "Token usage tracking",
+            "Multi-format document ingestion",
+            "Data governance intelligence for insurance"
+        ]
     }
-    """
-    vectordb = _get_vectordb(request.knowledge_set)
-    result   = query_governance(
-        question      = request.question,
-        vectordb      = vectordb,
-        knowledge_set = request.knowledge_set,
-        session_id    = request.session_id,
-        use_rag       = request.use_rag,
-        k             = request.k,
-        window_k      = request.window_k,
-    )
-    return QueryResponse(**result)
-
-
-@router.post("/batch", response_model=list[QueryResponse])
-async def batch_query(requests: list[QueryRequest]):
-    """
-    Run multiple queries sequentially. Each query in the batch has its own
-    session_id, so memory is maintained per-session across the batch.
-    Max 20 queries per batch.
-    """
-    if len(requests) > 20:
-        raise HTTPException(status_code=400, detail="Max 20 queries per batch.")
-
-    results = []
-    for req in requests:
-        vectordb = _get_vectordb(req.knowledge_set)
-        result   = query_governance(
-            question      = req.question,
-            vectordb      = vectordb,
-            knowledge_set = req.knowledge_set,
-            session_id    = req.session_id,
-            use_rag       = req.use_rag,
-            k             = req.k,
-            window_k      = req.window_k,
-        )
-        results.append(QueryResponse(**result))
-    return results
-
-
-# ── Conversation History Endpoints ───────────────────────────────
-
-@router.get("/history", response_model=ConversationHistoryResponse)
-async def get_conversation_history(
-    session_id:    str = Query(..., description="Session / project ID"),
-    knowledge_set: str = Query(..., description="Knowledge set name"),
-):
-    """
-    Retrieve the full conversation history for a session.
-    Used by the frontend to render past messages on page reload.
-    """
-    rows = get_full_history(session_id, knowledge_set)
-    messages = [
-        ConversationMessage(
-            id            = row["id"],
-            session_id    = row["session_id"],
-            knowledge_set = row["knowledge_set"],
-            role          = row["role"],
-            content       = row["content"],
-            run_id        = row.get("run_id"),
-            token_count   = row.get("token_count"),
-            created_at    = row["created_at"],
-        )
-        for row in rows
-    ]
-    return ConversationHistoryResponse(
-        session_id    = session_id,
-        knowledge_set = knowledge_set,
-        total_messages= len(messages),
-        turns         = len(messages) // 2,
-        messages      = messages,
-    )
-
-
-@router.get("/history/stats", response_model=ConversationStatsResponse)
-async def get_conversation_stats(
-    session_id:    str = Query(..., description="Session / project ID"),
-    knowledge_set: str = Query(..., description="Knowledge set name"),
-):
-    """Return summary statistics for a conversation session."""
-    stats = get_session_stats(session_id, knowledge_set)
-    return ConversationStatsResponse(
-        session_id        = session_id,
-        knowledge_set     = knowledge_set,
-        total_messages    = int(stats.get("total_messages") or 0),
-        human_turns       = int(stats.get("human_turns") or 0),
-        ai_turns          = int(stats.get("ai_turns") or 0),
-        first_message_at  = stats.get("first_message_at"),
-        last_message_at   = stats.get("last_message_at"),
-    )
-
-
-@router.delete("/history", response_model=ClearHistoryResponse)
-async def clear_conversation_history(
-    session_id:    str = Query(..., description="Session / project ID"),
-    knowledge_set: str = Query(..., description="Knowledge set name"),
-):
-    """
-    Clear all conversation memory for a session.
-    The LLM will start fresh on the next query — no prior context.
-    """
-    deleted = clear_history(session_id, knowledge_set)
-    return ClearHistoryResponse(
-        status           = "cleared",
-        session_id       = session_id,
-        knowledge_set    = knowledge_set,
-        messages_deleted = deleted,
-    )
