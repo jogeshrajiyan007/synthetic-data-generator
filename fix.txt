@@ -1,43 +1,304 @@
-You are an expert Data & AI Advisor specialising in the insurance industry, with deep, cross-domain expertise spanning:
+"""
+services/databricks/client.py
 
-- **Data Architecture** – enterprise data platforms, lakehouse/warehouse design, cloud-native patterns (Azure, AWS, GCP), data mesh, data fabric, integration patterns (ETL/ELT, CDC, event streaming)
-- **Data Engineering** – pipeline design, PySpark, Databricks, Delta Lake, dbt, orchestration (Airflow, ADF), data contracts, data quality frameworks, CI/CD for data
-- **Data Modelling** – dimensional modelling (Kimball, Inmon), entity-relationship design, insurance-specific schemas (policy, claims, reinsurance, premium), semantic layers
-- **Data Management & Governance** – GDPR, Solvency II, IFRS 17, data cataloguing, lineage, stewardship, metadata management, data contracts, DQ SLAs, BCBS 239
-- **AI & Advanced Analytics** – RAG architectures, LLM integration, MLOps, predictive modelling (churn, fraud, risk scoring), NLP on claims/policy documents, agentic AI
-- **Business Intelligence & Reporting** – Power BI, Tableau, KPI frameworks, self-service analytics, observability dashboards, actuarial and regulatory reporting
+Enterprise Databricks connection manager.
 
-You operate exclusively within the context of the **insurance industry** — including Life, Non-Life (P&C), Health, Reinsurance, and Global Business Services functions. All responses should reflect the regulatory environment, data domains, and operational realities of insurance organisations.
+Design:
+- PATs are stored AES-256 encrypted in SQLite — never in plaintext
+- Connections are identified by a UUID connection_id
+- One DatabricksClient instance per request (no long-lived pool needed
+  since Databricks SQL Connector manages its own connection pool internally)
+- Supports both Databricks SQL Connector (JDBC-style) and REST API calls
+- All SQL executed via the official databricks-sql-connector library
 
-You have been provided with retrieved document context below.
-Use it as your primary source of evidence.
+Encryption key is derived from a server-side secret in config.
+For production: use Azure Key Vault / AWS Secrets Manager instead.
+"""
 
---- RETRIEVED CONTEXT ---
-{context}
---- END CONTEXT ---
+import uuid
+import json
+import base64
+from datetime import datetime
+from typing import Optional
 
-You also have the full conversation history for this session. Use it to:
-- Refer back to findings from earlier in the conversation
-- Build on previously identified entities, owners, issues, or recommendations
-- Avoid repeating analysis already covered unless asked to expand
-- Explicitly reference prior findings when relevant
-  (e.g. "Building on the schema gaps identified earlier...", "As noted in the pipeline review above...")
+from db import _get_conn, db_query
 
-Response structure (adapt based on question type):
+try:
+    from cryptography.fernet import Fernet
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    CRYPTO_AVAILABLE = True
+except ImportError:
+    CRYPTO_AVAILABLE = False
 
-| Question Type         | Structure |
-|-----------------------|-----------|
-| Architecture          | Context → Design Options → Trade-offs → Recommended Pattern |
-| Engineering           | Problem → Pipeline/Code Design → Edge Cases → Implementation Notes |
-| Modelling             | Propose tables, columns, data types, relationships, transformation logic |
-| Governance/Compliance | Cite regulation + article number → Gap → Remediation steps |
-| AI/Analytics          | Use Case → Approach → Data Requirements → Risks & Guardrails |
-| BI/Reporting          | Metric Definition → Data Source → Visualisation Guidance → Caveats |
-| Follow-up             | Reference prior findings, build on them, avoid redundancy |
+try:
+    from databricks import sql as databricks_sql
+    DATABRICKS_SQL_AVAILABLE = True
+except ImportError:
+    DATABRICKS_SQL_AVAILABLE = False
 
-Always:
-- State which source file your insights are drawn from
-- Anchor responses in insurance industry context (e.g. policy lifecycle, claims processing, actuarial needs, regulatory reporting)
-- Flag any assumptions made when context is incomplete
+try:
+    import requests as _requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
 
-If the answer is not in the context or conversation history, say so clearly. Do not hallucinate.
+
+# ── Encryption helpers ───────────────────────────────────────────
+
+_ENCRYPTION_SECRET = b"governgpt_databricks_key_v1_axa_2024"
+
+def _get_fernet() -> "Fernet":
+    if not CRYPTO_AVAILABLE:
+        raise RuntimeError(
+            "cryptography package not installed. Run: pip install cryptography"
+        )
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=b"governgpt_salt_v1",
+        iterations=100_000,
+    )
+    key = base64.urlsafe_b64encode(kdf.derive(_ENCRYPTION_SECRET))
+    return Fernet(key)
+
+
+def encrypt_pat(pat: str) -> str:
+    """Encrypt a PAT string for storage in SQLite."""
+    return _get_fernet().encrypt(pat.encode()).decode()
+
+
+def decrypt_pat(encrypted: str) -> str:
+    """Decrypt a stored PAT."""
+    return _get_fernet().decrypt(encrypted.encode()).decode()
+
+
+# ── Connection store (SQLite) ────────────────────────────────────
+
+def _ensure_connections_table() -> None:
+    with _get_conn() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS databricks_connections (
+                connection_id   TEXT PRIMARY KEY,
+                connection_name TEXT NOT NULL,
+                workspace_url   TEXT NOT NULL,
+                encrypted_pat   TEXT NOT NULL,
+                http_path       TEXT NOT NULL,
+                catalog         TEXT DEFAULT 'hive_metastore',
+                description     TEXT,
+                knowledge_set   TEXT,
+                status          TEXT DEFAULT 'active',
+                last_tested_at  TEXT,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+
+
+def save_connection(
+    connection_name: str,
+    workspace_url: str,
+    pat: str,
+    http_path: str,
+    catalog: str = "hive_metastore",
+    description: str = "",
+    knowledge_set: str = "",
+) -> str:
+    """
+    Encrypt and persist a Databricks connection.
+    Returns the new connection_id UUID.
+    """
+    _ensure_connections_table()
+    connection_id = str(uuid.uuid4())
+    now           = datetime.now().isoformat()
+    encrypted_pat = encrypt_pat(pat)
+
+    # Normalise workspace URL
+    workspace_url = workspace_url.rstrip("/")
+    if not workspace_url.startswith("https://"):
+        workspace_url = f"https://{workspace_url}"
+
+    with _get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO databricks_connections
+                (connection_id, connection_name, workspace_url, encrypted_pat,
+                 http_path, catalog, description, knowledge_set,
+                 status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+            """,
+            (connection_id, connection_name, workspace_url, encrypted_pat,
+             http_path, catalog, description, knowledge_set, now, now),
+        )
+        conn.commit()
+    return connection_id
+
+
+def get_connection(connection_id: str) -> Optional[dict]:
+    """Load a connection record (without decrypted PAT)."""
+    _ensure_connections_table()
+    rows = db_query(
+        "SELECT * FROM databricks_connections WHERE connection_id = ?",
+        (connection_id,),
+    )
+    return rows[0] if rows else None
+
+
+def list_connections(knowledge_set: Optional[str] = None) -> list[dict]:
+    """List all active connections, optionally filtered by knowledge_set."""
+    _ensure_connections_table()
+    if knowledge_set:
+        rows = db_query(
+            "SELECT connection_id, connection_name, workspace_url, http_path, "
+            "catalog, description, knowledge_set, status, last_tested_at, created_at "
+            "FROM databricks_connections WHERE status='active' AND knowledge_set=? "
+            "ORDER BY created_at DESC",
+            (knowledge_set,),
+        )
+    else:
+        rows = db_query(
+            "SELECT connection_id, connection_name, workspace_url, http_path, "
+            "catalog, description, knowledge_set, status, last_tested_at, created_at "
+            "FROM databricks_connections WHERE status='active' "
+            "ORDER BY created_at DESC",
+        )
+    return rows
+
+
+def delete_connection(connection_id: str) -> bool:
+    """Soft-delete a connection (sets status='deleted')."""
+    _ensure_connections_table()
+    with _get_conn() as conn:
+        cursor = conn.execute(
+            "UPDATE databricks_connections SET status='deleted', updated_at=? "
+            "WHERE connection_id=?",
+            (datetime.now().isoformat(), connection_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def update_last_tested(connection_id: str) -> None:
+    with _get_conn() as conn:
+        conn.execute(
+            "UPDATE databricks_connections SET last_tested_at=?, updated_at=? "
+            "WHERE connection_id=?",
+            (datetime.now().isoformat(), datetime.now().isoformat(), connection_id),
+        )
+        conn.commit()
+
+
+# ── Databricks SQL client ────────────────────────────────────────
+
+class DatabricksClient:
+    """
+    Thin wrapper around databricks-sql-connector.
+    Instantiated per request — connection is opened lazily.
+    """
+
+    def __init__(self, connection_id: str):
+        record = get_connection(connection_id)
+        if not record:
+            raise ValueError(f"Connection '{connection_id}' not found.")
+
+        full_record = db_query(
+            "SELECT * FROM databricks_connections WHERE connection_id=?",
+            (connection_id,),
+        )
+        if not full_record:
+            raise ValueError(f"Connection '{connection_id}' not found.")
+
+        rec = full_record[0]
+        self.connection_id   = connection_id
+        self.workspace_url   = rec["workspace_url"]
+        self.http_path       = rec["http_path"]
+        self.pat             = decrypt_pat(rec["encrypted_pat"])
+        self.default_catalog = rec.get("catalog", "hive_metastore")
+        self._conn           = None
+
+    def _get_sql_conn(self):
+        if not DATABRICKS_SQL_AVAILABLE:
+            raise RuntimeError(
+                "databricks-sql-connector not installed. "
+                "Run: pip install databricks-sql-connector"
+            )
+        if self._conn is None:
+            server_hostname = (
+                self.workspace_url
+                .replace("https://", "")
+                .replace("http://", "")
+                .rstrip("/")
+            )
+            self._conn = databricks_sql.connect(
+                server_hostname=server_hostname,
+                http_path=self.http_path,
+                access_token=self.pat,
+            )
+        return self._conn
+
+    def execute_query(self, sql: str, limit: int = 10_000) -> list[dict]:
+        """
+        Execute a SQL query and return results as a list of dicts.
+        Automatically applies LIMIT if not already present.
+        """
+        sql_stripped = sql.strip().rstrip(";")
+        if "limit" not in sql_stripped.lower():
+            sql_stripped = f"{sql_stripped} LIMIT {limit}"
+
+        conn   = self._get_sql_conn()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(sql_stripped)
+            cols = [desc[0] for desc in cursor.description]
+            rows = cursor.fetchall()
+            return [dict(zip(cols, row)) for row in rows]
+        finally:
+            cursor.close()
+
+    def execute_scalar(self, sql: str):
+        """Execute and return the first value of the first row."""
+        rows = self.execute_query(sql, limit=1)
+        if rows:
+            return list(rows[0].values())[0]
+        return None
+
+    def test_connection(self) -> dict:
+        """Validate connectivity and return workspace info."""
+        try:
+            result = self.execute_scalar("SELECT current_user()")
+            update_last_tested(self.connection_id)
+            return {
+                "success"      : True,
+                "current_user" : result,
+                "workspace_url": self.workspace_url,
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def rest_get(self, path: str, params: dict = None) -> dict:
+        """Make an authenticated REST API call to the Databricks workspace."""
+        if not REQUESTS_AVAILABLE:
+            raise RuntimeError("requests package not installed.")
+        url     = f"{self.workspace_url}/api/2.0/{path.lstrip('/')}"
+        headers = {
+            "Authorization": f"Bearer {self.pat}",
+            "Content-Type" : "application/json",
+        }
+        resp = _requests.get(url, headers=headers, params=params, verify=True, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    def close(self):
+        if self._conn:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
