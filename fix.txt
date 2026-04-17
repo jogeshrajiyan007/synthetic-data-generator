@@ -1,491 +1,254 @@
 'use client'
-import { create } from 'zustand'
-import { persist, createJSONStorage } from 'zustand/middleware'
-import type { KnowledgeSet, SourceFile, ChatMessage, DatabricksConnection, DatabricksIngestItem } from '@/types'
-import { slugify } from '@/lib/utils'
+import { useState, useCallback } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+import { ChevronLeft, Database, RefreshCw, FileText, Plug } from 'lucide-react'
+import { UploadDropzone } from './UploadDropzone'
+import { FileItem } from './FileItem'
+import { SourceProgressBar, MAX_SOURCES } from './SourceProgressBar'
+import { DatabricksPanel } from '@/components/databricks/DatabricksPanel'
+import type { KnowledgeSet, SourceFile } from '@/types'
+import { api } from '@/lib/api'
+import { cn, formatDate } from '@/lib/utils'
 
-export interface SessionTokenUsage {
-  prompt_tokens: number
-  completion_tokens: number
-  total_tokens: number
-  turn_count: number
+type PanelTab = 'files' | 'databricks'
+
+interface SourcePanelProps {
+  session: KnowledgeSet
+  files: SourceFile[]
+  onBack: () => void
+  onAddFiles: (files: SourceFile[]) => void
+  onUpdateFile: (id: string, updates: Partial<SourceFile>) => void
+  onRemoveFile: (id: string) => void
 }
 
-const DEFAULT_TOKEN_USAGE: SessionTokenUsage = {
-  prompt_tokens: 0,
-  completion_tokens: 0,
-  total_tokens: 0,
-  turn_count: 0,
-}
+export function SourcePanel({
+  session, files, onBack, onAddFiles, onUpdateFile, onRemoveFile
+}: SourcePanelProps) {
+  const [activeTab, setActiveTab]   = useState<PanelTab>('files')
+  const [isIngesting, setIsIngesting] = useState(false)
+  const atLimit = files.length >= MAX_SOURCES
 
-interface SessionState {
-  sessions: KnowledgeSet[]
-  activeSessionId: string | null
-  files: Record<string, SourceFile[]>
-  chats: Record<string, ChatMessage[]>
-  tokenUsage: Record<string, SessionTokenUsage>
+  const handleFiles = useCallback(async (rawFiles: File[]) => {
+    const allowed = rawFiles.slice(0, MAX_SOURCES - files.length)
+    if (!allowed.length) return
 
-  // ── Databricks ────────────────────────────────────────────────
-  // Connections are global (not per-session) — one connection can
-  // be used across multiple knowledge sets.
-  databricksConnections: DatabricksConnection[]
-  // Ingested tables are tracked per session for UI status display
-  databricksIngestItems: Record<string, DatabricksIngestItem[]>
+    const newEntries: SourceFile[] = allowed.map(f => ({
+      id       : Math.random().toString(36).slice(2),
+      name     : f.name,
+      size     : f.size,
+      type     : f.type,
+      extension: f.name.split('.').pop() ?? '',
+      status   : 'uploading' as const,
+      progress : 0,
+    }))
+    onAddFiles(newEntries)
 
-  // ── Session actions ───────────────────────────────────────────
-  createSession: (name: string, summary: string) => KnowledgeSet
-  updateSession: (id: string, updates: Partial<KnowledgeSet>) => void
-  deleteSession: (id: string) => void
-  setActiveSession: (id: string | null) => void
-  getActiveSession: () => KnowledgeSet | null
+    const ticks = newEntries.map((entry) => {
+      let p = 0
+      return setInterval(() => {
+        p = Math.min(p + Math.random() * 20 + 10, 90)
+        onUpdateFile(entry.id, { progress: Math.round(p) })
+      }, 250)
+    })
 
-  // ── File actions ──────────────────────────────────────────────
-  addFiles: (sessionId: string, files: SourceFile[]) => void
-  updateFile: (sessionId: string, fileId: string, updates: Partial<SourceFile>) => void
-  removeFile: (sessionId: string, fileId: string) => void
-  getSessionFiles: (sessionId: string) => SourceFile[]
-
-  // ── Chat actions ──────────────────────────────────────────────
-  addMessage: (sessionId: string, msg: ChatMessage) => void
-  updateMessage: (sessionId: string, msgId: string, updates: Partial<ChatMessage>) => void
-  clearChat: (sessionId: string) => void
-  getSessionChat: (sessionId: string) => ChatMessage[]
-
-  // ── Token actions ─────────────────────────────────────────────
-  addTokenUsage: (sessionId: string, usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number }) => void
-  getSessionTokenUsage: (sessionId: string) => SessionTokenUsage
-  resetTokenUsage: (sessionId: string) => void
-
-  // ── Databricks connection actions ─────────────────────────────
-  setDatabricksConnections: (connections: DatabricksConnection[]) => void
-  addDatabricksConnection: (conn: DatabricksConnection) => void
-  removeDatabricksConnection: (connection_id: string) => void
-  getDatabricksConnections: () => DatabricksConnection[]
-
-  // ── Databricks ingest item actions ────────────────────────────
-  addDatabricksIngestItem: (sessionId: string, item: DatabricksIngestItem) => void
-  updateDatabricksIngestItem: (sessionId: string, itemId: string, updates: Partial<DatabricksIngestItem>) => void
-  removeDatabricksIngestItem: (sessionId: string, itemId: string) => void
-  getSessionDatabricksItems: (sessionId: string) => DatabricksIngestItem[]
-}
-
-export const useStore = create<SessionState>()(
-  persist(
-    (set, get) => ({
-      sessions: [],
-      activeSessionId: null,
-      files: {},
-      chats: {},
-      tokenUsage: {},
-      databricksConnections: [],
-      databricksIngestItems: {},
-
-      // ── Sessions ──────────────────────────────────────────────
-      createSession: (name, summary) => {
-        const id = slugify(name) + '_' + Date.now().toString(36)
-        const session: KnowledgeSet = {
-          id,
-          project_name: name,
-          summary,
-          created_at: new Date().toISOString(),
-          file_count: 0,
-          vector_count: 0,
-          collection_name: `ks_${id}`,
+    try {
+      newEntries.forEach(e => onUpdateFile(e.id, { status: 'processing', progress: 95 }))
+      ticks.forEach(clearInterval)
+      const result = await api.uploadFiles(session.id, allowed)
+      result.file_details?.forEach((detail: { file: string; status: string; docs: number; error?: string }, i: number) => {
+        const entry = newEntries[i]
+        if (!entry) return
+        if (detail.status === 'ok') {
+          onUpdateFile(entry.id, { status: 'ready', progress: 100, chunk_count: detail.docs })
+        } else {
+          onUpdateFile(entry.id, { status: 'error', error: detail.error ?? 'Failed' })
         }
-        set(s => ({ sessions: [session, ...s.sessions] }))
-        return session
-      },
-
-      updateSession: (id, updates) =>
-        set(s => ({
-          sessions: s.sessions.map(sess =>
-            sess.id === id ? { ...sess, ...updates } : sess
-          ),
-        })),
-
-      deleteSession: (id) =>
-        set(s => {
-          const { [id]: _f, ...files }                    = s.files
-          const { [id]: _c, ...chats }                    = s.chats
-          const { [id]: _t, ...tokenUsage }               = s.tokenUsage
-          const { [id]: _d, ...databricksIngestItems }    = s.databricksIngestItems
-          return {
-            sessions: s.sessions.filter(sess => sess.id !== id),
-            activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
-            files, chats, tokenUsage, databricksIngestItems,
-          }
-        }),
-
-      setActiveSession: (id) => set({ activeSessionId: id }),
-
-      getActiveSession: () => {
-        const { sessions, activeSessionId } = get()
-        return sessions.find(s => s.id === activeSessionId) ?? null
-      },
-
-      // ── Files ─────────────────────────────────────────────────
-      addFiles: (sessionId, newFiles) =>
-        set(s => ({
-          files: { ...s.files, [sessionId]: [...(s.files[sessionId] ?? []), ...newFiles] },
-          sessions: s.sessions.map(sess =>
-            sess.id === sessionId
-              ? { ...sess, file_count: (s.files[sessionId]?.length ?? 0) + newFiles.length }
-              : sess
-          ),
-        })),
-
-      updateFile: (sessionId, fileId, updates) =>
-        set(s => ({
-          files: {
-            ...s.files,
-            [sessionId]: (s.files[sessionId] ?? []).map(f =>
-              f.id === fileId ? { ...f, ...updates } : f
-            ),
-          },
-        })),
-
-      removeFile: (sessionId, fileId) =>
-        set(s => {
-          const updated = (s.files[sessionId] ?? []).filter(f => f.id !== fileId)
-          return {
-            files: { ...s.files, [sessionId]: updated },
-            sessions: s.sessions.map(sess =>
-              sess.id === sessionId ? { ...sess, file_count: updated.length } : sess
-            ),
-          }
-        }),
-
-      getSessionFiles: (sessionId) => get().files[sessionId] ?? [],
-
-      // ── Chat ──────────────────────────────────────────────────
-      addMessage: (sessionId, msg) =>
-        set(s => ({
-          chats: { ...s.chats, [sessionId]: [...(s.chats[sessionId] ?? []), msg] },
-        })),
-
-      updateMessage: (sessionId, msgId, updates) =>
-        set(s => ({
-          chats: {
-            ...s.chats,
-            [sessionId]: (s.chats[sessionId] ?? []).map(m =>
-              m.id === msgId ? { ...m, ...updates } : m
-            ),
-          },
-        })),
-
-      clearChat: (sessionId) =>
-        set(s => ({ chats: { ...s.chats, [sessionId]: [] } })),
-
-      getSessionChat: (sessionId) => get().chats[sessionId] ?? [],
-
-      // ── Tokens ────────────────────────────────────────────────
-      addTokenUsage: (sessionId, usage) =>
-        set(s => {
-          const prev = s.tokenUsage[sessionId] ?? { ...DEFAULT_TOKEN_USAGE }
-          return {
-            tokenUsage: {
-              ...s.tokenUsage,
-              [sessionId]: {
-                prompt_tokens    : prev.prompt_tokens     + (usage.prompt_tokens     ?? 0),
-                completion_tokens: prev.completion_tokens + (usage.completion_tokens ?? 0),
-                total_tokens     : prev.total_tokens      + (usage.total_tokens      ?? 0),
-                turn_count       : prev.turn_count        + 1,
-              },
-            },
-          }
-        }),
-
-      getSessionTokenUsage: (sessionId) =>
-        get().tokenUsage[sessionId] ?? { ...DEFAULT_TOKEN_USAGE },
-
-      resetTokenUsage: (sessionId) =>
-        set(s => ({
-          tokenUsage: { ...s.tokenUsage, [sessionId]: { ...DEFAULT_TOKEN_USAGE } },
-        })),
-
-      // ── Databricks connections ─────────────────────────────────
-      // Loaded from backend on workspace open — not persisted locally
-      // (connections live in encrypted SQLite on the server)
-      setDatabricksConnections: (connections) =>
-        set({ databricksConnections: connections }),
-
-      addDatabricksConnection: (conn) =>
-        set(s => ({
-          databricksConnections: [conn, ...s.databricksConnections.filter(c => c.connection_id !== conn.connection_id)],
-        })),
-
-      removeDatabricksConnection: (connection_id) =>
-        set(s => ({
-          databricksConnections: s.databricksConnections.filter(c => c.connection_id !== connection_id),
-        })),
-
-      getDatabricksConnections: () => get().databricksConnections,
-
-      // ── Databricks ingest items ────────────────────────────────
-      addDatabricksIngestItem: (sessionId, item) =>
-        set(s => ({
-          databricksIngestItems: {
-            ...s.databricksIngestItems,
-            [sessionId]: [...(s.databricksIngestItems[sessionId] ?? []), item],
-          },
-        })),
-
-      updateDatabricksIngestItem: (sessionId, itemId, updates) =>
-        set(s => ({
-          databricksIngestItems: {
-            ...s.databricksIngestItems,
-            [sessionId]: (s.databricksIngestItems[sessionId] ?? []).map(item =>
-              item.id === itemId ? { ...item, ...updates } : item
-            ),
-          },
-        })),
-
-      removeDatabricksIngestItem: (sessionId, itemId) =>
-        set(s => ({
-          databricksIngestItems: {
-            ...s.databricksIngestItems,
-            [sessionId]: (s.databricksIngestItems[sessionId] ?? []).filter(item => item.id !== itemId),
-          },
-        })),
-
-      getSessionDatabricksItems: (sessionId) =>
-        get().databricksIngestItems[sessionId] ?? [],
-    }),
-    {
-      name: 'governgpt-store',
-      version: 3,   // bumped — new databricks fields
-      storage: createJSONStorage(() => {
-        if (typeof window === 'undefined') {
-          return { getItem: () => null, setItem: () => {}, removeItem: () => {} }
-        }
-        return localStorage
-      }),
-      partialize: (state) => ({
-        sessions              : state.sessions,
-        files                 : state.files,
-        chats                 : state.chats,
-        tokenUsage            : state.tokenUsage,
-        databricksIngestItems : state.databricksIngestItems,
-        // databricksConnections NOT persisted — loaded fresh from backend
-        // activeSessionId NOT persisted — prevents SSR hydration mismatch
-      }),
-      skipHydration: true,
+      })
+    } catch (err: unknown) {
+      ticks.forEach(clearInterval)
+      const msg = err instanceof Error ? err.message : 'Upload failed'
+      newEntries.forEach(e => onUpdateFile(e.id, { status: 'error', error: msg }))
     }
+  }, [files.length, session.id, onAddFiles, onUpdateFile])
+
+  const handleReingest = async () => {
+    setIsIngesting(true)
+    try { await api.ingestLoadingZone(session.id, true) }
+    catch (e) { console.error(e) }
+    finally { setIsIngesting(false) }
+  }
+
+  const readyCount = files.filter(f => f.status === 'ready').length
+
+  return (
+    <div className="h-full flex flex-col bg-white border-r border-ink-100">
+
+      {/* ── Header ──────────────────────────────────────────────── */}
+      <div className="flex-shrink-0 px-4 py-3 border-b border-ink-100 bg-ink-50">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onBack}
+            className="p-1.5 rounded-lg hover:bg-ink-100 text-ink-400 hover:text-ink-700 transition-colors"
+            title="Back to projects"
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1.5">
+              <Database className="w-3.5 h-3.5 text-axa-800 flex-shrink-0" />
+              <span className="text-[10px] font-semibold text-axa-800 uppercase tracking-widest">Sources</span>
+            </div>
+            <p className="text-sm font-semibold text-ink-800 truncate mt-0.5 font-display">
+              {session.project_name}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center justify-between mt-1.5">
+          <span className="text-[10px] text-ink-400">Created {formatDate(session.created_at)}</span>
+          {readyCount > 0 && (
+            <span className="text-[10px] text-emerald-600 font-semibold">{readyCount} indexed</span>
+          )}
+        </div>
+      </div>
+
+      {/* ── Tab switcher ─────────────────────────────────────────── */}
+      <div className="flex-shrink-0 flex border-b border-ink-100 bg-white">
+        <TabButton
+          active={activeTab === 'files'}
+          onClick={() => setActiveTab('files')}
+          icon={<FileText className="w-3.5 h-3.5" />}
+          label="Files"
+          badge={files.length > 0 ? files.length : undefined}
+        />
+        <TabButton
+          active={activeTab === 'databricks'}
+          onClick={() => setActiveTab('databricks')}
+          icon={<Plug className="w-3.5 h-3.5" />}
+          label="Databricks"
+        />
+      </div>
+
+      {/* ── Tab content ──────────────────────────────────────────── */}
+      <div className="flex-1 overflow-hidden flex flex-col">
+        <AnimatePresence mode="wait">
+
+          {/* Files tab */}
+          {activeTab === 'files' && (
+            <motion.div
+              key="files"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.15 }}
+              className="flex-1 overflow-hidden flex flex-col"
+            >
+              {/* Progress */}
+              <div className="flex-shrink-0 pt-3">
+                <SourceProgressBar count={files.length} />
+              </div>
+
+              {/* Dropzone */}
+              <div className="flex-shrink-0">
+                <UploadDropzone onFiles={handleFiles} disabled={atLimit} maxFiles={MAX_SOURCES} />
+              </div>
+
+              {/* File list */}
+              <div className="flex-1 overflow-y-auto">
+                <AnimatePresence initial={false}>
+                  {files.length === 0 ? (
+                    <motion.div
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      className="flex flex-col items-center justify-center py-10 text-center px-4"
+                    >
+                      <div className="w-10 h-10 rounded-xl bg-axa-50 border border-axa-100 flex items-center justify-center mb-3">
+                        <Database className="w-5 h-5 text-axa-200" />
+                      </div>
+                      <p className="text-xs text-ink-400 leading-relaxed">
+                        No files yet. Upload documents to build your knowledge set.
+                      </p>
+                    </motion.div>
+                  ) : (
+                    <div className="py-1">
+                      {files.map((file, i) => (
+                        <FileItem key={file.id} file={file} index={i} onRemove={onRemoveFile} />
+                      ))}
+                    </div>
+                  )}
+                </AnimatePresence>
+              </div>
+
+              {/* Footer */}
+              {files.length > 0 && (
+                <div className="flex-shrink-0 p-3 border-t border-ink-100">
+                  <button
+                    onClick={handleReingest}
+                    disabled={isIngesting}
+                    className={cn(
+                      'w-full flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-semibold',
+                      'bg-axa-50 border border-axa-100 text-axa-800',
+                      'hover:bg-axa-100 transition-all',
+                      'disabled:opacity-50 disabled:cursor-not-allowed'
+                    )}
+                  >
+                    <RefreshCw className={cn('w-3.5 h-3.5', isIngesting && 'animate-spin')} />
+                    {isIngesting ? 'Re-indexing…' : 'Re-index All'}
+                  </button>
+                </div>
+              )}
+            </motion.div>
+          )}
+
+          {/* Databricks tab */}
+          {activeTab === 'databricks' && (
+            <motion.div
+              key="databricks"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.15 }}
+              className="flex-1 overflow-hidden"
+            >
+              <DatabricksPanel session={session} />
+            </motion.div>
+          )}
+
+        </AnimatePresence>
+      </div>
+    </div>
   )
-)
-
-
-interface SessionState {
-  // ── Knowledge Sets ─────────────────────────────────────────────
-  sessions: KnowledgeSet[]
-  activeSessionId: string | null
-
-  // ── Files per session ──────────────────────────────────────────
-  files: Record<string, SourceFile[]>
-
-  // ── Chat per session ───────────────────────────────────────────
-  chats: Record<string, ChatMessage[]>
-
-  // ── Token usage per session ────────────────────────────────────
-  // Accumulated totals — updated after every successful LLM response
-  tokenUsage: Record<string, SessionTokenUsage>
-
-  // ── Actions ────────────────────────────────────────────────────
-  createSession: (name: string, summary: string) => KnowledgeSet
-  updateSession: (id: string, updates: Partial<KnowledgeSet>) => void
-  deleteSession: (id: string) => void
-  setActiveSession: (id: string | null) => void
-  getActiveSession: () => KnowledgeSet | null
-
-  addFiles: (sessionId: string, files: SourceFile[]) => void
-  updateFile: (sessionId: string, fileId: string, updates: Partial<SourceFile>) => void
-  removeFile: (sessionId: string, fileId: string) => void
-  getSessionFiles: (sessionId: string) => SourceFile[]
-
-  addMessage: (sessionId: string, msg: ChatMessage) => void
-  updateMessage: (sessionId: string, msgId: string, updates: Partial<ChatMessage>) => void
-  clearChat: (sessionId: string) => void
-  getSessionChat: (sessionId: string) => ChatMessage[]
-
-  // Accumulate token usage from a response
-  addTokenUsage: (sessionId: string, usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number }) => void
-  getSessionTokenUsage: (sessionId: string) => SessionTokenUsage
-  resetTokenUsage: (sessionId: string) => void
 }
 
-const DEFAULT_TOKEN_USAGE: SessionTokenUsage = {
-  prompt_tokens: 0,
-  completion_tokens: 0,
-  total_tokens: 0,
-  turn_count: 0,
-}
-
-export const useStore = create<SessionState>()(
-  persist(
-    (set, get) => ({
-      sessions: [],
-      activeSessionId: null,
-      files: {},
-      chats: {},
-      tokenUsage: {},
-
-      // ── Sessions ─────────────────────────────────────────────────
-      createSession: (name, summary) => {
-        const id = slugify(name) + '_' + Date.now().toString(36)
-        const session: KnowledgeSet = {
-          id,
-          project_name: name,
-          summary,
-          created_at: new Date().toISOString(),
-          file_count: 0,
-          vector_count: 0,
-          collection_name: `ks_${id}`,
-        }
-        set(s => ({ sessions: [session, ...s.sessions] }))
-        return session
-      },
-
-      updateSession: (id, updates) =>
-        set(s => ({
-          sessions: s.sessions.map(sess =>
-            sess.id === id ? { ...sess, ...updates } : sess
-          ),
-        })),
-
-      deleteSession: (id) =>
-        set(s => {
-          const { [id]: _f, ...files }      = s.files
-          const { [id]: _c, ...chats }      = s.chats
-          const { [id]: _t, ...tokenUsage } = s.tokenUsage
-          return {
-            sessions: s.sessions.filter(sess => sess.id !== id),
-            activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
-            files,
-            chats,
-            tokenUsage,
-          }
-        }),
-
-      setActiveSession: (id) => set({ activeSessionId: id }),
-
-      getActiveSession: () => {
-        const { sessions, activeSessionId } = get()
-        return sessions.find(s => s.id === activeSessionId) ?? null
-      },
-
-      // ── Files ─────────────────────────────────────────────────────
-      addFiles: (sessionId, newFiles) =>
-        set(s => ({
-          files: {
-            ...s.files,
-            [sessionId]: [...(s.files[sessionId] ?? []), ...newFiles],
-          },
-          sessions: s.sessions.map(sess =>
-            sess.id === sessionId
-              ? { ...sess, file_count: (s.files[sessionId]?.length ?? 0) + newFiles.length }
-              : sess
-          ),
-        })),
-
-      updateFile: (sessionId, fileId, updates) =>
-        set(s => ({
-          files: {
-            ...s.files,
-            [sessionId]: (s.files[sessionId] ?? []).map(f =>
-              f.id === fileId ? { ...f, ...updates } : f
-            ),
-          },
-        })),
-
-      removeFile: (sessionId, fileId) =>
-        set(s => {
-          const updated = (s.files[sessionId] ?? []).filter(f => f.id !== fileId)
-          return {
-            files: { ...s.files, [sessionId]: updated },
-            sessions: s.sessions.map(sess =>
-              sess.id === sessionId ? { ...sess, file_count: updated.length } : sess
-            ),
-          }
-        }),
-
-      getSessionFiles: (sessionId) => get().files[sessionId] ?? [],
-
-      // ── Chat ──────────────────────────────────────────────────────
-      addMessage: (sessionId, msg) =>
-        set(s => ({
-          chats: {
-            ...s.chats,
-            [sessionId]: [...(s.chats[sessionId] ?? []), msg],
-          },
-        })),
-
-      updateMessage: (sessionId, msgId, updates) =>
-        set(s => ({
-          chats: {
-            ...s.chats,
-            [sessionId]: (s.chats[sessionId] ?? []).map(m =>
-              m.id === msgId ? { ...m, ...updates } : m
-            ),
-          },
-        })),
-
-      clearChat: (sessionId) =>
-        set(s => ({ chats: { ...s.chats, [sessionId]: [] } })),
-
-      getSessionChat: (sessionId) => get().chats[sessionId] ?? [],
-
-      // ── Token usage ───────────────────────────────────────────────
-      addTokenUsage: (sessionId, usage) =>
-        set(s => {
-          const prev = s.tokenUsage[sessionId] ?? { ...DEFAULT_TOKEN_USAGE }
-          return {
-            tokenUsage: {
-              ...s.tokenUsage,
-              [sessionId]: {
-                prompt_tokens    : prev.prompt_tokens     + (usage.prompt_tokens     ?? 0),
-                completion_tokens: prev.completion_tokens + (usage.completion_tokens ?? 0),
-                total_tokens     : prev.total_tokens      + (usage.total_tokens      ?? 0),
-                turn_count       : prev.turn_count        + 1,
-              },
-            },
-          }
-        }),
-
-      getSessionTokenUsage: (sessionId) =>
-        get().tokenUsage[sessionId] ?? { ...DEFAULT_TOKEN_USAGE },
-
-      resetTokenUsage: (sessionId) =>
-        set(s => ({
-          tokenUsage: {
-            ...s.tokenUsage,
-            [sessionId]: { ...DEFAULT_TOKEN_USAGE },
-          },
-        })),
-    }),
-    {
-      name: 'governgpt-store',
-      version: 2,                    // bumped — new tokenUsage field
-      storage: createJSONStorage(() => {
-        if (typeof window === 'undefined') {
-          return {
-            getItem: () => null,
-            setItem: () => {},
-            removeItem: () => {},
-          }
-        }
-        return localStorage
-      }),
-      // ── CRITICAL: never persist activeSessionId ──────────────────
-      // Server renders with null → SessionGrid.
-      // Persisting it causes SSR/client tree mismatch → blank page.
-      partialize: (state) => ({
-        sessions  : state.sessions,
-        files     : state.files,
-        chats     : state.chats,
-        tokenUsage: state.tokenUsage,
-        // activeSessionId intentionally excluded
-      }),
-      skipHydration: true,
-    }
+// ── Tab button ────────────────────────────────────────────────────
+function TabButton({
+  active, onClick, icon, label, badge
+}: {
+  active: boolean
+  onClick: () => void
+  icon: React.ReactNode
+  label: string
+  badge?: number
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        'flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-semibold transition-all border-b-2',
+        active
+          ? 'border-axa-800 text-axa-800 bg-white'
+          : 'border-transparent text-ink-400 hover:text-ink-700 hover:bg-ink-50'
+      )}
+    >
+      {icon}
+      <span>{label}</span>
+      {badge !== undefined && (
+        <span className={cn(
+          'text-[9px] font-bold px-1.5 py-0.5 rounded-full',
+          active ? 'bg-axa-50 text-axa-800 border border-axa-100' : 'bg-ink-100 text-ink-500'
+        )}>
+          {badge}
+        </span>
+      )}
+    </button>
   )
-)
+}
