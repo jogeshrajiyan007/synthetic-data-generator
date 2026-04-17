@@ -1,246 +1,276 @@
 'use client'
-import { useState, useEffect } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
-import { Plus, Plug, Trash2, CheckCircle, RefreshCw, Loader2, ServerCrash } from 'lucide-react'
-import { ConnectModal } from './ConnectModal'
-import { CatalogBrowser } from './CatalogBrowser'
-import { TableIngestCard } from './TableIngestCard'
-import { api } from '@/lib/api'
-import { useStore } from '@/store'
-import { cn } from '@/lib/utils'
-import type { KnowledgeSet, DatabricksConnection, DatabricksIngestItem } from '@/types'
+import { create } from 'zustand'
+import { persist, createJSONStorage } from 'zustand/middleware'
+import type { KnowledgeSet, SourceFile, ChatMessage, DatabricksConnection, DatabricksIngestItem } from '@/types'
+import { slugify } from '@/lib/utils'
 
-interface DatabricksPanelProps {
-  session: KnowledgeSet
+export interface SessionTokenUsage {
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  turn_count: number
 }
 
-export function DatabricksPanel({ session }: DatabricksPanelProps) {
-  const {
-    getDatabricksConnections,
-    setDatabricksConnections,
-    addDatabricksConnection,
-    removeDatabricksConnection,
-    getSessionDatabricksItems,
-    addDatabricksIngestItem,
-    updateDatabricksIngestItem,
-    removeDatabricksIngestItem,
-  } = useStore()
+const DEFAULT_TOKEN_USAGE: SessionTokenUsage = {
+  prompt_tokens: 0,
+  completion_tokens: 0,
+  total_tokens: 0,
+  turn_count: 0,
+}
 
-  const connections  = getDatabricksConnections()
-  const ingestItems  = getSessionDatabricksItems(session.id)
+interface SessionState {
+  sessions: KnowledgeSet[]
+  activeSessionId: string | null
+  files: Record<string, SourceFile[]>
+  chats: Record<string, ChatMessage[]>
+  tokenUsage: Record<string, SessionTokenUsage>
 
-  const [showModal, setShowModal]     = useState(false)
-  const [activeConn, setActiveConn]   = useState<string | null>(null)
-  const [loadingConns, setLoadingConns] = useState(false)
-  const [testing, setTesting]         = useState<string | null>(null)
+  // ── Databricks ────────────────────────────────────────────────
+  // Connections are global (not per-session) — one connection can
+  // be used across multiple knowledge sets.
+  databricksConnections: DatabricksConnection[]
+  // Ingested tables are tracked per session for UI status display
+  databricksIngestItems: Record<string, DatabricksIngestItem[]>
 
-  // Load saved connections from backend on mount
-  useEffect(() => {
-    loadConnections()
-  }, [session.id])
+  // ── Session actions ───────────────────────────────────────────
+  createSession: (name: string, summary: string) => KnowledgeSet
+  updateSession: (id: string, updates: Partial<KnowledgeSet>) => void
+  deleteSession: (id: string) => void
+  setActiveSession: (id: string | null) => void
+  getActiveSession: () => KnowledgeSet | null
 
-  const loadConnections = async () => {
-    setLoadingConns(true)
-    try {
-      const list = await api.databricks.listConnections(session.id)
-      setDatabricksConnections(list)
-      // Auto-expand first connection if available
-      if (list.length > 0 && !activeConn) {
-        setActiveConn(list[0].connection_id)
-      }
-    } catch (_) {
-      // Non-fatal
-    } finally {
-      setLoadingConns(false)
+  // ── File actions ──────────────────────────────────────────────
+  addFiles: (sessionId: string, files: SourceFile[]) => void
+  updateFile: (sessionId: string, fileId: string, updates: Partial<SourceFile>) => void
+  removeFile: (sessionId: string, fileId: string) => void
+  getSessionFiles: (sessionId: string) => SourceFile[]
+
+  // ── Chat actions ──────────────────────────────────────────────
+  addMessage: (sessionId: string, msg: ChatMessage) => void
+  updateMessage: (sessionId: string, msgId: string, updates: Partial<ChatMessage>) => void
+  clearChat: (sessionId: string) => void
+  getSessionChat: (sessionId: string) => ChatMessage[]
+
+  // ── Token actions ─────────────────────────────────────────────
+  addTokenUsage: (sessionId: string, usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number }) => void
+  getSessionTokenUsage: (sessionId: string) => SessionTokenUsage
+  resetTokenUsage: (sessionId: string) => void
+
+  // ── Databricks connection actions ─────────────────────────────
+  setDatabricksConnections: (connections: DatabricksConnection[]) => void
+  addDatabricksConnection: (conn: DatabricksConnection) => void
+  removeDatabricksConnection: (connection_id: string) => void
+  getDatabricksConnections: () => DatabricksConnection[]
+
+  // ── Databricks ingest item actions ────────────────────────────
+  addDatabricksIngestItem: (sessionId: string, item: DatabricksIngestItem) => void
+  updateDatabricksIngestItem: (sessionId: string, itemId: string, updates: Partial<DatabricksIngestItem>) => void
+  removeDatabricksIngestItem: (sessionId: string, itemId: string) => void
+  getSessionDatabricksItems: (sessionId: string) => DatabricksIngestItem[]
+}
+
+export const useStore = create<SessionState>()(
+  persist(
+    (set, get) => ({
+      sessions: [],
+      activeSessionId: null,
+      files: {},
+      chats: {},
+      tokenUsage: {},
+      databricksConnections: [],
+      databricksIngestItems: {},
+
+      // ── Sessions ──────────────────────────────────────────────
+      createSession: (name, summary) => {
+        const id = slugify(name) + '_' + Date.now().toString(36)
+        const session: KnowledgeSet = {
+          id,
+          project_name: name,
+          summary,
+          created_at: new Date().toISOString(),
+          file_count: 0,
+          vector_count: 0,
+          collection_name: `ks_${id}`,
+        }
+        set(s => ({ sessions: [session, ...s.sessions] }))
+        return session
+      },
+
+      updateSession: (id, updates) =>
+        set(s => ({
+          sessions: s.sessions.map(sess =>
+            sess.id === id ? { ...sess, ...updates } : sess
+          ),
+        })),
+
+      deleteSession: (id) =>
+        set(s => {
+          const { [id]: _f, ...files }                    = s.files
+          const { [id]: _c, ...chats }                    = s.chats
+          const { [id]: _t, ...tokenUsage }               = s.tokenUsage
+          const { [id]: _d, ...databricksIngestItems }    = s.databricksIngestItems
+          return {
+            sessions: s.sessions.filter(sess => sess.id !== id),
+            activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
+            files, chats, tokenUsage, databricksIngestItems,
+          }
+        }),
+
+      setActiveSession: (id) => set({ activeSessionId: id }),
+
+      getActiveSession: () => {
+        const { sessions, activeSessionId } = get()
+        return sessions.find(s => s.id === activeSessionId) ?? null
+      },
+
+      // ── Files ─────────────────────────────────────────────────
+      addFiles: (sessionId, newFiles) =>
+        set(s => ({
+          files: { ...s.files, [sessionId]: [...(s.files[sessionId] ?? []), ...newFiles] },
+          sessions: s.sessions.map(sess =>
+            sess.id === sessionId
+              ? { ...sess, file_count: (s.files[sessionId]?.length ?? 0) + newFiles.length }
+              : sess
+          ),
+        })),
+
+      updateFile: (sessionId, fileId, updates) =>
+        set(s => ({
+          files: {
+            ...s.files,
+            [sessionId]: (s.files[sessionId] ?? []).map(f =>
+              f.id === fileId ? { ...f, ...updates } : f
+            ),
+          },
+        })),
+
+      removeFile: (sessionId, fileId) =>
+        set(s => {
+          const updated = (s.files[sessionId] ?? []).filter(f => f.id !== fileId)
+          return {
+            files: { ...s.files, [sessionId]: updated },
+            sessions: s.sessions.map(sess =>
+              sess.id === sessionId ? { ...sess, file_count: updated.length } : sess
+            ),
+          }
+        }),
+
+      getSessionFiles: (sessionId) => get().files[sessionId] ?? [],
+
+      // ── Chat ──────────────────────────────────────────────────
+      addMessage: (sessionId, msg) =>
+        set(s => ({
+          chats: { ...s.chats, [sessionId]: [...(s.chats[sessionId] ?? []), msg] },
+        })),
+
+      updateMessage: (sessionId, msgId, updates) =>
+        set(s => ({
+          chats: {
+            ...s.chats,
+            [sessionId]: (s.chats[sessionId] ?? []).map(m =>
+              m.id === msgId ? { ...m, ...updates } : m
+            ),
+          },
+        })),
+
+      clearChat: (sessionId) =>
+        set(s => ({ chats: { ...s.chats, [sessionId]: [] } })),
+
+      getSessionChat: (sessionId) => get().chats[sessionId] ?? [],
+
+      // ── Tokens ────────────────────────────────────────────────
+      addTokenUsage: (sessionId, usage) =>
+        set(s => {
+          const prev = s.tokenUsage[sessionId] ?? { ...DEFAULT_TOKEN_USAGE }
+          return {
+            tokenUsage: {
+              ...s.tokenUsage,
+              [sessionId]: {
+                prompt_tokens    : prev.prompt_tokens     + (usage.prompt_tokens     ?? 0),
+                completion_tokens: prev.completion_tokens + (usage.completion_tokens ?? 0),
+                total_tokens     : prev.total_tokens      + (usage.total_tokens      ?? 0),
+                turn_count       : prev.turn_count        + 1,
+              },
+            },
+          }
+        }),
+
+      getSessionTokenUsage: (sessionId) =>
+        get().tokenUsage[sessionId] ?? { ...DEFAULT_TOKEN_USAGE },
+
+      resetTokenUsage: (sessionId) =>
+        set(s => ({
+          tokenUsage: { ...s.tokenUsage, [sessionId]: { ...DEFAULT_TOKEN_USAGE } },
+        })),
+
+      // ── Databricks connections ─────────────────────────────────
+      // Loaded from backend on workspace open — not persisted locally
+      // (connections live in encrypted SQLite on the server)
+      setDatabricksConnections: (connections) =>
+        set({ databricksConnections: connections }),
+
+      addDatabricksConnection: (conn) =>
+        set(s => ({
+          databricksConnections: [conn, ...s.databricksConnections.filter(c => c.connection_id !== conn.connection_id)],
+        })),
+
+      removeDatabricksConnection: (connection_id) =>
+        set(s => ({
+          databricksConnections: s.databricksConnections.filter(c => c.connection_id !== connection_id),
+        })),
+
+      getDatabricksConnections: () => get().databricksConnections,
+
+      // ── Databricks ingest items ────────────────────────────────
+      addDatabricksIngestItem: (sessionId, item) =>
+        set(s => ({
+          databricksIngestItems: {
+            ...s.databricksIngestItems,
+            [sessionId]: [...(s.databricksIngestItems[sessionId] ?? []), item],
+          },
+        })),
+
+      updateDatabricksIngestItem: (sessionId, itemId, updates) =>
+        set(s => ({
+          databricksIngestItems: {
+            ...s.databricksIngestItems,
+            [sessionId]: (s.databricksIngestItems[sessionId] ?? []).map(item =>
+              item.id === itemId ? { ...item, ...updates } : item
+            ),
+          },
+        })),
+
+      removeDatabricksIngestItem: (sessionId, itemId) =>
+        set(s => ({
+          databricksIngestItems: {
+            ...s.databricksIngestItems,
+            [sessionId]: (s.databricksIngestItems[sessionId] ?? []).filter(item => item.id !== itemId),
+          },
+        })),
+
+      getSessionDatabricksItems: (sessionId) =>
+        get().databricksIngestItems[sessionId] ?? [],
+    }),
+    {
+      name: 'governgpt-store',
+      version: 3,   // bumped — new databricks fields
+      storage: createJSONStorage(() => {
+        if (typeof window === 'undefined') {
+          return { getItem: () => null, setItem: () => {}, removeItem: () => {} }
+        }
+        return localStorage
+      }),
+      partialize: (state) => ({
+        sessions              : state.sessions,
+        files                 : state.files,
+        chats                 : state.chats,
+        tokenUsage            : state.tokenUsage,
+        databricksIngestItems : state.databricksIngestItems,
+        // databricksConnections NOT persisted — loaded fresh from backend
+        // activeSessionId NOT persisted — prevents SSR hydration mismatch
+      }),
+      skipHydration: true,
     }
-  }
-
-  const handleConnected = (conn: DatabricksConnection) => {
-    addDatabricksConnection(conn)
-    setActiveConn(conn.connection_id)
-  }
-
-  const handleDelete = async (connection_id: string) => {
-    try {
-      await api.databricks.deleteConnection(connection_id)
-      removeDatabricksConnection(connection_id)
-      if (activeConn === connection_id) setActiveConn(null)
-    } catch (_) {}
-  }
-
-  const handleTest = async (connection_id: string) => {
-    setTesting(connection_id)
-    try {
-      await api.databricks.testConnection(connection_id)
-    } catch (_) {}
-    finally { setTesting(null) }
-  }
-
-  const readyCount = ingestItems.filter(i => i.status === 'ready').length
-
-  return (
-    <div className="flex flex-col h-full">
-
-      {/* Header row */}
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-ink-100">
-        <div className="flex items-center gap-1.5">
-          <Plug className="w-3.5 h-3.5 text-axa-800" />
-          <span className="text-[10px] font-semibold text-axa-800 uppercase tracking-widest">Databricks</span>
-          {readyCount > 0 && (
-            <span className="text-[9px] font-bold text-emerald-600 bg-emerald-50 border border-emerald-100 px-1.5 py-0.5 rounded-full">
-              {readyCount} indexed
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-1">
-          <button
-            onClick={loadConnections}
-            disabled={loadingConns}
-            className="p-1 rounded-md hover:bg-ink-100 text-ink-400 transition-colors"
-            title="Refresh connections"
-          >
-            <RefreshCw className={cn('w-3 h-3', loadingConns && 'animate-spin')} />
-          </button>
-          <button
-            onClick={() => setShowModal(true)}
-            className="flex items-center gap-1 px-2 py-1 rounded-md bg-axa-50 border border-axa-100 text-axa-800 text-[10px] font-semibold hover:bg-axa-100 transition-colors"
-          >
-            <Plus className="w-3 h-3" />
-            Connect
-          </button>
-        </div>
-      </div>
-
-      {/* Content */}
-      <div className="flex-1 overflow-y-auto">
-        {loadingConns && connections.length === 0 ? (
-          <div className="flex items-center justify-center py-8">
-            <Loader2 className="w-5 h-5 text-axa-800 animate-spin" />
-          </div>
-        ) : connections.length === 0 ? (
-          <EmptyState onConnect={() => setShowModal(true)} />
-        ) : (
-          <div className="py-2 space-y-1">
-            {connections.map(conn => (
-              <div key={conn.connection_id}>
-                {/* Connection row */}
-                <div
-                  className={cn(
-                    'flex items-center gap-2 px-3 py-2 rounded-lg mx-2 cursor-pointer transition-colors',
-                    activeConn === conn.connection_id ? 'bg-axa-50 border border-axa-100' : 'hover:bg-ink-50'
-                  )}
-                  onClick={() => setActiveConn(
-                    activeConn === conn.connection_id ? null : conn.connection_id
-                  )}
-                >
-                  <div className="w-5 h-5 rounded-md bg-axa-800 flex items-center justify-center flex-shrink-0">
-                    <Plug className="w-3 h-3 text-white" />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs font-semibold text-ink-800 truncate">{conn.connection_name}</p>
-                    <p className="text-[9px] text-ink-400 truncate font-mono">
-                      {conn.workspace_url.replace('https://', '')}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-1 flex-shrink-0">
-                    {conn.last_tested_at && (
-                      <CheckCircle className="w-3 h-3 text-emerald-500" title="Recently tested" />
-                    )}
-                    <button
-                      onClick={e => { e.stopPropagation(); handleTest(conn.connection_id) }}
-                      disabled={testing === conn.connection_id}
-                      className="p-1 rounded hover:bg-axa-100 text-ink-400 hover:text-axa-700 transition-colors"
-                      title="Test connection"
-                    >
-                      {testing === conn.connection_id
-                        ? <Loader2 className="w-3 h-3 animate-spin" />
-                        : <RefreshCw className="w-3 h-3" />
-                      }
-                    </button>
-                    <button
-                      onClick={e => { e.stopPropagation(); handleDelete(conn.connection_id) }}
-                      className="p-1 rounded hover:bg-axared-50 text-ink-300 hover:text-axared-500 transition-colors"
-                      title="Remove connection"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
-                  </div>
-                </div>
-
-                {/* Catalog browser (expanded when active) */}
-                <AnimatePresence>
-                  {activeConn === conn.connection_id && (
-                    <motion.div
-                      initial={{ opacity: 0, height: 0 }}
-                      animate={{ opacity: 1, height: 'auto' }}
-                      exit={{ opacity: 0, height: 0 }}
-                      className="overflow-hidden ml-4 mr-2 mt-1 mb-2 bg-white border border-ink-100 rounded-xl p-2"
-                    >
-                      <CatalogBrowser
-                        connection={conn}
-                        sessionId={session.id}
-                        knowledgeSetId={session.id}
-                        ingestItems={ingestItems}
-                        onIngestItem={(item) => addDatabricksIngestItem(session.id, item)}
-                        onUpdateItem={(itemId, updates) =>
-                          updateDatabricksIngestItem(session.id, itemId, updates)
-                        }
-                      />
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Ingested tables list */}
-        {ingestItems.length > 0 && (
-          <div className="border-t border-ink-100 pt-2 mt-1">
-            <p className="text-[10px] font-semibold text-ink-400 uppercase tracking-wider px-4 mb-1.5">
-              Ingested Tables
-            </p>
-            <AnimatePresence initial={false}>
-              {ingestItems.map((item, i) => (
-                <TableIngestCard
-                  key={item.id}
-                  item={item}
-                  index={i}
-                  onRemove={(id) => removeDatabricksIngestItem(session.id, id)}
-                />
-              ))}
-            </AnimatePresence>
-          </div>
-        )}
-      </div>
-
-      <ConnectModal
-        isOpen={showModal}
-        onClose={() => setShowModal(false)}
-        knowledgeSetId={session.id}
-        onConnected={handleConnected}
-      />
-    </div>
   )
-}
+)
 
-function EmptyState({ onConnect }: { onConnect: () => void }) {
-  return (
-    <div className="flex flex-col items-center justify-center py-10 text-center px-4">
-      <div className="w-10 h-10 rounded-xl bg-axa-50 border border-axa-100 flex items-center justify-center mb-3">
-        <ServerCrash className="w-5 h-5 text-axa-300" />
-      </div>
-      <p className="text-xs font-semibold text-ink-600 mb-1">No connections yet</p>
-      <p className="text-[10px] text-ink-400 leading-relaxed mb-3">
-        Connect to a Databricks workspace to browse Hive Metastore tables and ingest them into your knowledge set.
-      </p>
-      <button
-        onClick={onConnect}
-        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-axa-800 text-white text-xs font-semibold hover:bg-axa-700 transition-colors shadow-axa"
-      >
-        <Plus className="w-3.5 h-3.5" />
-        Add Connection
-      </button>
-    </div>
-  )
-}
