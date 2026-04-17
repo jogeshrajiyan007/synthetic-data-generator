@@ -1,292 +1,114 @@
 'use client'
-import { useState, useCallback } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
-import {
-  ChevronRight, ChevronDown, Database, Table, Eye,
-  Download, Loader2, RefreshCw, AlertCircle, CheckCircle,
-  BookOpen, Layers
-} from 'lucide-react'
-import { api } from '@/lib/api'
+import { motion } from 'framer-motion'
+import { Table, Eye, X, CheckCircle, AlertCircle, Loader2, Layers } from 'lucide-react'
+import type { DatabricksIngestItem } from '@/types'
 import { cn } from '@/lib/utils'
-import type {
-  DatabricksConnection, DatabricksCatalog,
-  DatabricksSchema, DatabricksTable, DatabricksIngestItem
-} from '@/types'
 
-interface CatalogBrowserProps {
-  connection: DatabricksConnection
-  sessionId: string
-  knowledgeSetId: string
-  ingestItems: DatabricksIngestItem[]
-  onIngestItem: (item: DatabricksIngestItem) => void
-  onUpdateItem: (itemId: string, updates: Partial<DatabricksIngestItem>) => void
+interface TableIngestCardProps {
+  item: DatabricksIngestItem
+  index: number
+  onRemove: (id: string) => void
 }
 
-export function CatalogBrowser({
-  connection, sessionId, knowledgeSetId,
-  ingestItems, onIngestItem, onUpdateItem,
-}: CatalogBrowserProps) {
-  const [catalogs, setCatalogs]         = useState<DatabricksCatalog[]>([])
-  const [schemas, setSchemas]           = useState<Record<string, DatabricksSchema[]>>({})
-  const [tables, setTables]             = useState<Record<string, DatabricksTable[]>>({})
-  const [expanded, setExpanded]         = useState<Record<string, boolean>>({})
-  const [loading, setLoading]           = useState<Record<string, boolean>>({})
-  const [errors, setErrors]             = useState<Record<string, string>>({})
-  const [catalogsLoaded, setCatalogsLoaded] = useState(false)
+export function TableIngestCard({ item, index, onRemove }: TableIngestCardProps) {
+  const isLoading = item.status === 'profiling' || item.status === 'ingesting'
 
-  const setLoad  = (key: string, v: boolean) => setLoading(p => ({ ...p, [key]: v }))
-  const setErr   = (key: string, v: string)  => setErrors(p => ({ ...p, [key]: v }))
-  const toggle   = (key: string)             => setExpanded(p => ({ ...p, [key]: !p[key] }))
+  const statusLabel = {
+    idle     : 'Queued',
+    profiling: 'Profiling…',
+    ingesting: 'Indexing…',
+    ready    : 'Indexed',
+    error    : 'Failed',
+  }[item.status]
 
-  // ── Load catalogs ──────────────────────────────────────────────
-  const loadCatalogs = useCallback(async () => {
-    if (catalogsLoaded) return
-    setLoad('catalogs', true)
-    setErr('catalogs', '')
-    try {
-      const res = await api.databricks.listCatalogs(connection.connection_id)
-      setCatalogs(res.catalogs)
-      setCatalogsLoaded(true)
-    } catch (e: unknown) {
-      setErr('catalogs', e instanceof Error ? e.message : 'Failed to load catalogs')
-    } finally {
-      setLoad('catalogs', false)
-    }
-  }, [connection.connection_id, catalogsLoaded])
-
-  // ── Load schemas ───────────────────────────────────────────────
-  const loadSchemas = useCallback(async (catalog: string) => {
-    if (schemas[catalog]) { toggle(catalog); return }
-    setLoad(catalog, true)
-    setErr(catalog, '')
-    try {
-      const res = await api.databricks.listSchemas(connection.connection_id, catalog)
-      setSchemas(p => ({ ...p, [catalog]: res.schemas }))
-      toggle(catalog)
-    } catch (e: unknown) {
-      setErr(catalog, e instanceof Error ? e.message : 'Failed')
-    } finally {
-      setLoad(catalog, false)
-    }
-  }, [connection.connection_id, schemas])
-
-  // ── Load tables ────────────────────────────────────────────────
-  const loadTables = useCallback(async (catalog: string, schema: string) => {
-    const key = `${catalog}.${schema}`
-    if (tables[key]) { toggle(key); return }
-    setLoad(key, true)
-    setErr(key, '')
-    try {
-      const res = await api.databricks.listTables(connection.connection_id, catalog, schema)
-      setTables(p => ({ ...p, [key]: res.tables }))
-      toggle(key)
-    } catch (e: unknown) {
-      setErr(key, e instanceof Error ? e.message : 'Failed')
-    } finally {
-      setLoad(key, false)
-    }
-  }, [connection.connection_id, tables])
-
-  // ── Ingest a table ─────────────────────────────────────────────
-  const handleIngest = useCallback(async (tbl: DatabricksTable) => {
-    const itemId = Math.random().toString(36).slice(2)
-    const newItem: DatabricksIngestItem = {
-      id           : itemId,
-      connection_id: connection.connection_id,
-      catalog      : tbl.catalog,
-      schema       : tbl.schema,
-      table        : tbl.table_name,
-      table_type   : tbl.table_type,
-      status       : 'profiling',
-      progress     : 0,
-    }
-    onIngestItem(newItem)
-
-    // Simulate progress tick
-    const tick = setInterval(() => {
-      onUpdateItem(itemId, { progress: Math.min((newItem.progress || 0) + 8, 85) })
-    }, 600)
-
-    try {
-      const result = await api.databricks.ingestTable(connection.connection_id, {
-        knowledge_set: knowledgeSetId,
-        catalog      : tbl.catalog,
-        schema       : tbl.schema,
-        table        : tbl.table_name,
-        sample_rows  : 500_000,
-      })
-      clearInterval(tick)
-      onUpdateItem(itemId, {
-        status          : 'ready',
-        progress        : 100,
-        chunk_count     : result.chunks,
-        row_count       : result.row_count,
-        duration_seconds: result.duration_seconds,
-        ingested_at     : result.profiled_at,
-      })
-    } catch (e: unknown) {
-      clearInterval(tick)
-      onUpdateItem(itemId, {
-        status: 'error',
-        error : e instanceof Error ? e.message : 'Ingestion failed',
-      })
-    }
-  }, [connection.connection_id, knowledgeSetId, onIngestItem, onUpdateItem])
-
-  const isIngested = (tbl: DatabricksTable) =>
-    ingestItems.some(
-      i => i.catalog === tbl.catalog && i.schema === tbl.schema &&
-           i.table === tbl.table_name && i.status === 'ready'
-    )
-
-  const isIngesting = (tbl: DatabricksTable) =>
-    ingestItems.some(
-      i => i.catalog === tbl.catalog && i.schema === tbl.schema &&
-           i.table === tbl.table_name && (i.status === 'profiling' || i.status === 'ingesting')
-    )
+  const statusColor = {
+    idle     : 'text-ink-400',
+    profiling: 'text-axa-700',
+    ingesting: 'text-axa-700',
+    ready    : 'text-emerald-600',
+    error    : 'text-axared-500',
+  }[item.status]
 
   return (
-    <div className="text-xs">
-      {/* Connection header */}
-      <button
-        onClick={() => { loadCatalogs(); toggle('root') }}
-        className="w-full flex items-center gap-2 px-2 py-2 rounded-lg hover:bg-axa-50 text-ink-700 transition-colors group"
-      >
-        {loading['catalogs'] ? (
-          <Loader2 className="w-3.5 h-3.5 text-axa-800 animate-spin flex-shrink-0" />
-        ) : (
-          expanded['root']
-            ? <ChevronDown className="w-3.5 h-3.5 text-ink-400 flex-shrink-0" />
-            : <ChevronRight className="w-3.5 h-3.5 text-ink-400 flex-shrink-0" />
-        )}
-        <BookOpen className="w-3.5 h-3.5 text-axa-800 flex-shrink-0" />
-        <span className="font-semibold text-ink-800 truncate">{connection.connection_name}</span>
-        <button
-          onClick={e => { e.stopPropagation(); setCatalogsLoaded(false); loadCatalogs() }}
-          className="ml-auto opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-axa-100 text-ink-400"
-          title="Refresh"
-        >
-          <RefreshCw className="w-3 h-3" />
-        </button>
-      </button>
+    <motion.div
+      initial={{ opacity: 0, x: -10 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: -10 }}
+      transition={{ delay: index * 0.04 }}
+      className="group flex items-start gap-2.5 px-3 py-2.5 hover:bg-ink-50 rounded-lg mx-1 transition-colors"
+    >
+      {/* Icon */}
+      <div className="w-7 h-7 rounded-lg bg-axa-50 border border-axa-100 flex items-center justify-center flex-shrink-0 mt-0.5">
+        {item.table_type === 'VIEW'
+          ? <Eye className="w-3.5 h-3.5 text-axa-700" />
+          : <Table className="w-3.5 h-3.5 text-axa-800" />
+        }
+      </div>
 
-      {errors['catalogs'] && (
-        <div className="flex items-center gap-1.5 px-3 py-1.5 text-axared-500 bg-axared-50 rounded-lg mt-1 mx-2">
-          <AlertCircle className="w-3 h-3 flex-shrink-0" />
-          <span>{errors['catalogs']}</span>
+      {/* Info */}
+      <div className="flex-1 min-w-0">
+        <p className="text-xs font-semibold text-ink-700 truncate">{item.table}</p>
+        <div className="flex items-center gap-1.5 mt-0.5">
+          <Layers className="w-2.5 h-2.5 text-ink-300" />
+          <span className="text-[10px] text-ink-400 truncate">
+            {item.catalog}.{item.schema}
+          </span>
         </div>
-      )}
 
-      {/* Catalog tree */}
-      <AnimatePresence>
-        {expanded['root'] && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            className="overflow-hidden ml-2"
-          >
-            {catalogs.map(cat => (
-              <div key={cat.catalog}>
-                {/* Catalog row */}
-                <button
-                  onClick={() => loadSchemas(cat.catalog)}
-                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-ink-50 text-ink-600 transition-colors"
-                >
-                  {loading[cat.catalog] ? (
-                    <Loader2 className="w-3 h-3 animate-spin flex-shrink-0" />
-                  ) : expanded[cat.catalog] ? (
-                    <ChevronDown className="w-3 h-3 text-ink-300 flex-shrink-0" />
-                  ) : (
-                    <ChevronRight className="w-3 h-3 text-ink-300 flex-shrink-0" />
-                  )}
-                  <Layers className="w-3 h-3 text-axa-600 flex-shrink-0" />
-                  <span className="truncate font-medium">{cat.catalog}</span>
-                </button>
-
-                {errors[cat.catalog] && (
-                  <p className="text-[10px] text-axared-500 px-8 py-1">{errors[cat.catalog]}</p>
-                )}
-
-                {/* Schemas */}
-                <AnimatePresence>
-                  {expanded[cat.catalog] && (schemas[cat.catalog] ?? []).map(sch => {
-                    const schKey = `${cat.catalog}.${sch.schema}`
-                    return (
-                      <motion.div key={sch.schema}
-                        initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                        className="ml-4"
-                      >
-                        {/* Schema row */}
-                        <button
-                          onClick={() => loadTables(cat.catalog, sch.schema)}
-                          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-ink-50 text-ink-500 transition-colors"
-                        >
-                          {loading[schKey] ? (
-                            <Loader2 className="w-3 h-3 animate-spin flex-shrink-0" />
-                          ) : expanded[schKey] ? (
-                            <ChevronDown className="w-3 h-3 text-ink-300 flex-shrink-0" />
-                          ) : (
-                            <ChevronRight className="w-3 h-3 text-ink-300 flex-shrink-0" />
-                          )}
-                          <Database className="w-3 h-3 text-ink-400 flex-shrink-0" />
-                          <span className="truncate">{sch.schema}</span>
-                        </button>
-
-                        {/* Tables */}
-                        <AnimatePresence>
-                          {expanded[schKey] && (tables[schKey] ?? []).map(tbl => {
-                            const ingested  = isIngested(tbl)
-                            const ingesting = isIngesting(tbl)
-                            return (
-                              <motion.div
-                                key={tbl.table_name}
-                                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                                className="ml-4 flex items-center gap-1.5 px-2 py-1.5 rounded-lg hover:bg-axa-50 group transition-colors"
-                              >
-                                {tbl.table_type === 'VIEW'
-                                  ? <Eye className="w-3 h-3 text-ink-300 flex-shrink-0" />
-                                  : <Table className="w-3 h-3 text-ink-400 flex-shrink-0" />
-                                }
-                                <span className={cn(
-                                  'flex-1 truncate',
-                                  ingested ? 'text-emerald-700 font-medium' : 'text-ink-500'
-                                )}>
-                                  {tbl.table_name}
-                                </span>
-                                <span className="text-[9px] text-ink-300">{tbl.table_type}</span>
-
-                                {/* Ingest action */}
-                                {ingested ? (
-                                  <CheckCircle className="w-3 h-3 text-emerald-500 flex-shrink-0" />
-                                ) : ingesting ? (
-                                  <Loader2 className="w-3 h-3 text-axa-800 animate-spin flex-shrink-0" />
-                                ) : (
-                                  <button
-                                    onClick={() => handleIngest(tbl)}
-                                    className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-axa-100 text-axa-700 flex-shrink-0 transition-all"
-                                    title={`Ingest ${tbl.table_name} into knowledge set`}
-                                  >
-                                    <Download className="w-3 h-3" />
-                                  </button>
-                                )}
-                              </motion.div>
-                            )
-                          })}
-                        </AnimatePresence>
-                      </motion.div>
-                    )
-                  })}
-                </AnimatePresence>
-              </div>
-            ))}
-
-            {catalogsLoaded && catalogs.length === 0 && (
-              <p className="text-[10px] text-ink-400 px-6 py-2">No catalogs found.</p>
-            )}
-          </motion.div>
+        {/* Progress bar */}
+        {isLoading && (
+          <div className="mt-1.5 h-0.5 bg-ink-100 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-axa-800 rounded-full transition-all duration-500"
+              style={{ width: `${item.progress}%` }}
+            />
+          </div>
         )}
-      </AnimatePresence>
-    </div>
+
+        {/* Stats */}
+        {item.status === 'ready' && (
+          <div className="flex items-center gap-2 mt-1">
+            {item.row_count && (
+              <span className="text-[9px] text-ink-400 font-mono">
+                {item.row_count.toLocaleString()} rows
+              </span>
+            )}
+            {item.chunk_count && (
+              <span className="text-[9px] text-ink-400 font-mono">
+                · {item.chunk_count} chunks
+              </span>
+            )}
+            {item.duration_seconds && (
+              <span className="text-[9px] text-ink-400 font-mono">
+                · {item.duration_seconds}s
+              </span>
+            )}
+          </div>
+        )}
+
+        {item.status === 'error' && (
+          <p className="text-[10px] text-axared-500 mt-0.5 truncate">{item.error}</p>
+        )}
+      </div>
+
+      {/* Status icon + remove */}
+      <div className="flex items-center gap-1 flex-shrink-0">
+        <span className={cn('text-[9px] font-semibold', statusColor)}>{statusLabel}</span>
+        {isLoading
+          ? <Loader2 className="w-3 h-3 text-axa-800 animate-spin" />
+          : item.status === 'ready'
+          ? <CheckCircle className="w-3 h-3 text-emerald-500" />
+          : item.status === 'error'
+          ? <AlertCircle className="w-3 h-3 text-axared-500" />
+          : null
+        }
+        <button
+          onClick={() => onRemove(item.id)}
+          className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-axared-50 hover:text-axared-500 text-ink-300 transition-all"
+        >
+          <X className="w-3 h-3" />
+        </button>
+      </div>
+    </motion.div>
   )
 }
