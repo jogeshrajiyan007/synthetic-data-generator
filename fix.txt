@@ -1,110 +1,262 @@
-import re
-import uuid
-import json
-from datetime import datetime
-from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from db import db_insert_batch
-from config import (
-    CHUNK_SIZE, CHUNK_OVERLAP,
-    PII_SIGNALS, SENSITIVITY_TIERS,
-    DEPARTMENT_SIGNALS, GOVERNANCE_THEMES
-)
+// ── Knowledge Set / Session ─────────────────────────────────────
+export interface KnowledgeSet {
+  id: string
+  project_name: string
+  summary: string
+  created_at: string
+  file_count: number
+  vector_count: number
+  collection_name: string
+}
 
+export interface CreateKnowledgeSetPayload {
+  project_name: string
+  summary: string
+}
 
-def _detect_sensitivity(text: str) -> str:
-    lower = text.lower()
-    for tier, signals in SENSITIVITY_TIERS.items():
-        if any(s in lower for s in signals):
-            return tier
-    return "Public"
+// ── Files / Sources ─────────────────────────────────────────────
+export interface SourceFile {
+  id: string
+  name: string
+  size: number
+  type: string
+  extension: string
+  status: 'uploading' | 'processing' | 'ready' | 'error'
+  progress: number
+  error?: string
+  ingested_at?: string
+  chunk_count?: number
+  department?: string
+  sensitivity?: string
+  pii_chunks?: number
+}
 
+export interface IngestResponse {
+  status: string
+  knowledge_set: string
+  collection_name: string
+  files_processed: number
+  files_failed: number
+  total_chunks: number
+  total_vectors: number
+  file_details: FileDetail[]
+  duration_seconds: number
+  ingested_at: string
+}
 
-def _detect_department(text: str) -> str:
-    lower  = text.lower()
-    scores = {
-        dept: sum(1 for s in signals if s in lower)
-        for dept, signals in DEPARTMENT_SIGNALS.items()
-    }
-    best = max(scores, key=scores.get)
-    return best if scores[best] > 0 else "General"
+export interface FileDetail {
+  file: string
+  type: string
+  status: string
+  docs: number
+  error?: string
+}
 
+// ── Chat ─────────────────────────────────────────────────────────
+export interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  timestamp: string
+  sources_used?: string[]
+  chunks_retrieved?: number
+  duration_seconds?: number
+  run_id?: string
+  rephrased_question?: string
+  prompt_tokens?: number
+  completion_tokens?: number
+  total_tokens?: number
+  mode?: string
+}
 
-def _extract_keywords(text: str, top_n: int = 8) -> list[str]:
-    words = re.findall(r"\b[a-zA-Z]{4,}\b", text.lower())
-    stop  = {"that", "this", "with", "from", "have", "been", "will",
-             "they", "their", "which", "were", "also", "more", "than"}
-    counts: dict[str, int] = {}
-    for w in words:
-        if w not in stop:
-            counts[w] = counts.get(w, 0) + 1
-    return sorted(counts, key=counts.get, reverse=True)[:top_n]
+export interface QueryRequest {
+  knowledge_set: string
+  session_id: string
+  question: string
+  use_rag: boolean
+  k: number
+  window_k?: number
+}
 
+export interface QueryResponse {
+  run_id: string
+  session_id: string
+  knowledge_set: string
+  question: string
+  rephrased_question: string
+  answer: string
+  mode: string
+  sources_used: string[]
+  chunks_retrieved: number
+  model: string
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  created_at: string
+  duration_seconds: number
+}
 
-def _detect_governance_themes(text: str) -> list[str]:
-    lower = text.lower()
-    return [t for t in GOVERNANCE_THEMES if t in lower]
+// ── Conversation History ─────────────────────────────────────────
+export interface ConversationMessage {
+  id: number
+  session_id: string
+  knowledge_set: string
+  role: 'human' | 'ai'
+  content: string
+  run_id?: string
+  token_count?: number
+  created_at: string
+}
 
+export interface ConversationHistoryResponse {
+  session_id: string
+  knowledge_set: string
+  total_messages: number
+  turns: number
+  messages: ConversationMessage[]
+}
 
-def enrich_metadata(
-    chunk: Document,
-    chunk_index: int,
-    knowledge_set: str = "default",
-) -> dict:
-    text         = chunk.page_content
-    lower        = text.lower()
-    base         = chunk.metadata
-    contains_pii = any(p in lower for p in PII_SIGNALS)
+export interface ConversationStatsResponse {
+  session_id: string
+  knowledge_set: string
+  total_messages: number
+  human_turns: number
+  ai_turns: number
+  first_message_at?: string
+  last_message_at?: string
+}
 
-    return {
-        "doc_id"            : str(uuid.uuid4()),
-        "chunk_index"       : chunk_index,
-        "knowledge_set"     : knowledge_set,
-        "source_file"       : base.get("source_file", base.get("source", "unknown")),
-        "file_type"         : base.get("file_type", "unknown"),
-        "source_type"       : base.get("source_type", "file"),   # 'file' | 'databricks'
-        "page"              : base.get("page"),
-        "sheet"             : base.get("sheet"),
-        # Databricks-specific passthrough
-        "catalog"           : base.get("catalog"),
-        "schema"            : base.get("schema"),
-        "table"             : base.get("table"),
-        "first_line"        : text.split("\n")[0][:120].strip() or "—",
-        "char_count"        : len(text),
-        "word_count"        : len(text.split()),
-        "summary"           : text[:200].replace("\n", " "),
-        "keywords"          : _extract_keywords(text),
-        "governance_themes" : _detect_governance_themes(text),
-        "department"        : _detect_department(text),
-        "sensitivity"       : _detect_sensitivity(text),
-        "contains_pii"      : contains_pii,
-        "owner"             : "DAAS DMG",
-        "domain"            : "Insurance",
-        "ingested_at"       : datetime.now().isoformat(),
-        "language"          : "en",
-    }
+// ── Stats ────────────────────────────────────────────────────────
+export interface GovernanceStats {
+  knowledge_set: string
+  total_chunks: number
+  total_llm_responses: number
+  pii_chunks: number
+  pii_percentage: number
+  sensitivity_distribution: { sensitivity: string; count: number }[]
+  department_distribution: { department: string; count: number }[]
+}
 
+export interface KnowledgeSetInfo {
+  knowledge_set: string
+  collection_name: string
+  vector_count: number
+}
 
-def chunk_and_enrich(
-    raw_documents: list[Document],
-    knowledge_set: str = "default",
-) -> list[Document]:
-    """Split documents into enriched chunks and persist metadata to SQLite."""
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
-        separators=["\n\n", "\n", ". ", " ", ""]
-    )
-    chunks   = splitter.split_documents(raw_documents)
-    enriched = []
-    records  = []
+export interface KnowledgeSetListResponse {
+  total: number
+  knowledge_sets: KnowledgeSetInfo[]
+}
 
-    for i, chunk in enumerate(chunks):
-        metadata       = enrich_metadata(chunk, i, knowledge_set=knowledge_set)
-        chunk.metadata = metadata
-        enriched.append(chunk)
-        records.append(metadata)
+// ── Databricks ───────────────────────────────────────────────────
 
-    # Batch insert to SQLite
-    db_insert_batch("document_chunks", records)
-    return enriched
+export interface DatabricksConnection {
+  connection_id: string
+  connection_name: string
+  workspace_url: string
+  http_path: string
+  catalog: string
+  description: string
+  knowledge_set: string
+  status: 'active' | 'deleted'
+  last_tested_at: string | null
+  created_at: string
+}
+
+export interface DatabricksConnectRequest {
+  connection_name: string
+  workspace_url: string
+  pat: string
+  http_path: string
+  catalog?: string
+  description?: string
+  knowledge_set?: string
+}
+
+export interface DatabricksConnectResponse {
+  connection_id: string
+  connection_name: string
+  workspace_url: string
+  catalog: string
+  status: string
+  current_user: string | null
+  message: string
+}
+
+export interface DatabricksCatalog {
+  catalog: string
+}
+
+export interface DatabricksSchema {
+  schema: string
+  catalog: string
+}
+
+export interface DatabricksTable {
+  table_name: string
+  table_type: 'TABLE' | 'VIEW'
+  catalog: string
+  schema: string
+  full_name: string
+}
+
+export interface DatabricksColumn {
+  column_name: string
+  data_type: string
+  comment: string
+  is_complex: boolean
+  parsed_type: Record<string, unknown>
+}
+
+export interface DatabricksTableDetail {
+  catalog: string
+  schema: string
+  table: string
+  full_name: string
+  columns: DatabricksColumn[]
+  column_count: number
+  table_type: string
+  provider: string
+  location: string
+  comment: string
+  partition_cols: string[]
+}
+
+export interface DatabricksIngestRequest {
+  knowledge_set: string
+  catalog: string
+  schema: string
+  table: string
+  sample_rows?: number
+  rebuild?: boolean
+}
+
+export interface DatabricksIngestResult {
+  status: string
+  source: string
+  knowledge_set: string
+  row_count: number
+  column_count: number
+  documents: number
+  chunks: number
+  sampled: boolean
+  duration_seconds: number
+  profiled_at: string
+}
+
+// ── Databricks table ingest item (UI state) ──────────────────────
+export interface DatabricksIngestItem {
+  id: string                     // local UI key
+  connection_id: string
+  catalog: string
+  schema: string
+  table: string
+  table_type: 'TABLE' | 'VIEW'
+  status: 'idle' | 'profiling' | 'ingesting' | 'ready' | 'error'
+  progress: number
+  chunk_count?: number
+  row_count?: number
+  duration_seconds?: number
+  error?: string
+  ingested_at?: string
+}
