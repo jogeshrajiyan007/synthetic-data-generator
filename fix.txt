@@ -1,254 +1,209 @@
 'use client'
-import { useState, useCallback } from 'react'
+import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { ChevronLeft, Database, RefreshCw, FileText, Plug } from 'lucide-react'
-import { UploadDropzone } from './UploadDropzone'
-import { FileItem } from './FileItem'
-import { SourceProgressBar, MAX_SOURCES } from './SourceProgressBar'
-import { DatabricksPanel } from '@/components/databricks/DatabricksPanel'
-import type { KnowledgeSet, SourceFile } from '@/types'
+import { X, Plug, Eye, EyeOff, AlertCircle, CheckCircle, Loader2 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { cn, formatDate } from '@/lib/utils'
+import { cn } from '@/lib/utils'
+import type { DatabricksConnection } from '@/types'
 
-type PanelTab = 'files' | 'databricks'
-
-interface SourcePanelProps {
-  session: KnowledgeSet
-  files: SourceFile[]
-  onBack: () => void
-  onAddFiles: (files: SourceFile[]) => void
-  onUpdateFile: (id: string, updates: Partial<SourceFile>) => void
-  onRemoveFile: (id: string) => void
+interface ConnectModalProps {
+  isOpen: boolean
+  onClose: () => void
+  knowledgeSetId: string
+  onConnected: (conn: DatabricksConnection) => void
 }
 
-export function SourcePanel({
-  session, files, onBack, onAddFiles, onUpdateFile, onRemoveFile
-}: SourcePanelProps) {
-  const [activeTab, setActiveTab]   = useState<PanelTab>('files')
-  const [isIngesting, setIsIngesting] = useState(false)
-  const atLimit = files.length >= MAX_SOURCES
+export function ConnectModal({ isOpen, onClose, knowledgeSetId, onConnected }: ConnectModalProps) {
+  const [form, setForm] = useState({
+    connection_name: '',
+    workspace_url  : '',
+    pat            : '',
+    http_path      : '',
+    catalog        : 'hive_metastore',
+    description    : '',
+  })
+  const [showPat, setShowPat]     = useState(false)
+  const [loading, setLoading]     = useState(false)
+  const [error, setError]         = useState('')
+  const [success, setSuccess]     = useState('')
 
-  const handleFiles = useCallback(async (rawFiles: File[]) => {
-    const allowed = rawFiles.slice(0, MAX_SOURCES - files.length)
-    if (!allowed.length) return
+  const set = (k: keyof typeof form, v: string) =>
+    setForm(prev => ({ ...prev, [k]: v }))
 
-    const newEntries: SourceFile[] = allowed.map(f => ({
-      id       : Math.random().toString(36).slice(2),
-      name     : f.name,
-      size     : f.size,
-      type     : f.type,
-      extension: f.name.split('.').pop() ?? '',
-      status   : 'uploading' as const,
-      progress : 0,
-    }))
-    onAddFiles(newEntries)
-
-    const ticks = newEntries.map((entry) => {
-      let p = 0
-      return setInterval(() => {
-        p = Math.min(p + Math.random() * 20 + 10, 90)
-        onUpdateFile(entry.id, { progress: Math.round(p) })
-      }, 250)
-    })
-
-    try {
-      newEntries.forEach(e => onUpdateFile(e.id, { status: 'processing', progress: 95 }))
-      ticks.forEach(clearInterval)
-      const result = await api.uploadFiles(session.id, allowed)
-      result.file_details?.forEach((detail: { file: string; status: string; docs: number; error?: string }, i: number) => {
-        const entry = newEntries[i]
-        if (!entry) return
-        if (detail.status === 'ok') {
-          onUpdateFile(entry.id, { status: 'ready', progress: 100, chunk_count: detail.docs })
-        } else {
-          onUpdateFile(entry.id, { status: 'error', error: detail.error ?? 'Failed' })
-        }
-      })
-    } catch (err: unknown) {
-      ticks.forEach(clearInterval)
-      const msg = err instanceof Error ? err.message : 'Upload failed'
-      newEntries.forEach(e => onUpdateFile(e.id, { status: 'error', error: msg }))
+  const handleConnect = async () => {
+    if (!form.connection_name || !form.workspace_url || !form.pat || !form.http_path) {
+      setError('Connection name, workspace URL, PAT, and HTTP path are required.')
+      return
     }
-  }, [files.length, session.id, onAddFiles, onUpdateFile])
-
-  const handleReingest = async () => {
-    setIsIngesting(true)
-    try { await api.ingestLoadingZone(session.id, true) }
-    catch (e) { console.error(e) }
-    finally { setIsIngesting(false) }
+    setLoading(true)
+    setError('')
+    setSuccess('')
+    try {
+      const result = await api.databricks.connect({
+        ...form,
+        knowledge_set: knowledgeSetId,
+      })
+      setSuccess(`Connected as ${result.current_user ?? 'authenticated user'}`)
+      setTimeout(() => {
+        onConnected({
+          connection_id  : result.connection_id,
+          connection_name: result.connection_name,
+          workspace_url  : result.workspace_url,
+          http_path      : form.http_path,
+          catalog        : result.catalog,
+          description    : form.description,
+          knowledge_set  : knowledgeSetId,
+          status         : 'active',
+          last_tested_at : new Date().toISOString(),
+          created_at     : new Date().toISOString(),
+        })
+        handleClose()
+      }, 1200)
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Connection failed')
+    } finally {
+      setLoading(false)
+    }
   }
 
-  const readyCount = files.filter(f => f.status === 'ready').length
+  const handleClose = () => {
+    setForm({ connection_name: '', workspace_url: '', pat: '', http_path: '', catalog: 'hive_metastore', description: '' })
+    setError(''); setSuccess('')
+    onClose()
+  }
 
-  return (
-    <div className="h-full flex flex-col bg-white border-r border-ink-100">
-
-      {/* ── Header ──────────────────────────────────────────────── */}
-      <div className="flex-shrink-0 px-4 py-3 border-b border-ink-100 bg-ink-50">
-        <div className="flex items-center gap-2">
-          <button
-            onClick={onBack}
-            className="p-1.5 rounded-lg hover:bg-ink-100 text-ink-400 hover:text-ink-700 transition-colors"
-            title="Back to projects"
-          >
-            <ChevronLeft className="w-4 h-4" />
-          </button>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-1.5">
-              <Database className="w-3.5 h-3.5 text-axa-800 flex-shrink-0" />
-              <span className="text-[10px] font-semibold text-axa-800 uppercase tracking-widest">Sources</span>
-            </div>
-            <p className="text-sm font-semibold text-ink-800 truncate mt-0.5 font-display">
-              {session.project_name}
-            </p>
-          </div>
-        </div>
-        <div className="flex items-center justify-between mt-1.5">
-          <span className="text-[10px] text-ink-400">Created {formatDate(session.created_at)}</span>
-          {readyCount > 0 && (
-            <span className="text-[10px] text-emerald-600 font-semibold">{readyCount} indexed</span>
-          )}
-        </div>
-      </div>
-
-      {/* ── Tab switcher ─────────────────────────────────────────── */}
-      <div className="flex-shrink-0 flex border-b border-ink-100 bg-white">
-        <TabButton
-          active={activeTab === 'files'}
-          onClick={() => setActiveTab('files')}
-          icon={<FileText className="w-3.5 h-3.5" />}
-          label="Files"
-          badge={files.length > 0 ? files.length : undefined}
-        />
-        <TabButton
-          active={activeTab === 'databricks'}
-          onClick={() => setActiveTab('databricks')}
-          icon={<Plug className="w-3.5 h-3.5" />}
-          label="Databricks"
-        />
-      </div>
-
-      {/* ── Tab content ──────────────────────────────────────────── */}
-      <div className="flex-1 overflow-hidden flex flex-col">
-        <AnimatePresence mode="wait">
-
-          {/* Files tab */}
-          {activeTab === 'files' && (
-            <motion.div
-              key="files"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.15 }}
-              className="flex-1 overflow-hidden flex flex-col"
-            >
-              {/* Progress */}
-              <div className="flex-shrink-0 pt-3">
-                <SourceProgressBar count={files.length} />
-              </div>
-
-              {/* Dropzone */}
-              <div className="flex-shrink-0">
-                <UploadDropzone onFiles={handleFiles} disabled={atLimit} maxFiles={MAX_SOURCES} />
-              </div>
-
-              {/* File list */}
-              <div className="flex-1 overflow-y-auto">
-                <AnimatePresence initial={false}>
-                  {files.length === 0 ? (
-                    <motion.div
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      className="flex flex-col items-center justify-center py-10 text-center px-4"
-                    >
-                      <div className="w-10 h-10 rounded-xl bg-axa-50 border border-axa-100 flex items-center justify-center mb-3">
-                        <Database className="w-5 h-5 text-axa-200" />
-                      </div>
-                      <p className="text-xs text-ink-400 leading-relaxed">
-                        No files yet. Upload documents to build your knowledge set.
-                      </p>
-                    </motion.div>
-                  ) : (
-                    <div className="py-1">
-                      {files.map((file, i) => (
-                        <FileItem key={file.id} file={file} index={i} onRemove={onRemoveFile} />
-                      ))}
-                    </div>
-                  )}
-                </AnimatePresence>
-              </div>
-
-              {/* Footer */}
-              {files.length > 0 && (
-                <div className="flex-shrink-0 p-3 border-t border-ink-100">
-                  <button
-                    onClick={handleReingest}
-                    disabled={isIngesting}
-                    className={cn(
-                      'w-full flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-semibold',
-                      'bg-axa-50 border border-axa-100 text-axa-800',
-                      'hover:bg-axa-100 transition-all',
-                      'disabled:opacity-50 disabled:cursor-not-allowed'
-                    )}
-                  >
-                    <RefreshCw className={cn('w-3.5 h-3.5', isIngesting && 'animate-spin')} />
-                    {isIngesting ? 'Re-indexing…' : 'Re-index All'}
-                  </button>
-                </div>
-              )}
-            </motion.div>
-          )}
-
-          {/* Databricks tab */}
-          {activeTab === 'databricks' && (
-            <motion.div
-              key="databricks"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.15 }}
-              className="flex-1 overflow-hidden"
-            >
-              <DatabricksPanel session={session} />
-            </motion.div>
-          )}
-
-        </AnimatePresence>
-      </div>
+  const Field = ({ label, required, children }: { label: string; required?: boolean; children: React.ReactNode }) => (
+    <div>
+      <label className="block text-[10px] font-semibold text-ink-500 uppercase tracking-wider mb-1.5">
+        {label} {required && <span className="text-axared-500">*</span>}
+      </label>
+      {children}
     </div>
   )
-}
 
-// ── Tab button ────────────────────────────────────────────────────
-function TabButton({
-  active, onClick, icon, label, badge
-}: {
-  active: boolean
-  onClick: () => void
-  icon: React.ReactNode
-  label: string
-  badge?: number
-}) {
+  const inputCls = "w-full bg-white border border-ink-200 rounded-lg px-3 py-2 text-sm text-ink-800 placeholder-ink-300 focus:outline-none focus:border-axa-400 focus:ring-2 focus:ring-axa-50 transition-all font-mono"
+
   return (
-    <button
-      onClick={onClick}
-      className={cn(
-        'flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-semibold transition-all border-b-2',
-        active
-          ? 'border-axa-800 text-axa-800 bg-white'
-          : 'border-transparent text-ink-400 hover:text-ink-700 hover:bg-ink-50'
+    <AnimatePresence>
+      {isOpen && (
+        <>
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            onClick={handleClose} className="fixed inset-0 z-40 bg-ink-900/40 backdrop-blur-sm" />
+
+          <motion.div
+            initial={{ opacity: 0, scale: 0.97, y: 14 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.97, y: 14 }}
+            transition={{ type: 'spring', damping: 28, stiffness: 360 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          >
+            <div className="w-full max-w-lg bg-white rounded-2xl shadow-axa-lg overflow-hidden border border-ink-100">
+              <div className="h-1.5 bg-gradient-to-r from-axa-800 via-axa-600 to-axa-800" />
+              <div className="p-6">
+                {/* Header */}
+                <div className="flex items-start justify-between mb-5">
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <div className="w-6 h-6 rounded-md bg-axa-50 border border-axa-100 flex items-center justify-center">
+                        <Plug className="w-3.5 h-3.5 text-axa-800" />
+                      </div>
+                      <span className="text-[10px] font-semibold text-axa-800 uppercase tracking-widest">New Databricks Connection</span>
+                    </div>
+                    <h2 className="font-display text-xl text-ink-900">Connect to Databricks</h2>
+                    <p className="text-ink-400 text-xs mt-0.5">PAT is encrypted before storage — never stored in plaintext.</p>
+                  </div>
+                  <button onClick={handleClose} className="p-1.5 rounded-lg hover:bg-ink-50 text-ink-400">
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                {/* Form */}
+                <div className="space-y-3">
+                  <Field label="Connection Name" required>
+                    <input value={form.connection_name} onChange={e => set('connection_name', e.target.value)}
+                      placeholder="e.g. AXA Prod Databricks" className={inputCls} />
+                  </Field>
+
+                  <Field label="Workspace URL" required>
+                    <input value={form.workspace_url} onChange={e => set('workspace_url', e.target.value)}
+                      placeholder="https://adb-1234567890.azuredatabricks.net"
+                      className={inputCls} />
+                  </Field>
+
+                  <Field label="HTTP Path (SQL Warehouse)" required>
+                    <input value={form.http_path} onChange={e => set('http_path', e.target.value)}
+                      placeholder="/sql/1.0/warehouses/abc123def456"
+                      className={inputCls} />
+                    <p className="text-[10px] text-ink-400 mt-1">
+                      Found in: SQL Warehouses → your warehouse → Connection details
+                    </p>
+                  </Field>
+
+                  <Field label="Personal Access Token (PAT)" required>
+                    <div className="relative">
+                      <input
+                        type={showPat ? 'text' : 'password'}
+                        value={form.pat}
+                        onChange={e => set('pat', e.target.value)}
+                        placeholder="dapi••••••••••••••••••••••••••••••••"
+                        className={cn(inputCls, 'pr-10')}
+                      />
+                      <button onClick={() => setShowPat(v => !v)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-ink-400 hover:text-ink-600">
+                        {showPat ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </Field>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <Field label="Default Catalog">
+                      <input value={form.catalog} onChange={e => set('catalog', e.target.value)}
+                        placeholder="hive_metastore" className={inputCls} />
+                    </Field>
+                    <Field label="Description">
+                      <input value={form.description} onChange={e => set('description', e.target.value)}
+                        placeholder="Optional" className={inputCls} />
+                    </Field>
+                  </div>
+                </div>
+
+                {/* Feedback */}
+                {error && (
+                  <motion.div initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }}
+                    className="flex items-start gap-2 mt-3 p-3 bg-axared-50 border border-axared-100 rounded-xl text-xs text-axared-600">
+                    <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                    <span>{error}</span>
+                  </motion.div>
+                )}
+                {success && (
+                  <motion.div initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }}
+                    className="flex items-center gap-2 mt-3 p-3 bg-emerald-50 border border-emerald-100 rounded-xl text-xs text-emerald-700">
+                    <CheckCircle className="w-4 h-4 flex-shrink-0" />
+                    <span>{success}</span>
+                  </motion.div>
+                )}
+
+                {/* Actions */}
+                <div className="flex items-center justify-end gap-3 mt-5 pt-4 border-t border-ink-100">
+                  <button onClick={handleClose}
+                    className="px-4 py-2 rounded-lg text-sm text-ink-500 hover:text-ink-700 hover:bg-ink-50 transition-colors">
+                    Cancel
+                  </button>
+                  <button onClick={handleConnect} disabled={loading || !!success}
+                    className={cn(
+                      'flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-semibold transition-all',
+                      'bg-axa-800 text-white hover:bg-axa-700 shadow-axa',
+                      'disabled:opacity-50 disabled:cursor-not-allowed'
+                    )}>
+                    {loading && <Loader2 className="w-4 h-4 animate-spin" />}
+                    {loading ? 'Testing connection…' : 'Connect & Save'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        </>
       )}
-    >
-      {icon}
-      <span>{label}</span>
-      {badge !== undefined && (
-        <span className={cn(
-          'text-[9px] font-bold px-1.5 py-0.5 rounded-full',
-          active ? 'bg-axa-50 text-axa-800 border border-axa-100' : 'bg-ink-100 text-ink-500'
-        )}>
-          {badge}
-        </span>
-      )}
-    </button>
+    </AnimatePresence>
   )
 }
