@@ -20,7 +20,7 @@ export function DatabricksPanel({ session }: DatabricksPanelProps) {
     addDatabricksConnection, removeDatabricksConnection,
     getSessionDatabricksItems, addDatabricksIngestItem,
     updateDatabricksIngestItem, removeDatabricksIngestItem,
-    toggleApprovedTable, isTableApproved, getApprovedTables, setApprovedTables,
+    isTableApproved, getApprovedTables, setApprovedTables,
   } = useStore()
 
   const connections = getDatabricksConnections()
@@ -59,22 +59,34 @@ export function DatabricksPanel({ session }: DatabricksPanelProps) {
 
   // Called by CatalogBrowser when ingest succeeds — auto-approve for SQL
   const handleAutoApprove = (fullTable: string) => {
-    const connId  = connections.find(c => c.connection_id === activeConn)?.connection_id ?? ''
+    if (!activeConn) return
     const current = getApprovedTables(session.id)
-    if (!current.includes(fullTable) && connId) {
-      setApprovedTables(session.id, connId, [...current, fullTable])
-      api.sqlAgent.syncApprovedSources({ session_id: session.id, knowledge_set: session.id, connection_id: connId, tables: [...current, fullTable] }).catch(() => {})
-    }
+    if (current.includes(fullTable)) return   // already approved
+    const updated = [...current, fullTable]
+    setApprovedTables(session.id, activeConn, updated)
+    api.sqlAgent.syncApprovedSources({
+      session_id   : session.id,
+      knowledge_set: session.id,
+      connection_id: activeConn,
+      tables       : updated,
+    }).catch(() => {})
   }
 
   // Called by TableIngestCard "Use SQL" button
   const handleToggleApprove = (item: DatabricksIngestItem) => {
-    const fullTable    = `${item.catalog}.${item.schema}.${item.table}`
-    const wasApproved  = isTableApproved(session.id, fullTable)
-    toggleApprovedTable(session.id, item.connection_id, fullTable)
-    const current = getApprovedTables(session.id)
-    const updated = wasApproved ? current.filter(t => t !== fullTable) : [...current, fullTable]
-    api.sqlAgent.syncApprovedSources({ session_id: session.id, knowledge_set: session.id, connection_id: item.connection_id, tables: updated }).catch(() => {})
+    const fullTable   = `${item.catalog}.${item.schema}.${item.table}`
+    const current     = getApprovedTables(session.id)
+    const wasApproved = current.includes(fullTable)
+    const updated     = wasApproved
+      ? current.filter(t => t !== fullTable)
+      : [...current, fullTable]
+    setApprovedTables(session.id, item.connection_id, updated)
+    api.sqlAgent.syncApprovedSources({
+      session_id   : session.id,
+      knowledge_set: session.id,
+      connection_id: item.connection_id,
+      tables       : updated,
+    }).catch(() => {})
   }
 
   const readyCount    = ingestItems.filter(i => i.status === 'ready').length
