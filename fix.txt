@@ -1,7 +1,7 @@
 'use client'
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Plus, Plug, Trash2, CheckCircle, RefreshCw, Loader2, ServerCrash } from 'lucide-react'
+import { Plus, Plug, Trash2, CheckCircle, RefreshCw, Loader2, ServerCrash, SquareCode } from 'lucide-react'
 import { ConnectModal } from './ConnectModal'
 import { CatalogBrowser } from './CatalogBrowser'
 import { TableIngestCard } from './TableIngestCard'
@@ -16,48 +16,35 @@ interface DatabricksPanelProps {
 
 export function DatabricksPanel({ session }: DatabricksPanelProps) {
   const {
-    getDatabricksConnections,
-    setDatabricksConnections,
-    addDatabricksConnection,
-    removeDatabricksConnection,
-    getSessionDatabricksItems,
-    addDatabricksIngestItem,
-    updateDatabricksIngestItem,
-    removeDatabricksIngestItem,
+    getDatabricksConnections, setDatabricksConnections,
+    addDatabricksConnection, removeDatabricksConnection,
+    getSessionDatabricksItems, addDatabricksIngestItem,
+    updateDatabricksIngestItem, removeDatabricksIngestItem,
+    isTableApproved, getApprovedTables, setApprovedTables, clearApprovedTables,
   } = useStore()
 
-  const connections  = getDatabricksConnections()
-  const ingestItems  = getSessionDatabricksItems(session.id)
+  const connections = getDatabricksConnections()
+  const ingestItems = getSessionDatabricksItems(session.id)
 
-  const [showModal, setShowModal]     = useState(false)
-  const [activeConn, setActiveConn]   = useState<string | null>(null)
+  const [showModal, setShowModal]       = useState(false)
+  const [activeConn, setActiveConn]     = useState<string | null>(null)
   const [loadingConns, setLoadingConns] = useState(false)
-  const [testing, setTesting]         = useState<string | null>(null)
+  const [testing, setTesting]           = useState<string | null>(null)
 
-  // Load saved connections from backend on mount
-  useEffect(() => {
-    loadConnections()
-  }, [session.id])
+  useEffect(() => { loadConnections() }, [session.id])
 
   const loadConnections = async () => {
     setLoadingConns(true)
     try {
       const list = await api.databricks.listConnections(session.id)
       setDatabricksConnections(list)
-      // Auto-expand first connection if available
-      if (list.length > 0 && !activeConn) {
-        setActiveConn(list[0].connection_id)
-      }
-    } catch (_) {
-      // Non-fatal
-    } finally {
-      setLoadingConns(false)
-    }
+      if (list.length > 0 && !activeConn) setActiveConn(list[0].connection_id)
+    } catch (_) {}
+    finally { setLoadingConns(false) }
   }
 
   const handleConnected = (conn: DatabricksConnection) => {
-    addDatabricksConnection(conn)
-    setActiveConn(conn.connection_id)
+    addDatabricksConnection(conn); setActiveConn(conn.connection_id)
   }
 
   const handleDelete = async (connection_id: string) => {
@@ -70,18 +57,68 @@ export function DatabricksPanel({ session }: DatabricksPanelProps) {
 
   const handleTest = async (connection_id: string) => {
     setTesting(connection_id)
-    try {
-      await api.databricks.testConnection(connection_id)
-    } catch (_) {}
+    try { await api.databricks.testConnection(connection_id) } catch (_) {}
     finally { setTesting(null) }
   }
 
-  const readyCount = ingestItems.filter(i => i.status === 'ready').length
+  // Called by CatalogBrowser after successful ingest — auto-approve for SQL
+  const handleAutoApprove = (fullTable: string) => {
+    if (!activeConn) return
+    const current = getApprovedTables(session.id)
+    if (current.includes(fullTable)) return
+    const updated = [...current, fullTable]
+    setApprovedTables(session.id, activeConn, updated)
+    api.sqlAgent.syncApprovedSources({
+      session_id: session.id, knowledge_set: session.id,
+      connection_id: activeConn, tables: updated,
+    }).catch(() => {})
+  }
+
+  // Called by TableIngestCard "Use SQL" / "SQL On" toggle
+  const handleToggleApprove = (item: DatabricksIngestItem) => {
+    const fullTable  = `${item.catalog}.${item.schema}.${item.table}`
+    const current    = getApprovedTables(session.id)
+    const wasApproved = current.includes(fullTable)
+    const updated    = wasApproved
+      ? current.filter(t => t !== fullTable)
+      : [...current, fullTable]
+    setApprovedTables(session.id, item.connection_id, updated)
+    api.sqlAgent.syncApprovedSources({
+      session_id: session.id, knowledge_set: session.id,
+      connection_id: item.connection_id, tables: updated,
+    }).catch(() => {})
+  }
+
+  // Called by TableIngestCard X button — removes ingest item AND clears SQL approval
+  const handleRemove = (itemId: string) => {
+    const item = ingestItems.find(i => i.id === itemId)
+    if (item) {
+      // Remove from SQL approved sources
+      const fullTable = `${item.catalog}.${item.schema}.${item.table}`
+      const current   = getApprovedTables(session.id)
+      const updated   = current.filter(t => t !== fullTable)
+      if (updated.length !== current.length) {
+        setApprovedTables(session.id, item.connection_id, updated)
+        api.sqlAgent.syncApprovedSources({
+          session_id: session.id, knowledge_set: session.id,
+          connection_id: item.connection_id, tables: updated,
+        }).catch(() => {})
+      }
+    }
+    removeDatabricksIngestItem(session.id, itemId)
+  }
+
+  // Only count SQL approvals from INGESTED tables (not standalone catalog approvals)
+  // This prevents double-counting when same table is approved via both paths
+  const readyItems     = ingestItems.filter(i => i.status === 'ready')
+  const readyCount     = readyItems.length
+  const approvedCount  = readyItems.filter(i =>
+    isTableApproved(session.id, `${i.catalog}.${i.schema}.${i.table}`)
+  ).length
 
   return (
     <div className="flex flex-col h-full">
-
-      {/* Header row */}
+      {/* Header */}
       <div className="flex items-center justify-between px-4 py-2.5 border-b border-ink-100">
         <div className="flex items-center gap-1.5">
           <Plug className="w-3.5 h-3.5 text-axa-800" />
@@ -91,22 +128,20 @@ export function DatabricksPanel({ session }: DatabricksPanelProps) {
               {readyCount} indexed
             </span>
           )}
+          {approvedCount > 0 && (
+            <span className="flex items-center gap-0.5 text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full">
+              <SquareCode className="w-2.5 h-2.5" />{approvedCount} SQL
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-1">
-          <button
-            onClick={loadConnections}
-            disabled={loadingConns}
-            className="p-1 rounded-md hover:bg-ink-100 text-ink-400 transition-colors"
-            title="Refresh connections"
-          >
+          <button onClick={loadConnections} disabled={loadingConns}
+            className="p-1 rounded-md hover:bg-ink-100 text-ink-400 transition-colors" title="Refresh">
             <RefreshCw className={cn('w-3 h-3', loadingConns && 'animate-spin')} />
           </button>
-          <button
-            onClick={() => setShowModal(true)}
-            className="flex items-center gap-1 px-2 py-1 rounded-md bg-axa-50 border border-axa-100 text-axa-800 text-[10px] font-semibold hover:bg-axa-100 transition-colors"
-          >
-            <Plus className="w-3 h-3" />
-            Connect
+          <button onClick={() => setShowModal(true)}
+            className="flex items-center gap-1 px-2 py-1 rounded-md bg-axa-50 border border-axa-100 text-axa-800 text-[10px] font-semibold hover:bg-axa-100 transition-colors">
+            <Plus className="w-3 h-3" />Connect
           </button>
         </div>
       </div>
@@ -114,77 +149,51 @@ export function DatabricksPanel({ session }: DatabricksPanelProps) {
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
         {loadingConns && connections.length === 0 ? (
-          <div className="flex items-center justify-center py-8">
-            <Loader2 className="w-5 h-5 text-axa-800 animate-spin" />
-          </div>
+          <div className="flex items-center justify-center py-8"><Loader2 className="w-5 h-5 text-axa-800 animate-spin" /></div>
         ) : connections.length === 0 ? (
           <EmptyState onConnect={() => setShowModal(true)} />
         ) : (
           <div className="py-2 space-y-1">
             {connections.map(conn => (
               <div key={conn.connection_id}>
-                {/* Connection row */}
                 <div
-                  className={cn(
-                    'flex items-center gap-2 px-3 py-2 rounded-lg mx-2 cursor-pointer transition-colors',
-                    activeConn === conn.connection_id ? 'bg-axa-50 border border-axa-100' : 'hover:bg-ink-50'
-                  )}
-                  onClick={() => setActiveConn(
-                    activeConn === conn.connection_id ? null : conn.connection_id
-                  )}
+                  className={cn('flex items-center gap-2 px-3 py-2 rounded-lg mx-2 cursor-pointer transition-colors',
+                    activeConn === conn.connection_id ? 'bg-axa-50 border border-axa-100' : 'hover:bg-ink-50')}
+                  onClick={() => setActiveConn(activeConn === conn.connection_id ? null : conn.connection_id)}
                 >
                   <div className="w-5 h-5 rounded-md bg-axa-800 flex items-center justify-center flex-shrink-0">
                     <Plug className="w-3 h-3 text-white" />
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="text-xs font-semibold text-ink-800 truncate">{conn.connection_name}</p>
-                    <p className="text-[9px] text-ink-400 truncate font-mono">
-                      {conn.workspace_url.replace('https://', '')}
-                    </p>
+                    <p className="text-[9px] text-ink-400 truncate font-mono">{conn.workspace_url.replace('https://', '')}</p>
                   </div>
                   <div className="flex items-center gap-1 flex-shrink-0">
-                    {conn.last_tested_at && (
-                      <CheckCircle className="w-3 h-3 text-emerald-500" title="Recently tested" />
-                    )}
-                    <button
-                      onClick={e => { e.stopPropagation(); handleTest(conn.connection_id) }}
+                    {conn.last_tested_at && <CheckCircle className="w-3 h-3 text-emerald-500" title="Tested" />}
+                    <button onClick={e => { e.stopPropagation(); handleTest(conn.connection_id) }}
                       disabled={testing === conn.connection_id}
-                      className="p-1 rounded hover:bg-axa-100 text-ink-400 hover:text-axa-700 transition-colors"
-                      title="Test connection"
-                    >
-                      {testing === conn.connection_id
-                        ? <Loader2 className="w-3 h-3 animate-spin" />
-                        : <RefreshCw className="w-3 h-3" />
-                      }
+                      className="p-1 rounded hover:bg-axa-100 text-ink-400 hover:text-axa-700 transition-colors">
+                      {testing === conn.connection_id ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
                     </button>
-                    <button
-                      onClick={e => { e.stopPropagation(); handleDelete(conn.connection_id) }}
-                      className="p-1 rounded hover:bg-axared-50 text-ink-300 hover:text-axared-500 transition-colors"
-                      title="Remove connection"
-                    >
+                    <button onClick={e => { e.stopPropagation(); handleDelete(conn.connection_id) }}
+                      className="p-1 rounded hover:bg-axared-50 text-ink-300 hover:text-axared-500 transition-colors">
                       <Trash2 className="w-3 h-3" />
                     </button>
                   </div>
                 </div>
 
-                {/* Catalog browser (expanded when active) */}
                 <AnimatePresence>
                   {activeConn === conn.connection_id && (
-                    <motion.div
-                      initial={{ opacity: 0, height: 0 }}
-                      animate={{ opacity: 1, height: 'auto' }}
-                      exit={{ opacity: 0, height: 0 }}
-                      className="overflow-hidden ml-4 mr-2 mt-1 mb-2 bg-white border border-ink-100 rounded-xl p-2"
-                    >
+                    <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}
+                      className="overflow-hidden ml-4 mr-2 mt-1 mb-2 bg-white border border-ink-100 rounded-xl p-2">
                       <CatalogBrowser
                         connection={conn}
                         sessionId={session.id}
                         knowledgeSetId={session.id}
                         ingestItems={ingestItems}
                         onIngestItem={(item) => addDatabricksIngestItem(session.id, item)}
-                        onUpdateItem={(itemId, updates) =>
-                          updateDatabricksIngestItem(session.id, itemId, updates)
-                        }
+                        onUpdateItem={(itemId, updates) => updateDatabricksIngestItem(session.id, itemId, updates)}
+                        onAutoApprove={handleAutoApprove}
                       />
                     </motion.div>
                   )}
@@ -194,19 +203,22 @@ export function DatabricksPanel({ session }: DatabricksPanelProps) {
           </div>
         )}
 
-        {/* Ingested tables list */}
+        {/* Ingested tables — SQL toggle lives here only */}
         {ingestItems.length > 0 && (
           <div className="border-t border-ink-100 pt-2 mt-1">
-            <p className="text-[10px] font-semibold text-ink-400 uppercase tracking-wider px-4 mb-1.5">
-              Ingested Tables
-            </p>
+            <div className="flex items-center justify-between px-4 mb-1">
+              <p className="text-[10px] font-semibold text-ink-400 uppercase tracking-wider">Ingested Tables</p>
+              <p className="text-[9px] text-ink-300">Toggle "Use SQL" to enable live queries</p>
+            </div>
             <AnimatePresence initial={false}>
               {ingestItems.map((item, i) => (
                 <TableIngestCard
                   key={item.id}
                   item={item}
                   index={i}
-                  onRemove={(id) => removeDatabricksIngestItem(session.id, id)}
+                  isApproved={isTableApproved(session.id, `${item.catalog}.${item.schema}.${item.table}`)}
+                  onToggleApprove={handleToggleApprove}
+                  onRemove={handleRemove}
                 />
               ))}
             </AnimatePresence>
@@ -214,12 +226,7 @@ export function DatabricksPanel({ session }: DatabricksPanelProps) {
         )}
       </div>
 
-      <ConnectModal
-        isOpen={showModal}
-        onClose={() => setShowModal(false)}
-        knowledgeSetId={session.id}
-        onConnected={handleConnected}
-      />
+      <ConnectModal isOpen={showModal} onClose={() => setShowModal(false)} knowledgeSetId={session.id} onConnected={handleConnected} />
     </div>
   )
 }
@@ -231,15 +238,9 @@ function EmptyState({ onConnect }: { onConnect: () => void }) {
         <ServerCrash className="w-5 h-5 text-axa-300" />
       </div>
       <p className="text-xs font-semibold text-ink-600 mb-1">No connections yet</p>
-      <p className="text-[10px] text-ink-400 leading-relaxed mb-3">
-        Connect to a Databricks workspace to browse Hive Metastore tables and ingest them into your knowledge set.
-      </p>
-      <button
-        onClick={onConnect}
-        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-axa-800 text-white text-xs font-semibold hover:bg-axa-700 transition-colors shadow-axa"
-      >
-        <Plus className="w-3.5 h-3.5" />
-        Add Connection
+      <p className="text-[10px] text-ink-400 leading-relaxed mb-3">Connect to Databricks to browse tables and ingest them into your knowledge set.</p>
+      <button onClick={onConnect} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-axa-800 text-white text-xs font-semibold hover:bg-axa-700 transition-colors shadow-axa">
+        <Plus className="w-3.5 h-3.5" />Add Connection
       </button>
     </div>
   )
