@@ -1,142 +1,246 @@
 'use client'
-import { motion } from 'framer-motion'
-import { Table, Eye, X, CheckCircle, AlertCircle, Loader2, Layers, SquareCode } from 'lucide-react'
-import type { DatabricksIngestItem } from '@/types'
+import { useState, useEffect } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+import { Plus, Plug, Trash2, CheckCircle, RefreshCw, Loader2, ServerCrash } from 'lucide-react'
+import { ConnectModal } from './ConnectModal'
+import { CatalogBrowser } from './CatalogBrowser'
+import { TableIngestCard } from './TableIngestCard'
+import { api } from '@/lib/api'
+import { useStore } from '@/store'
 import { cn } from '@/lib/utils'
+import type { KnowledgeSet, DatabricksConnection, DatabricksIngestItem } from '@/types'
 
-interface TableIngestCardProps {
-  item: DatabricksIngestItem
-  index: number
-  isApproved: boolean
-  onToggleApprove: (item: DatabricksIngestItem) => void
-  onRemove: (id: string) => void
+interface DatabricksPanelProps {
+  session: KnowledgeSet
 }
 
-export function TableIngestCard({ item, index, isApproved, onToggleApprove, onRemove }: TableIngestCardProps) {
-  const isLoading = item.status === 'profiling' || item.status === 'ingesting'
+export function DatabricksPanel({ session }: DatabricksPanelProps) {
+  const {
+    getDatabricksConnections,
+    setDatabricksConnections,
+    addDatabricksConnection,
+    removeDatabricksConnection,
+    getSessionDatabricksItems,
+    addDatabricksIngestItem,
+    updateDatabricksIngestItem,
+    removeDatabricksIngestItem,
+  } = useStore()
 
-  const statusLabel = {
-    idle     : 'Queued',
-    profiling: 'Profiling…',
-    ingesting: 'Indexing…',
-    ready    : 'Indexed',
-    error    : 'Failed',
-  }[item.status]
+  const connections  = getDatabricksConnections()
+  const ingestItems  = getSessionDatabricksItems(session.id)
 
-  const statusColor = {
-    idle     : 'text-ink-400',
-    profiling: 'text-axa-700',
-    ingesting: 'text-axa-700',
-    ready    : 'text-emerald-600',
-    error    : 'text-axared-500',
-  }[item.status]
+  const [showModal, setShowModal]     = useState(false)
+  const [activeConn, setActiveConn]   = useState<string | null>(null)
+  const [loadingConns, setLoadingConns] = useState(false)
+  const [testing, setTesting]         = useState<string | null>(null)
+
+  // Load saved connections from backend on mount
+  useEffect(() => {
+    loadConnections()
+  }, [session.id])
+
+  const loadConnections = async () => {
+    setLoadingConns(true)
+    try {
+      const list = await api.databricks.listConnections(session.id)
+      setDatabricksConnections(list)
+      // Auto-expand first connection if available
+      if (list.length > 0 && !activeConn) {
+        setActiveConn(list[0].connection_id)
+      }
+    } catch (_) {
+      // Non-fatal
+    } finally {
+      setLoadingConns(false)
+    }
+  }
+
+  const handleConnected = (conn: DatabricksConnection) => {
+    addDatabricksConnection(conn)
+    setActiveConn(conn.connection_id)
+  }
+
+  const handleDelete = async (connection_id: string) => {
+    try {
+      await api.databricks.deleteConnection(connection_id)
+      removeDatabricksConnection(connection_id)
+      if (activeConn === connection_id) setActiveConn(null)
+    } catch (_) {}
+  }
+
+  const handleTest = async (connection_id: string) => {
+    setTesting(connection_id)
+    try {
+      await api.databricks.testConnection(connection_id)
+    } catch (_) {}
+    finally { setTesting(null) }
+  }
+
+  const readyCount = ingestItems.filter(i => i.status === 'ready').length
 
   return (
-    <motion.div
-      initial={{ opacity: 0, x: -10 }}
-      animate={{ opacity: 1, x: 0 }}
-      exit={{ opacity: 0, x: -10 }}
-      transition={{ delay: index * 0.04 }}
-      className="group flex items-start gap-2.5 px-3 py-2.5 hover:bg-ink-50 rounded-lg mx-1 transition-colors"
-    >
-      {/* Icon */}
-      <div className={cn(
-        'w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 border transition-colors',
-        isApproved
-          ? 'bg-emerald-50 border-emerald-200'
-          : 'bg-axa-50 border-axa-100'
-      )}>
-        {item.table_type === 'VIEW'
-          ? <Eye className={cn('w-3.5 h-3.5', isApproved ? 'text-emerald-600' : 'text-axa-700')} />
-          : <Table className={cn('w-3.5 h-3.5', isApproved ? 'text-emerald-700' : 'text-axa-800')} />
-        }
-      </div>
+    <div className="flex flex-col h-full">
 
-      {/* Info */}
-      <div className="flex-1 min-w-0">
+      {/* Header row */}
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-ink-100">
         <div className="flex items-center gap-1.5">
-          <p className="text-xs font-semibold text-ink-700 truncate">{item.table}</p>
-          {isApproved && (
-            <span className="flex items-center gap-0.5 text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full flex-shrink-0">
-              <SquareCode className="w-2 h-2" /> SQL
+          <Plug className="w-3.5 h-3.5 text-axa-800" />
+          <span className="text-[10px] font-semibold text-axa-800 uppercase tracking-widest">Databricks</span>
+          {readyCount > 0 && (
+            <span className="text-[9px] font-bold text-emerald-600 bg-emerald-50 border border-emerald-100 px-1.5 py-0.5 rounded-full">
+              {readyCount} indexed
             </span>
           )}
         </div>
-        <div className="flex items-center gap-1.5 mt-0.5">
-          <Layers className="w-2.5 h-2.5 text-ink-300" />
-          <span className="text-[10px] text-ink-400 truncate font-mono">
-            {item.catalog}.{item.schema}
-          </span>
-        </div>
-
-        {/* Progress bar */}
-        {isLoading && (
-          <div className="mt-1.5 h-0.5 bg-ink-100 rounded-full overflow-hidden">
-            <div
-              className="h-full bg-axa-800 rounded-full transition-all duration-500"
-              style={{ width: `${item.progress}%` }}
-            />
-          </div>
-        )}
-
-        {/* Stats row */}
-        {item.status === 'ready' && (
-          <div className="flex items-center gap-2 mt-1 flex-wrap">
-            {item.row_count && (
-              <span className="text-[9px] text-ink-400 font-mono">{item.row_count.toLocaleString()} rows</span>
-            )}
-            {item.chunk_count && (
-              <span className="text-[9px] text-ink-400 font-mono">· {item.chunk_count} chunks</span>
-            )}
-            {item.duration_seconds && (
-              <span className="text-[9px] text-ink-400 font-mono">· {item.duration_seconds}s</span>
-            )}
-          </div>
-        )}
-
-        {item.status === 'error' && (
-          <p className="text-[10px] text-axared-500 mt-0.5 truncate">{item.error}</p>
-        )}
-      </div>
-
-      {/* Right actions */}
-      <div className="flex flex-col items-end gap-1 flex-shrink-0">
         <div className="flex items-center gap-1">
-          <span className={cn('text-[9px] font-semibold', statusColor)}>{statusLabel}</span>
-          {isLoading
-            ? <Loader2 className="w-3 h-3 text-axa-800 animate-spin" />
-            : item.status === 'ready'
-            ? <CheckCircle className="w-3 h-3 text-emerald-500" />
-            : item.status === 'error'
-            ? <AlertCircle className="w-3 h-3 text-axared-500" />
-            : null
-          }
           <button
-            onClick={() => onRemove(item.id)}
-            className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-axared-50 hover:text-axared-500 text-ink-300 transition-all"
-            title="Remove"
+            onClick={loadConnections}
+            disabled={loadingConns}
+            className="p-1 rounded-md hover:bg-ink-100 text-ink-400 transition-colors"
+            title="Refresh connections"
           >
-            <X className="w-3 h-3" />
+            <RefreshCw className={cn('w-3 h-3', loadingConns && 'animate-spin')} />
+          </button>
+          <button
+            onClick={() => setShowModal(true)}
+            className="flex items-center gap-1 px-2 py-1 rounded-md bg-axa-50 border border-axa-100 text-axa-800 text-[10px] font-semibold hover:bg-axa-100 transition-colors"
+          >
+            <Plus className="w-3 h-3" />
+            Connect
           </button>
         </div>
+      </div>
 
-        {/* SQL approve toggle — only shown for ready tables */}
-        {item.status === 'ready' && (
-          <button
-            onClick={() => onToggleApprove(item)}
-            className={cn(
-              'flex items-center gap-1 text-[9px] font-semibold px-1.5 py-0.5 rounded-full border transition-all',
-              isApproved
-                ? 'bg-emerald-50 border-emerald-300 text-emerald-700 hover:bg-emerald-100'
-                : 'bg-ink-50 border-ink-200 text-ink-400 hover:bg-emerald-50 hover:border-emerald-200 hover:text-emerald-700'
-            )}
-            title={isApproved ? 'Remove from SQL sources' : 'Approve for SQL queries'}
-          >
-            <SquareCode className="w-2.5 h-2.5" />
-            {isApproved ? 'SQL ✓' : 'Use SQL'}
-          </button>
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto">
+        {loadingConns && connections.length === 0 ? (
+          <div className="flex items-center justify-center py-8">
+            <Loader2 className="w-5 h-5 text-axa-800 animate-spin" />
+          </div>
+        ) : connections.length === 0 ? (
+          <EmptyState onConnect={() => setShowModal(true)} />
+        ) : (
+          <div className="py-2 space-y-1">
+            {connections.map(conn => (
+              <div key={conn.connection_id}>
+                {/* Connection row */}
+                <div
+                  className={cn(
+                    'flex items-center gap-2 px-3 py-2 rounded-lg mx-2 cursor-pointer transition-colors',
+                    activeConn === conn.connection_id ? 'bg-axa-50 border border-axa-100' : 'hover:bg-ink-50'
+                  )}
+                  onClick={() => setActiveConn(
+                    activeConn === conn.connection_id ? null : conn.connection_id
+                  )}
+                >
+                  <div className="w-5 h-5 rounded-md bg-axa-800 flex items-center justify-center flex-shrink-0">
+                    <Plug className="w-3 h-3 text-white" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-semibold text-ink-800 truncate">{conn.connection_name}</p>
+                    <p className="text-[9px] text-ink-400 truncate font-mono">
+                      {conn.workspace_url.replace('https://', '')}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    {conn.last_tested_at && (
+                      <CheckCircle className="w-3 h-3 text-emerald-500" title="Recently tested" />
+                    )}
+                    <button
+                      onClick={e => { e.stopPropagation(); handleTest(conn.connection_id) }}
+                      disabled={testing === conn.connection_id}
+                      className="p-1 rounded hover:bg-axa-100 text-ink-400 hover:text-axa-700 transition-colors"
+                      title="Test connection"
+                    >
+                      {testing === conn.connection_id
+                        ? <Loader2 className="w-3 h-3 animate-spin" />
+                        : <RefreshCw className="w-3 h-3" />
+                      }
+                    </button>
+                    <button
+                      onClick={e => { e.stopPropagation(); handleDelete(conn.connection_id) }}
+                      className="p-1 rounded hover:bg-axared-50 text-ink-300 hover:text-axared-500 transition-colors"
+                      title="Remove connection"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Catalog browser (expanded when active) */}
+                <AnimatePresence>
+                  {activeConn === conn.connection_id && (
+                    <motion.div
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: 'auto' }}
+                      exit={{ opacity: 0, height: 0 }}
+                      className="overflow-hidden ml-4 mr-2 mt-1 mb-2 bg-white border border-ink-100 rounded-xl p-2"
+                    >
+                      <CatalogBrowser
+                        connection={conn}
+                        sessionId={session.id}
+                        knowledgeSetId={session.id}
+                        ingestItems={ingestItems}
+                        onIngestItem={(item) => addDatabricksIngestItem(session.id, item)}
+                        onUpdateItem={(itemId, updates) =>
+                          updateDatabricksIngestItem(session.id, itemId, updates)
+                        }
+                      />
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Ingested tables list */}
+        {ingestItems.length > 0 && (
+          <div className="border-t border-ink-100 pt-2 mt-1">
+            <p className="text-[10px] font-semibold text-ink-400 uppercase tracking-wider px-4 mb-1.5">
+              Ingested Tables
+            </p>
+            <AnimatePresence initial={false}>
+              {ingestItems.map((item, i) => (
+                <TableIngestCard
+                  key={item.id}
+                  item={item}
+                  index={i}
+                  onRemove={(id) => removeDatabricksIngestItem(session.id, id)}
+                />
+              ))}
+            </AnimatePresence>
+          </div>
         )}
       </div>
-    </motion.div>
+
+      <ConnectModal
+        isOpen={showModal}
+        onClose={() => setShowModal(false)}
+        knowledgeSetId={session.id}
+        onConnected={handleConnected}
+      />
+    </div>
+  )
+}
+
+function EmptyState({ onConnect }: { onConnect: () => void }) {
+  return (
+    <div className="flex flex-col items-center justify-center py-10 text-center px-4">
+      <div className="w-10 h-10 rounded-xl bg-axa-50 border border-axa-100 flex items-center justify-center mb-3">
+        <ServerCrash className="w-5 h-5 text-axa-300" />
+      </div>
+      <p className="text-xs font-semibold text-ink-600 mb-1">No connections yet</p>
+      <p className="text-[10px] text-ink-400 leading-relaxed mb-3">
+        Connect to a Databricks workspace to browse Hive Metastore tables and ingest them into your knowledge set.
+      </p>
+      <button
+        onClick={onConnect}
+        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-axa-800 text-white text-xs font-semibold hover:bg-axa-700 transition-colors shadow-axa"
+      >
+        <Plus className="w-3.5 h-3.5" />
+        Add Connection
+      </button>
+    </div>
   )
 }
