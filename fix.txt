@@ -1,523 +1,716 @@
 """
-services/rag.py
+services/databricks/sql_agent.py
 
-Conversational RAG + SQL Agent hybrid engine.
+Agentic SQL engine for GovernGPT.
 
-Routing logic:
-  1. If enable_sql_agent=True and approved Databricks tables exist:
-     → Keyword pre-classifier runs first (no LLM call, no ChromaDB lookup)
-     → If definite SQL intent: skip RAG retrieval, go straight to SQL agent
-     → If ambiguous: run RAG retrieval for context, then SQL agent
-     → If NOT_SQL: fall through to standard RAG
-  2. Standard RAG: condense → retrieve → answer
-  3. Direct (no retrieval): history-aware direct LLM call
+Implements the 6-step agentic loop from the specification:
+  Step 1 — Intent Detection   : classify user request
+  Step 2 — Think Aloud        : explain plan before executing
+  Step 3 — SQL Generation     : produce clean optimised SQL via LLM
+  Step 4 — Execute            : run against Databricks SQL API (read-only enforced)
+  Step 5 — Interpret & Respond: narrate results, not just dump rows
+  Step 6 — Governance Overlay : surface PII / DQ / ownership signals
 
-Compatible with LangChain >= 0.2.x — no deprecated chains used.
+Security:
+  - All tables validated against APPROVED_SOURCES before query execution
+  - Prohibited operations (DDL, DML writes) blocked at validation layer
+  - SQL is parsed and rejected if it contains forbidden keywords
+  - Results are never fabricated — if execution fails, error is translated
 """
 
+from __future__ import annotations
+import re
 import time
 import uuid
+import json
 from datetime import datetime
 from typing import Optional
 
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import BaseMessage
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.documents import Document
-from langchain_community.vectorstores import Chroma
 
 from llm import get_llm
-from db import db_insert
-from config import CHAT_MODEL, RETRIEVAL_K
-from services.memory import save_turn, load_history_as_messages, DEFAULT_WINDOW_K
+from db import db_insert, db_query
+from config import CHAT_MODEL
+from services.databricks.client import DatabricksClient
+from services.databricks.approved_sources import (
+    get_approved_sources,
+    get_approved_table_names,
+    get_connection_for_session,
+    is_table_approved,
+)
 
 
-# ── Prompts ──────────────────────────────────────────────────────
+# ── Intent types ─────────────────────────────────────────────────
 
-CONDENSE_PROMPT = ChatPromptTemplate.from_messages([
-    (
-        "system",
-        "You are a question rewriter. "
-        "Given the conversation history below and a follow-up question, "
-        "rewrite the follow-up question into a fully self-contained standalone question "
-        "that captures all relevant context from the history. "
-        "Return ONLY the rewritten question — no explanation, no preamble.",
-    ),
-    MessagesPlaceholder(variable_name="chat_history"),
-    ("human", "{question}"),
+INTENT_TYPES = {
+    "SIMPLE_LOOKUP"  : "Retrieve or filter rows from a single table",
+    "AGGREGATION"    : "SUM, COUNT, AVG, GROUP BY analytics",
+    "COMPARISON"     : "Compare values across dimensions or time periods",
+    "JOIN_OPERATION" : "JOIN across two or more approved tables",
+    "MULTI_STEP"     : "Requires CTEs or multiple sub-queries",
+    "CREATE_OBJECT"  : "User wants to persist a view or CTAS",
+    "OUT_OF_SCOPE"   : "Table not approved, prohibited operation, or file-based source",
+    "NOT_SQL"        : "Question does not require SQL — answer from RAG context only",
+}
+
+# ── Prohibited SQL operations ─────────────────────────────────────
+
+PROHIBITED_PATTERNS = [
+    r"\bDROP\s+(TABLE|VIEW|SCHEMA|DATABASE)\b",
+    r"\bDELETE\s+FROM\b",
+    r"\bINSERT\s+INTO\b",
+    r"\bUPDATE\s+\w+\s+SET\b",
+    r"\bTRUNCATE\s+(TABLE\s+)?\w+\b",
+    r"\bALTER\s+TABLE\b",
+    r"\bGRANT\b",
+    r"\bREVOKE\b",
+]
+
+PROHIBITED_READABLE = {
+    "DROP"    : "DROP TABLE/VIEW/SCHEMA",
+    "DELETE"  : "DELETE FROM",
+    "INSERT"  : "INSERT INTO",
+    "UPDATE"  : "UPDATE ... SET",
+    "TRUNCATE": "TRUNCATE",
+    "ALTER"   : "ALTER TABLE",
+    "GRANT"   : "GRANT",
+    "REVOKE"  : "REVOKE",
+}
+
+# Maximum rows returned to the LLM for interpretation
+MAX_RESULT_ROWS = 200
+
+
+# ── LLM prompts ──────────────────────────────────────────────────
+
+INTENT_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are an intent classifier for a SQL data agent.
+
+Classify the user's message into ONE of these intent types:
+- SIMPLE_LOOKUP: retrieve/filter/show rows from one OR multiple tables. ANY request to "show", "display", "get", "fetch", "give me" rows from approved tables is SIMPLE_LOOKUP.
+- AGGREGATION: sum/count/avg/group analytics
+- COMPARISON: compare values across dimensions or time periods
+- JOIN_OPERATION: join two or more tables on a key
+- MULTI_STEP: requires CTEs or nested sub-queries
+- CREATE_OBJECT: user wants to create a view or table
+- OUT_OF_SCOPE: references a table NOT in approved sources, or requests a prohibited write operation (DELETE/DROP/UPDATE/INSERT)
+- NOT_SQL: question is about governance, compliance, documentation, policies, or anything that does NOT require querying live data. "What is PII?" is NOT_SQL. "Show me rows" is SIMPLE_LOOKUP.
+
+IMPORTANT: If the user asks to "show", "display", "get", "fetch", "preview", or "give me" data from any approved table — even multiple tables — classify as SIMPLE_LOOKUP, never NOT_SQL.
+
+Approved tables available:
+{approved_sources_list}
+
+User question: {question}
+
+Respond with ONLY the intent type keyword, nothing else."""),
 ])
 
-QA_PROMPT = ChatPromptTemplate.from_messages([
-    (
-        "system",
-        """You are an expert Data & AI Advisor specialising in the insurance industry, \
-with deep, cross-domain expertise spanning:
+SQL_GENERATION_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are a Databricks SQL expert generating precise read-only SQL queries.
 
-- **Data Architecture** – enterprise data platforms, lakehouse/warehouse design, \
-cloud-native patterns (Azure, AWS, GCP), data mesh, data fabric, integration patterns \
-(ETL/ELT, CDC, event streaming)
-- **Data Engineering** – pipeline design, PySpark, Databricks, Delta Lake, dbt, \
-orchestration (Airflow, ADF), data contracts, data quality frameworks, CI/CD for data
-- **Data Modelling** – dimensional modelling (Kimball, Inmon), entity-relationship design, \
-insurance-specific schemas (policy, claims, reinsurance, premium), semantic layers
-- **Data Management & Governance** – GDPR, Solvency II, IFRS 17, data cataloguing, lineage, \
-stewardship, metadata management, data contracts, DQ SLAs, BCBS 239
-- **AI & Advanced Analytics** – RAG architectures, LLM integration, MLOps, predictive \
-modelling (churn, fraud, risk scoring), NLP on claims/policy documents, agentic AI
-- **Business Intelligence & Reporting** – Power BI, Tableau, KPI frameworks, self-service \
-analytics, observability dashboards, actuarial and regulatory reporting
+APPROVED TABLES (you may ONLY reference these):
+{approved_sources_list}
 
-You operate exclusively within the context of the **insurance industry** — including Life, \
-Non-Life (P&C), Health, Reinsurance, and Global Business Services functions. All responses \
-should reflect the regulatory environment, data domains, and operational realities of \
-insurance organisations.
+DETECTED INTENT: {intent}
 
-{approved_sources_block}
+CRITICAL RULES:
+1. Generate EXACTLY ONE SQL statement. Never output two SELECT statements.
+2. Always use fully qualified table names exactly as shown in the approved list.
+3. Match the SQL to what the user is actually asking — examples by intent:
 
-You have been provided with retrieved document context below.
-Use it as your primary source of evidence.
+   SIMPLE_LOOKUP (show/display/get rows):
+     → SELECT * FROM catalog.schema.table LIMIT 10
 
---- RETRIEVED CONTEXT ---
-{context}
---- END CONTEXT ---
+   AGGREGATION (count/sum/how many/group by):
+     → SELECT country, COUNT(*) AS customer_count
+        FROM catalog.schema.table
+        WHERE country = 'United Kingdom'
+        GROUP BY country
+     → SELECT COUNT(*) AS total FROM catalog.schema.table WHERE status = 'Active'
+     → SELECT DISTINCT status FROM catalog.schema.table
 
-You also have the full conversation history for this session. Use it to:
-- Refer back to findings from earlier in the conversation
-- Build on previously identified entities, owners, issues, or recommendations
-- Avoid repeating analysis already covered unless asked to expand
-- Explicitly reference prior findings when relevant
-  (e.g. "Building on the schema gaps identified earlier...", \
-"As noted in the pipeline review above...")
+   COMPARISON (compare/vs/by dimension):
+     → SELECT region, COUNT(*) AS claims, AVG(amount) AS avg_amount
+        FROM catalog.schema.table GROUP BY region ORDER BY claims DESC
 
-Response structure (adapt based on question type):
+   JOIN_OPERATION:
+     → SELECT a.col1, b.col2 FROM catalog.schema.table1 a
+        JOIN catalog.schema.table2 b ON a.id = b.id LIMIT 200
 
-| Question Type         | Structure |
-|-----------------------|-----------|
-| Architecture          | Context → Design Options → Trade-offs → Recommended Pattern |
-| Engineering           | Problem → Pipeline/Code Design → Edge Cases → Implementation Notes |
-| Modelling             | Propose tables, columns, data types, relationships, transformation logic |
-| Governance/Compliance | Cite regulation + article number → Gap → Remediation steps |
-| AI/Analytics          | Use Case → Approach → Data Requirements → Risks & Guardrails |
-| BI/Reporting          | Metric Definition → Data Source → Visualisation Guidance → Caveats |
-| Follow-up             | Reference prior findings, build on them, avoid redundancy |
+4. FILTERS: If the user specifies a WHERE condition (country = X, status = Y, date > Z),
+   YOU MUST include that exact filter. Never ignore filter conditions.
+5. AGGREGATIONS: If the user asks "how many", "count", "total", "sum", "average",
+   use COUNT(*), SUM(), AVG() etc. — NEVER return raw rows for aggregate questions.
+6. DISTINCT: If the user asks for "distinct values", "unique values", use SELECT DISTINCT.
+7. Do NOT add LIMIT to aggregate queries (COUNT, SUM, AVG, GROUP BY).
+8. Add LIMIT 200 only for row-fetch queries.
+9. Return ONLY the SQL — no markdown fences, no explanation, no semicolons at end.
 
-Always:
-- State which source file your insights are drawn from
-- Anchor responses in insurance industry context \
-(e.g. policy lifecycle, claims processing, actuarial needs, regulatory reporting)
-- Flag any assumptions made when context is incomplete
+Table schema context:
+{schema_context}
 
-IMPORTANT — SQL on local files:
-If the user asks to run SQL against a locally uploaded file (CSV, Excel, PDF), respond:
-"SQL query execution is only supported for approved Databricks tables, \
-not for locally uploaded files."
+User request: {question}"""),
+])
 
-If the answer is not in the context or conversation history, say so clearly. \
-Do not hallucinate.""",
-    ),
+THINK_ALOUD_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are a data analyst explaining your approach before running a query.
+In 2-3 sentences, explain what SQL operation you are about to perform and why.
+Be specific — mention the table name(s), the key columns, and the logic.
+Keep it concise and friendly. Do not include the actual SQL."""),
+    ("human", "User request: {question}\nApproved tables: {approved_sources_list}"),
+])
+
+INTERPRETATION_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are a senior data analyst interpreting SQL query results.
+
+Query context: {question}
+SQL executed: {sql}
+Row count: {row_count}
+
+Interpret the results below in plain English:
+- Summarise the key findings in 2-4 bullet points
+- Highlight any anomalies, trends, or notable values
+- If results are empty, explain possible reasons
+- If results are large (>50 rows), summarise patterns rather than listing all rows
+- Be specific — use actual numbers from the results
+
+Results (JSON):
+{results_json}"""),
     MessagesPlaceholder(variable_name="chat_history"),
-    ("human", "{question}"),
+    ("human", "Interpret these results for me."),
+])
+
+GOVERNANCE_OVERLAY_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are a data governance officer reviewing the results of a SQL query.
+
+Given the query and governance metadata below, produce a brief governance note.
+Format it as:
+
+⚠️ Governance Note:
+- [PII flags if any]
+- [Data owner]
+- [Sensitivity classification]
+- [Any relevant governance warnings]
+
+Keep it under 5 bullet points. If there are no governance concerns, say "✅ No governance flags for this query."
+
+Query: {question}
+Tables queried: {tables_queried}
+Governance metadata from knowledge base:
+{governance_context}"""),
+])
+
+ERROR_TRANSLATION_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are translating a Databricks SQL error into plain English for a business user.
+
+Rules:
+- Never show the raw error or stack trace
+- Diagnose the root cause in one sentence
+- Give a concrete corrective action the user can take
+- Available columns in the table: {available_columns}
+
+Error: {error}
+SQL attempted: {sql}"""),
 ])
 
 
-# ── Approved sources block ────────────────────────────────────────
+# ── SQL validation ────────────────────────────────────────────────
 
-def _build_approved_sources_block(approved_tables: list[str]) -> str:
-    """
-    Injected into the RAG system prompt only when routing reaches the RAG path.
-    This only happens for genuine governance/doc questions (NOT_SQL intent).
-    """
-    if not approved_tables:
-        return ""
-    lines = "\n".join(f"  - {t}" for t in approved_tables)
-    return f"""
-APPROVED DATABRICKS TABLES (available for live SQL queries via the SQL Agent):
-<approved_sources>
-{lines}
-</approved_sources>
-
-NOTE: You are answering a governance or documentation question — NOT a live data query.
-If the user is asking to retrieve actual rows or run analytics, tell them:
-"To query live data, ask a specific data question like \
-'Show me the first 10 rows of claims_casualty_bronze' and the SQL Agent will execute it."
-Do NOT suggest users run SQL manually in their Databricks environment.
-"""
+def _contains_prohibited_operation(sql: str) -> tuple[bool, str]:
+    """Check if SQL contains any prohibited write/DDL operations."""
+    sql_upper = sql.upper()
+    for pattern in PROHIBITED_PATTERNS:
+        if re.search(pattern, sql_upper, re.IGNORECASE):
+            for kw, name in PROHIBITED_READABLE.items():
+                if kw in sql_upper:
+                    return True, name
+    return False, ""
 
 
-# ── Retriever ─────────────────────────────────────────────────────
-
-def _build_retriever(vectordb: Chroma, k: int):
-    """MMR retriever with multi-source representation guarantee."""
-    base = vectordb.as_retriever(
-        search_type="mmr",
-        search_kwargs={"k": k * 2, "fetch_k": k * 6},
-    )
-
-    def multi_source_retrieve(query: str) -> list[Document]:
-        docs = base.invoke(query)
-        seen: dict[str, Document] = {}
-        for doc in docs:
-            src = doc.metadata.get("source_file", "unknown")
-            if src not in seen:
-                seen[src] = doc
-        if len(seen) < 2:
-            try:
-                all_srcs = list({
-                    d.metadata.get("source_file", "unknown")
-                    for d in vectordb.similarity_search("data governance summary", k=50)
-                })
-                for src in all_srcs:
-                    if src not in seen:
-                        results = vectordb.similarity_search(
-                            query, k=2, filter={"source_file": src}
-                        )
-                        if results:
-                            seen[src] = results[0]
-            except Exception:
-                pass
-        truncated: list[Document] = []
-        for doc in seen.values():
-            if len(doc.page_content) > 1500:
-                doc = Document(
-                    page_content=doc.page_content[:1500] + "\n[...truncated]",
-                    metadata=doc.metadata,
-                )
-            truncated.append(doc)
-        return truncated
-
-    return multi_source_retrieve
+def _extract_table_references(sql: str) -> list[str]:
+    """Extract fully-qualified table references from SQL."""
+    pattern = r'(?:FROM|JOIN|INTO|UPDATE)\s+(`?[\w\-]+`?\.`?[\w\-]+`?\.`?[\w\-]+`?)'
+    matches = re.findall(pattern, sql, re.IGNORECASE)
+    return [m.replace("`", "") for m in matches]
 
 
-def _format_docs(docs: list[Document]) -> str:
-    parts = []
-    for doc in docs:
-        src = doc.metadata.get("source_file", "unknown")
-        parts.append(f"[Source: {src}]\n{doc.page_content}")
-    return "\n\n---\n\n".join(parts)
+def _validate_tables_in_sql(sql: str, approved: list[str]) -> tuple[bool, list[str]]:
+    """Verify every table referenced in the SQL is in the approved list."""
+    referenced = _extract_table_references(sql)
+    approved_lower = [t.lower() for t in approved]
+    unapproved = [t for t in referenced if t.lower() not in approved_lower]
+    return len(unapproved) == 0, unapproved
 
 
-# ── Token extraction ──────────────────────────────────────────────
+# ── Column listing helper ─────────────────────────────────────────
 
-def _extract_tokens(llm_response) -> dict:
+def _get_table_columns(client: DatabricksClient, full_table: str) -> list[str]:
+    """Fetch column names for error translation context."""
     try:
-        usage = getattr(llm_response, "usage_metadata", None) or {}
-        return {
-            "prompt_tokens"    : int(usage.get("input_tokens",  0)),
-            "completion_tokens": int(usage.get("output_tokens", 0)),
-            "total_tokens"     : int(usage.get("total_tokens",  0)),
-        }
+        parts = full_table.split(".")
+        if len(parts) != 3:
+            return []
+        cat, sch, tbl = parts
+        rows = client.execute_query(
+            f"SELECT column_name FROM information_schema.columns "
+            f"WHERE table_catalog='{cat}' AND table_schema='{sch}' AND table_name='{tbl}' "
+            f"LIMIT 50"
+        )
+        return [r["column_name"] for r in rows]
     except Exception:
-        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        return []
 
 
-# ── Main query function ───────────────────────────────────────────
+# ── Keyword pre-classifier ────────────────────────────────────────
 
-def query_governance(
+_FETCH_PATTERNS = re.compile(
+    r'\b(show|display|get|fetch|give me|list|retrieve|select|query|'
+    r'preview|print|output|return|pull|extract|find|look up|look at|'
+    r'top \d+|first \d+|last \d+|sample|rows|records|data|entries)\b',
+    re.IGNORECASE
+)
+_AGGREGATE_PATTERNS = re.compile(
+    r'\b(count|total|sum|average|avg|mean|max|min|how many|how much|'
+    r'percentage|ratio|distribution|breakdown|group by|grouped)\b',
+    re.IGNORECASE
+)
+_COMPARE_PATTERNS = re.compile(
+    r'\b(compare|versus|vs|difference|trend|over time|by (year|month|region|'
+    r'category|type|status)|change|growth)\b',
+    re.IGNORECASE
+)
+_JOIN_PATTERNS = re.compile(
+    r'\b(join|combine|merge|link|match|relate|across tables)\b',
+    re.IGNORECASE
+)
+# Governance / doc patterns — these questions should NEVER auto-route to SQL
+# even if they contain incidental numeric words like "count", "higher", "more"
+_DOC_PATTERNS = re.compile(
+    r'\b(what is|what are|define|explain|describe|why|how does|how do|'
+    r'how can|what causes|what factors|tell me about|'
+    r'policy|regulation|gdpr|solvency|ifrs|pii|compliance|governance|'
+    r'owner|steward|lineage|catalog|documentation|when was|who is|'
+    r'what does|what should|recommend|suggest|best practice|'
+    r'reason|cause|impact|effect|influence)\b',
+    re.IGNORECASE
+)
+
+# Strong data-fetch verbs — unambiguous SQL intent regardless of context
+_STRONG_FETCH = re.compile(
+    r'\b(show me|display|fetch|give me|retrieve|select \*|query|preview|'
+    r'list all|get all|get the|show the|show all|pull|extract|'
+    r'top \d+|first \d+|last \d+|sample \d+|limit \d+|rows? from|'
+    r'records? from|data from|entries from)\b',
+    re.IGNORECASE
+)
+
+
+def _keyword_intent(question: str, approved_tables: list[str]) -> str | None:
+    """
+    Fast keyword-based intent pre-classifier.
+
+    CONSERVATIVE by design — only returns a SQL intent when highly confident.
+    Returns None to let the LLM decide for ambiguous questions.
+
+    Rules (in priority order):
+    1. If question starts with WHY / HOW / WHAT IS / EXPLAIN → NOT_SQL (doc question)
+    2. If question explicitly mentions an approved table name → SQL
+    3. If question contains strong data-fetch verbs → SQL
+    4. If question contains "all tables / approved tables" → SQL
+    5. Everything else → None (let LLM classify)
+    """
+    q_lower = question.lower().strip()
+
+    # ── Rule 1: Analytical / explanatory questions → always NOT_SQL ──────────
+    analytical_openers = re.compile(
+        r'^(why|how (does|do|can|would|should|is)|what (is|are|causes|factors|'
+        r'does|should)|explain|describe|tell me (about|why|how)|what makes|'
+        r'reason|cause|impact|can you (build|create|make|design|suggest|recommend))',
+        re.IGNORECASE
+    )
+    if analytical_openers.search(q_lower):
+        return None  # Let LLM decide — almost certainly NOT_SQL
+
+    # ── Rule 2: Approved table name explicitly mentioned → definitely SQL ─────
+    for tbl in approved_tables:
+        short_name = tbl.split(".")[-1].lower()
+        if short_name in q_lower or tbl.lower() in q_lower:
+            if _AGGREGATE_PATTERNS.search(question):
+                return "AGGREGATION"
+            if _JOIN_PATTERNS.search(question):
+                return "JOIN_OPERATION"
+            if _COMPARE_PATTERNS.search(question):
+                return "COMPARISON"
+            return "SIMPLE_LOOKUP"
+
+    # ── Rule 3: Strong data-fetch verbs → SQL ────────────────────────────────
+    if _STRONG_FETCH.search(question):
+        if _AGGREGATE_PATTERNS.search(question):
+            return "AGGREGATION"
+        if _COMPARE_PATTERNS.search(question):
+            return "COMPARISON"
+        if _JOIN_PATTERNS.search(question):
+            return "JOIN_OPERATION"
+        return "SIMPLE_LOOKUP"
+
+    # ── Rule 4: "all/approved/my tables" → SQL browse ────────────────────────
+    if re.search(r'\b(all tables?|approved tables?|my tables?|both tables?|each table)\b', q_lower):
+        return "SIMPLE_LOOKUP"
+
+    # ── Rule 5: Doc/governance keywords present → defer to LLM ──────────────
+    if _DOC_PATTERNS.search(question):
+        return None
+
+    return None  # Conservative default: let LLM classify
+
+
+# ── Core agentic function ─────────────────────────────────────────
+
+def run_sql_agent(
     question: str,
-    vectordb: Chroma,
-    knowledge_set: str = "default",
-    session_id: str = "",
-    use_rag: bool = True,
-    k: int = RETRIEVAL_K,
-    window_k: int = DEFAULT_WINDOW_K,
-    enable_sql_agent: bool = True,
-    approved_tables: Optional[list[str]] = None,
-    connection_id: Optional[str] = None,
+    session_id: str,
+    knowledge_set: str,
+    chat_history: list[BaseMessage],
+    rag_context: str = "",
+    governance_context: str = "",
+    schema_context: str = "",
+    approved_tables_override: list[str] | None = None,
+    connection_id_override: str | None = None,
+    intent_override: str | None = None,
 ) -> dict:
     """
-    Hybrid query engine: SQL Agent + RAG.
+    Full 6-step agentic SQL loop.
 
-    Routing:
-      1. If enable_sql_agent=True and approved_tables exist:
-         a. Keyword pre-classifier runs instantly (no LLM, no ChromaDB)
-         b. Definite SQL intent → skip RAG retrieval, run SQL agent directly
-         c. Ambiguous → run RAG retrieval for context, then SQL agent
-         d. NOT_SQL → fall through to standard RAG
-      2. Standard LCEL RAG: condense → retrieve → answer
-      3. Direct LLM: history-aware, no retrieval
+    intent_override: if provided (from rag.py pre-classification), skip the
+      internal LLM intent step entirely. Saves one LLM call and prevents drift.
+    approved_tables_override: bypass SQLite read to avoid race conditions.
+    connection_id_override: passed directly from request.
     """
-    start   = time.time()
-    run_id  = str(uuid.uuid4())
-    answer  = ""
-    llm     = get_llm()
-    parser  = StrOutputParser()
+    start  = time.time()
+    run_id = str(uuid.uuid4())
+    llm    = get_llm()
+    parser = StrOutputParser()
 
-    if not session_id:
-        session_id = knowledge_set
+    # ── Fetch approved sources ────────────────────────────────────
+    if approved_tables_override:
+        approved_tables = approved_tables_override
+        connection_id   = connection_id_override or get_connection_for_session(session_id, knowledge_set)
+    else:
+        approved_sources = get_approved_sources(session_id, knowledge_set)
+        approved_tables  = [s["full_table"] for s in approved_sources]
+        connection_id    = get_connection_for_session(session_id, knowledge_set)
 
-    approved_tables = approved_tables or []
+    approved_list_str = "\n".join(f"  - {t}" for t in approved_tables) or "  (none)"
 
-    # ── Sync approved sources to SQLite ──────────────────────────
-    if approved_tables and connection_id:
-        try:
-            from services.databricks.approved_sources import sync_approved_sources
-            sync_approved_sources(
-                session_id=session_id,
-                knowledge_set=knowledge_set,
-                connection_id=connection_id,
-                tables=approved_tables,
+    base_result = {
+        "run_id"          : run_id,
+        "session_id"      : session_id,
+        "knowledge_set"   : knowledge_set,
+        "question"        : question,
+        "approved_tables" : approved_tables,
+        "intent"          : "NOT_SQL",
+        "think_aloud"     : "",
+        "sql"             : "",
+        "row_count"       : 0,
+        "results"         : [],
+        "interpretation"  : "",
+        "governance_note" : "",
+        "mode"            : "sql_agent",
+        "error"           : None,
+        "duration_seconds": 0.0,
+        "model"           : CHAT_MODEL,
+        "created_at"      : datetime.now().isoformat(),
+    }
+
+    # ── STEP 1: Intent detection ──────────────────────────────────
+    # Use intent_override if provided by rag.py (already classified upstream).
+    # Otherwise run keyword classifier → LLM classifier as fallback.
+    if intent_override and intent_override in INTENT_TYPES:
+        intent = intent_override
+    else:
+        intent = _keyword_intent(question, approved_tables)
+        if intent is None:
+            try:
+                intent_chain = INTENT_PROMPT | llm | parser
+                intent = intent_chain.invoke({
+                    "approved_sources_list": approved_list_str,
+                    "question"             : question,
+                }).strip().upper()
+                if intent not in INTENT_TYPES:
+                    intent = "NOT_SQL"
+            except Exception:
+                intent = "NOT_SQL"
+
+    base_result["intent"] = intent
+
+    # ── NOT_SQL — fall back to RAG ────────────────────────────────
+    if intent == "NOT_SQL":
+        base_result["duration_seconds"] = round(time.time() - start, 2)
+        return base_result
+
+    # ── OUT_OF_SCOPE — access control response ────────────────────
+    if intent == "OUT_OF_SCOPE":
+        sql_keywords = ["DROP", "DELETE", "INSERT", "UPDATE", "TRUNCATE", "ALTER"]
+        if any(kw in question.upper() for kw in sql_keywords):
+            op_name = next((kw for kw in sql_keywords if kw in question.upper()), "write")
+            base_result["interpretation"] = (
+                f"I'm not authorised to perform **{op_name}** operations on Databricks. "
+                "GovernGPT is restricted to read-only SELECT queries to protect data integrity. "
+                "Please contact your data platform team for write operations."
             )
+        else:
+            base_result["interpretation"] = (
+                "That table is not part of your active sources. "
+                "Please add it to your source selection before querying.\n\n"
+                f"**Currently approved tables:**\n{approved_list_str}"
+            )
+        base_result["duration_seconds"] = round(time.time() - start, 2)
+        return base_result
+
+    # ── No approved sources ───────────────────────────────────────
+    if not approved_tables:
+        base_result["intent"] = "OUT_OF_SCOPE"
+        base_result["interpretation"] = (
+            "No approved Databricks tables are configured for this session. "
+            "Please add tables via the Databricks tab in the Sources panel before running SQL queries."
+        )
+        base_result["duration_seconds"] = round(time.time() - start, 2)
+        return base_result
+
+    # ── No connection ─────────────────────────────────────────────
+    if not connection_id:
+        base_result["intent"] = "OUT_OF_SCOPE"
+        base_result["interpretation"] = (
+            "No active Databricks connection found for this session. "
+            "Please connect to Databricks in the Sources panel first."
+        )
+        base_result["duration_seconds"] = round(time.time() - start, 2)
+        return base_result
+
+    # ── STEP 2: Think aloud ───────────────────────────────────────
+    try:
+        think_chain = THINK_ALOUD_PROMPT | llm | parser
+        think_aloud = think_chain.invoke({
+            "question"             : question,
+            "approved_sources_list": approved_list_str,
+        })
+    except Exception:
+        think_aloud = f"Running a {intent.lower().replace('_', ' ')} query against your approved tables..."
+
+    base_result["think_aloud"] = think_aloud
+
+    # ── STEP 3: SQL generation ────────────────────────────────────
+    try:
+        sql_chain = SQL_GENERATION_PROMPT | llm | parser
+        generated_sql = sql_chain.invoke({
+            "approved_sources_list": approved_list_str,
+            "schema_context"       : schema_context or rag_context,
+            "question"             : question,
+            "intent"               : intent,
+            # chat_history intentionally NOT passed — SQL generation must be
+            # stateless to avoid pattern-matching prior queries
+        }).strip()
+
+        generated_sql = re.sub(r"^```sql\s*", "", generated_sql, flags=re.IGNORECASE)
+        generated_sql = re.sub(r"^```\s*",    "", generated_sql)
+        generated_sql = re.sub(r"\s*```$",    "", generated_sql).strip()
+
+    except Exception as e:
+        base_result["error"] = f"SQL generation failed: {str(e)}"
+        base_result["interpretation"] = "I was unable to generate a valid SQL query for your request. Please try rephrasing."
+        base_result["duration_seconds"] = round(time.time() - start, 2)
+        return base_result
+
+    base_result["sql"] = generated_sql
+
+    # ── Pre-execution validation ──────────────────────────────────
+    is_prohibited, op_name = _contains_prohibited_operation(generated_sql)
+    if is_prohibited:
+        base_result["intent"] = "OUT_OF_SCOPE"
+        base_result["interpretation"] = (
+            f"I'm not authorised to perform **{op_name}** operations on Databricks. "
+            "GovernGPT is restricted to read-only SELECT queries to protect data integrity."
+        )
+        base_result["duration_seconds"] = round(time.time() - start, 2)
+        return base_result
+
+    all_approved, unapproved_tables = _validate_tables_in_sql(generated_sql, approved_tables)
+    if not all_approved:
+        unapproved_str = ", ".join(unapproved_tables)
+        base_result["intent"] = "OUT_OF_SCOPE"
+        base_result["interpretation"] = (
+            f"The generated SQL references table(s) not in your approved sources: **{unapproved_str}**. "
+            "Please add them to your source selection before querying."
+        )
+        base_result["duration_seconds"] = round(time.time() - start, 2)
+        return base_result
+
+    if intent == "CREATE_OBJECT":
+        base_result["interpretation"] = (
+            "I've prepared the following SQL to create the requested object. "
+            "Please confirm you want to execute this:\n\n"
+            f"```sql\n{generated_sql}\n```\n\n"
+            "Reply **'confirm'** to proceed, or describe any changes you'd like."
+        )
+        base_result["mode"] = "sql_agent_pending_confirm"
+        base_result["duration_seconds"] = round(time.time() - start, 2)
+        return base_result
+
+    # ── STEP 4: Execute via Databricks SQL API ────────────────────
+    results    = []
+    exec_error = None
+    final_sql  = generated_sql
+
+    statements = _split_sql_statements(generated_sql)
+
+    try:
+        with DatabricksClient(connection_id) as client:
+            if len(statements) > 1:
+                multi_table_keywords = ["all tables", "each table", "both tables", "every table", "all approved"]
+                is_multi_table_browse = any(kw in question.lower() for kw in multi_table_keywords)
+                if is_multi_table_browse:
+                    results, final_sql = _execute_multi_table_query(
+                        client, question, approved_tables, limit=10
+                    )
+                    base_result["sql"] = final_sql
+                else:
+                    first_stmt = statements[0]
+                    base_result["sql"] = first_stmt
+                    final_sql  = first_stmt
+                    results    = client.execute_query(first_stmt, limit=MAX_RESULT_ROWS)
+            else:
+                results = client.execute_query(generated_sql, limit=MAX_RESULT_ROWS)
+    except Exception as e:
+        exec_error = str(e)
+
+    if exec_error:
+        try:
+            tables_queried = _extract_table_references(generated_sql)
+            avail_cols     = []
+            if tables_queried:
+                with DatabricksClient(connection_id) as client:
+                    avail_cols = _get_table_columns(client, tables_queried[0])
+            err_chain = ERROR_TRANSLATION_PROMPT | llm | parser
+            friendly_error = err_chain.invoke({
+                "error"            : exec_error,
+                "sql"              : generated_sql,
+                "available_columns": ", ".join(avail_cols) if avail_cols else "unknown",
+            })
+        except Exception:
+            friendly_error = "The query could not be executed. Please check your table access and try again."
+
+        base_result["error"]            = exec_error
+        base_result["interpretation"]   = friendly_error
+        base_result["duration_seconds"] = round(time.time() - start, 2)
+        _log_sql_execution(base_result)
+        return base_result
+
+    row_count = len(results)
+    base_result["results"]   = results[:MAX_RESULT_ROWS]
+    base_result["row_count"] = row_count
+
+    # ── STEP 5: Interpret results ─────────────────────────────────
+    try:
+        results_for_llm  = results[:50]
+        results_json_str = json.dumps(results_for_llm, default=str, indent=2)
+        if len(results_json_str) > 8000:
+            results_json_str = results_json_str[:8000] + "\n... [truncated for context window]"
+
+        interp_chain   = INTERPRETATION_PROMPT | llm | parser
+        interpretation = interp_chain.invoke({
+            "question"    : question,
+            "sql"         : generated_sql,
+            "row_count"   : row_count,
+            "results_json": results_json_str,
+            "chat_history": chat_history,
+        })
+    except Exception:
+        interpretation = f"Query returned {row_count} row(s). Results are available in the data panel."
+
+    base_result["interpretation"] = interpretation
+
+    # ── STEP 6: Governance overlay ────────────────────────────────
+    if governance_context:
+        try:
+            tables_queried = list({
+                t for t in _extract_table_references(generated_sql)
+                if any(t.lower() in a.lower() for a in approved_tables)
+            })
+            gov_chain = GOVERNANCE_OVERLAY_PROMPT | llm | parser
+            governance_note = gov_chain.invoke({
+                "question"          : question,
+                "tables_queried"    : ", ".join(tables_queried),
+                "governance_context": governance_context,
+            })
+        except Exception:
+            governance_note = ""
+        base_result["governance_note"] = governance_note
+
+    base_result["duration_seconds"] = round(time.time() - start, 2)
+    _log_sql_execution(base_result)
+    return base_result
+
+
+# ── Helpers ───────────────────────────────────────────────────────
+
+def _split_sql_statements(sql: str) -> list[str]:
+    """Split SQL into individual statements (semicolon or multi-SELECT detection)."""
+    parts = [s.strip() for s in sql.split(";") if s.strip()]
+    if len(parts) > 1:
+        return parts
+    select_positions = [m.start() for m in re.finditer(r'\bSELECT\b', sql, re.IGNORECASE)]
+    if len(select_positions) <= 1:
+        return [sql]
+    statements = []
+    for i, pos in enumerate(select_positions):
+        end  = select_positions[i + 1] if i + 1 < len(select_positions) else len(sql)
+        stmt = sql[pos:end].strip()
+        if stmt:
+            statements.append(stmt)
+    return statements if statements else [sql]
+
+
+def _execute_multi_table_query(
+    client: DatabricksClient,
+    question: str,
+    approved_tables: list[str],
+    limit: int = 10,
+) -> tuple[list[dict], str]:
+    """Execute SELECT * LIMIT N against each approved table sequentially."""
+    all_results = []
+    sqls_run    = []
+    for full_table in approved_tables[:5]:
+        sql = f"SELECT * FROM {full_table} LIMIT {limit}"
+        sqls_run.append(sql)
+        try:
+            rows = client.execute_query(sql, limit=limit)
+            for row in rows:
+                row["__source_table__"] = full_table.split(".")[-1]
+            all_results.extend(rows)
         except Exception:
             pass
+    return all_results, "\n".join(sqls_run)
 
-    # ── Load conversation history ─────────────────────────────────
-    chat_history: list[BaseMessage] = load_history_as_messages(
-        session_id, knowledge_set, window_k
-    )
 
-    # ── SQL Agent routing ─────────────────────────────────────────
-    # Requires BOTH:
-    #   1. enable_sql_agent=True (frontend toggle must be ON)
-    #   2. approved_tables non-empty (user must have approved at least one table)
-    # If either condition is false, skip the agent entirely → standard RAG.
-    if enable_sql_agent and approved_tables:
-        sql_agent_error = None
-        try:
-            from services.databricks.sql_agent import run_sql_agent, _keyword_intent
+# ── Logging ───────────────────────────────────────────────────────
 
-            # Fast pre-check: keyword classifier decides without LLM or ChromaDB.
-            # Definite SQL → skip RAG retrieval entirely (no "Searched:" bubble).
-            # Ambiguous    → do RAG retrieval for governance/schema context.
-            quick_intent    = _keyword_intent(question, approved_tables)
-            is_definite_sql = quick_intent is not None and quick_intent != "NOT_SQL"
-
-            rag_context        = ""
-            governance_context = ""
-            schema_context     = ""
-            rag_sources: list[str] = []
-            rag_chunks         = 0
-
-            if not is_definite_sql:
-                try:
-                    retriever_fn = _build_retriever(vectordb, k)
-                    source_docs  = retriever_fn(question)
-                    rag_context  = _format_docs(source_docs)
-                    rag_sources  = list({
-                        doc.metadata.get("source_file", "unknown")
-                        for doc in source_docs
-                    })
-                    rag_chunks = len(source_docs)
-
-                    gov_docs = [
-                        d for d in source_docs
-                        if d.metadata.get("source_type") == "databricks"
-                        or any(t in d.page_content.lower() for t in
-                               ["pii", "sensitivity", "owner", "gdpr", "solvency"])
-                    ]
-                    governance_context = _format_docs(gov_docs)
-
-                    schema_docs = [
-                        d for d in source_docs
-                        if d.metadata.get("file_type") in
-                        ("databricks_schema", "databricks_stats")
-                    ]
-                    schema_context = _format_docs(schema_docs)
-                except Exception:
-                    pass  # RAG unavailable — SQL agent works without it
-
-            agent_result = run_sql_agent(
-                question                 = question,
-                session_id               = session_id,
-                knowledge_set            = knowledge_set,
-                chat_history             = chat_history,
-                rag_context              = rag_context,
-                governance_context       = governance_context,
-                schema_context           = schema_context,
-                approved_tables_override = approved_tables,
-                connection_id_override   = connection_id,
-            )
-
-            intent = agent_result.get("intent", "NOT_SQL")
-
-            # All SQL-related intents return agent result.
-            # Only NOT_SQL falls through to standard RAG below.
-            SQL_INTENTS = {
-                "SIMPLE_LOOKUP", "AGGREGATION", "COMPARISON",
-                "JOIN_OPERATION", "MULTI_STEP", "CREATE_OBJECT", "OUT_OF_SCOPE",
-            }
-
-            if intent in SQL_INTENTS:
-                answer_parts = []
-                if agent_result.get("think_aloud"):
-                    answer_parts.append(f"_{agent_result['think_aloud']}_\n")
-                if agent_result.get("interpretation"):
-                    answer_parts.append(agent_result["interpretation"])
-                if agent_result.get("governance_note"):
-                    answer_parts.append(f"\n\n{agent_result['governance_note']}")
-                answer = "\n".join(answer_parts) if answer_parts else "Query executed."
-
-                result = {
-                    "run_id"           : run_id,
-                    "session_id"       : session_id,
-                    "knowledge_set"    : knowledge_set,
-                    "question"         : question,
-                    "rephrased_question": question,
-                    "answer"           : answer,
-                    "mode"             : agent_result.get("mode", "sql_agent"),
-                    "sources_used"     : rag_sources,
-                    "chunks_retrieved" : rag_chunks,
-                    "model"            : CHAT_MODEL,
-                    "prompt_tokens"    : 0,
-                    "completion_tokens": 0,
-                    "total_tokens"     : 0,
-                    "created_at"       : datetime.now().isoformat(),
-                    "duration_seconds" : round(time.time() - start, 2),
-                    "sql_intent"       : intent,
-                    "sql_executed"     : agent_result.get("sql", ""),
-                    "sql_row_count"    : agent_result.get("row_count", 0),
-                    "sql_results"      : agent_result.get("results", []),
-                    "sql_think_aloud"  : agent_result.get("think_aloud", ""),
-                    "governance_note"  : agent_result.get("governance_note", ""),
-                }
-
-                db_insert("llm_responses", {
-                    k2: v for k2, v in result.items()
-                    if not isinstance(v, (list, dict)) or k2 == "sources_used"
-                })
-                save_turn(
-                    session_id=session_id, knowledge_set=knowledge_set,
-                    human_message=question, ai_message=answer,
-                    run_id=run_id, token_count=0,
-                )
-                return result
-
-            # NOT_SQL intent — fall through to standard RAG below
-            # (intentional — no exception raised)
-
-        except Exception as e:
-            # Log the error so it appears in uvicorn terminal for debugging
-            import traceback
-            print(f"[SQL AGENT ERROR] {type(e).__name__}: {e}")
-            traceback.print_exc()
-            sql_agent_error = str(e)
-            # Fall through to standard RAG
-
-    # ── Standard RAG ─────────────────────────────────────────────
-    approved_sources_block = _build_approved_sources_block(approved_tables)
-
-    if use_rag:
-        # Condense follow-up questions into standalone questions
-        if chat_history:
-            condense_chain = CONDENSE_PROMPT | llm | parser
-            rephrased      = condense_chain.invoke({
-                "chat_history": chat_history,
-                "question"    : question,
-            })
-        else:
-            rephrased = question
-
-        retriever_fn = _build_retriever(vectordb, k)
-        source_docs  = retriever_fn(rephrased)
-        context      = _format_docs(source_docs)
-        # Filter sources_used to only include files/tables that are
-        # currently active (approved_tables or uploaded files).
-        # This prevents removed Databricks tables from showing as sources.
-        all_sources = list({
-            doc.metadata.get("source_file", "unknown") for doc in source_docs
+def _log_sql_execution(result: dict) -> None:
+    """Persist SQL agent execution log to SQLite."""
+    try:
+        db_insert("sql_agent_log", {
+            "run_id"          : result["run_id"],
+            "session_id"      : result["session_id"],
+            "knowledge_set"   : result["knowledge_set"],
+            "question"        : result["question"],
+            "intent"          : result["intent"],
+            "sql"             : result["sql"],
+            "row_count"       : str(result["row_count"]),
+            "duration_seconds": str(result["duration_seconds"]),
+            "has_error"       : str(bool(result.get("error"))),
+            "created_at"      : result["created_at"],
         })
-        if approved_tables:
-            # Keep a source if it matches an approved table short name OR
-            # is a locally uploaded file (not a databricks source_type)
-            approved_short = {t.split(".")[-1].lower() for t in approved_tables}
-            sources = [
-                s for s in all_sources
-                if s.lower() in approved_short
-                or not any(
-                    doc.metadata.get("source_type") == "databricks"
-                    for doc in source_docs
-                    if doc.metadata.get("source_file") == s
-                )
-            ]
-        else:
-            sources = all_sources
-
-        qa_messages = QA_PROMPT.format_messages(
-            approved_sources_block=approved_sources_block,
-            context=context,
-            chat_history=chat_history,
-            question=question,
-        )
-        llm_response = llm.invoke(qa_messages)
-        answer       = llm_response.content
-        token_usage  = _extract_tokens(llm_response)
-
-        result = {
-            "run_id"           : run_id,
-            "session_id"       : session_id,
-            "knowledge_set"    : knowledge_set,
-            "question"         : question,
-            "rephrased_question": rephrased,
-            "answer"           : answer,
-            "mode"             : "conversational_rag",
-            "sources_used"     : sources,
-            "chunks_retrieved" : len(source_docs),
-            "model"            : CHAT_MODEL,
-            "prompt_tokens"    : token_usage["prompt_tokens"],
-            "completion_tokens": token_usage["completion_tokens"],
-            "total_tokens"     : token_usage["total_tokens"],
-            "created_at"       : datetime.now().isoformat(),
-            "duration_seconds" : round(time.time() - start, 2),
-            "sql_intent"       : None,
-            "sql_executed"     : None,
-            "sql_row_count"    : None,
-            "sql_results"      : None,
-            "sql_think_aloud"  : None,
-            "governance_note"  : None,
-        }
-
-    else:
-        # ── Direct LLM (no retrieval) ─────────────────────────────
-        direct_prompt = ChatPromptTemplate.from_messages([
-            (
-                "system",
-                "You are a Data & AI Expert for the insurance industry. "
-                "You have full memory of this conversation. "
-                "Build on previous answers when relevant.\n\n"
-                f"{approved_sources_block}",
-            ),
-            MessagesPlaceholder(variable_name="chat_history"),
-            ("human", "{question}"),
-        ])
-        direct_messages = direct_prompt.format_messages(
-            chat_history=chat_history,
-            question=question,
-        )
-        llm_response = llm.invoke(direct_messages)
-        answer       = llm_response.content
-        token_usage  = _extract_tokens(llm_response)
-
-        result = {
-            "run_id"           : run_id,
-            "session_id"       : session_id,
-            "knowledge_set"    : knowledge_set,
-            "question"         : question,
-            "rephrased_question": question,
-            "answer"           : answer,
-            "mode"             : "direct",
-            "sources_used"     : [],
-            "chunks_retrieved" : 0,
-            "model"            : CHAT_MODEL,
-            "prompt_tokens"    : token_usage["prompt_tokens"],
-            "completion_tokens": token_usage["completion_tokens"],
-            "total_tokens"     : token_usage["total_tokens"],
-            "created_at"       : datetime.now().isoformat(),
-            "duration_seconds" : round(time.time() - start, 2),
-            "sql_intent"       : None,
-            "sql_executed"     : None,
-            "sql_row_count"    : None,
-            "sql_results"      : None,
-            "sql_think_aloud"  : None,
-            "governance_note"  : None,
-        }
-
-    # ── Persist ───────────────────────────────────────────────────
-    db_insert("llm_responses", {
-        k2: v for k2, v in result.items()
-        if not isinstance(v, (list, dict)) or k2 == "sources_used"
-    })
-    save_turn(
-        session_id=session_id, knowledge_set=knowledge_set,
-        human_message=question, ai_message=answer,
-        run_id=run_id, token_count=result.get("total_tokens", 0),
-    )
-    return result
+    except Exception:
+        pass
