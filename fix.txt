@@ -1,99 +1,616 @@
-'use client'
-import { motion } from 'framer-motion'
-import { Table, Eye, X, CheckCircle, AlertCircle, Loader2, Layers, SquareCode } from 'lucide-react'
-import type { DatabricksIngestItem } from '@/types'
-import { cn } from '@/lib/utils'
+"""
+services/databricks/sql_agent.py
 
-interface TableIngestCardProps {
-  item: DatabricksIngestItem
-  index: number
-  isApproved: boolean
-  onToggleApprove: (item: DatabricksIngestItem) => void
-  onRemove: (id: string) => void
+Agentic SQL engine for GovernGPT.
+
+Implements the 6-step agentic loop from the specification:
+  Step 1 — Intent Detection   : classify user request
+  Step 2 — Think Aloud        : explain plan before executing
+  Step 3 — SQL Generation     : produce clean optimised SQL via LLM
+  Step 4 — Execute            : run against Databricks SQL API (read-only enforced)
+  Step 5 — Interpret & Respond: narrate results, not just dump rows
+  Step 6 — Governance Overlay : surface PII / DQ / ownership signals
+
+Security:
+  - All tables validated against APPROVED_SOURCES before query execution
+  - Prohibited operations (DDL, DML writes) blocked at validation layer
+  - SQL is parsed and rejected if it contains forbidden keywords
+  - Results are never fabricated — if execution fails, error is translated
+"""
+
+from __future__ import annotations
+import re
+import time
+import uuid
+import json
+from datetime import datetime
+from typing import Optional
+
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import BaseMessage
+from langchain_core.output_parsers import StrOutputParser
+
+from llm import get_llm
+from db import db_insert, db_query
+from config import CHAT_MODEL
+from services.databricks.client import DatabricksClient
+from services.databricks.approved_sources import (
+    get_approved_sources,
+    get_approved_table_names,
+    get_connection_for_session,
+    is_table_approved,
+)
+
+
+# ── Intent types ─────────────────────────────────────────────────
+
+INTENT_TYPES = {
+    "SIMPLE_LOOKUP"  : "Retrieve or filter rows from a single table",
+    "AGGREGATION"    : "SUM, COUNT, AVG, GROUP BY analytics",
+    "COMPARISON"     : "Compare values across dimensions or time periods",
+    "JOIN_OPERATION" : "JOIN across two or more approved tables",
+    "MULTI_STEP"     : "Requires CTEs or multiple sub-queries",
+    "CREATE_OBJECT"  : "User wants to persist a view or CTAS",
+    "OUT_OF_SCOPE"   : "Table not approved, prohibited operation, or file-based source",
+    "NOT_SQL"        : "Question does not require SQL — answer from RAG context only",
 }
 
-export function TableIngestCard({ item, index, isApproved, onToggleApprove, onRemove }: TableIngestCardProps) {
-  const isLoading = item.status === 'profiling' || item.status === 'ingesting'
+# ── Prohibited SQL operations ─────────────────────────────────────
 
-  const statusLabel = { idle: 'Queued', profiling: 'Profiling…', ingesting: 'Indexing…', ready: 'Indexed', error: 'Failed' }[item.status]
-  const statusColor = { idle: 'text-ink-400', profiling: 'text-axa-700', ingesting: 'text-axa-700', ready: 'text-emerald-600', error: 'text-axared-500' }[item.status]
+PROHIBITED_PATTERNS = [
+    r"\bDROP\s+(TABLE|VIEW|SCHEMA|DATABASE)\b",
+    r"\bDELETE\s+FROM\b",
+    r"\bINSERT\s+INTO\b",
+    r"\bUPDATE\s+\w+\s+SET\b",
+    r"\bTRUNCATE\s+(TABLE\s+)?\w+\b",
+    r"\bALTER\s+TABLE\b",
+    r"\bGRANT\b",
+    r"\bREVOKE\b",
+]
 
-  return (
-    <motion.div
-      initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -10 }}
-      transition={{ delay: index * 0.04 }}
-      className="group flex items-start gap-2.5 px-3 py-2.5 hover:bg-ink-50 rounded-lg mx-1 transition-colors"
-    >
-      {/* Icon */}
-      <div className={cn('w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 border transition-colors', isApproved ? 'bg-emerald-50 border-emerald-200' : 'bg-axa-50 border-axa-100')}>
-        {item.table_type === 'VIEW'
-          ? <Eye className={cn('w-3.5 h-3.5', isApproved ? 'text-emerald-600' : 'text-axa-700')} />
-          : <Table className={cn('w-3.5 h-3.5', isApproved ? 'text-emerald-700' : 'text-axa-800')} />}
-      </div>
-
-      {/* Info */}
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-1.5">
-          <p className="text-xs font-semibold text-ink-700 truncate">{item.table}</p>
-          {isApproved && (
-            <span className="flex items-center gap-0.5 text-[8px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full flex-shrink-0">
-              <SquareCode className="w-2 h-2" />SQL
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-1.5 mt-0.5">
-          <Layers className="w-2.5 h-2.5 text-ink-300" />
-          <span className="text-[10px] text-ink-400 truncate font-mono">{item.catalog}.{item.schema}</span>
-        </div>
-
-        {isLoading && (
-          <div className="mt-1.5 h-0.5 bg-ink-100 rounded-full overflow-hidden">
-            <div className="h-full bg-axa-800 rounded-full transition-all duration-500" style={{ width: `${item.progress}%` }} />
-          </div>
-        )}
-
-        {item.status === 'ready' && (
-          <div className="flex items-center gap-2 mt-1 flex-wrap">
-            {item.row_count && <span className="text-[9px] text-ink-400 font-mono">{item.row_count.toLocaleString()} rows</span>}
-            {item.chunk_count && <span className="text-[9px] text-ink-400 font-mono">· {item.chunk_count} chunks</span>}
-            {item.duration_seconds && <span className="text-[9px] text-ink-400 font-mono">· {item.duration_seconds}s</span>}
-          </div>
-        )}
-
-        {item.status === 'error' && <p className="text-[10px] text-axared-500 mt-0.5 truncate">{item.error}</p>}
-      </div>
-
-      {/* Right side */}
-      <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
-        <div className="flex items-center gap-1">
-          <span className={cn('text-[9px] font-semibold', statusColor)}>{statusLabel}</span>
-          {isLoading ? <Loader2 className="w-3 h-3 text-axa-800 animate-spin" />
-            : item.status === 'ready' ? <CheckCircle className="w-3 h-3 text-emerald-500" />
-            : item.status === 'error' ? <AlertCircle className="w-3 h-3 text-axared-500" />
-            : null}
-          <button onClick={() => onRemove(item.id)}
-            className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-axared-50 hover:text-axared-500 text-ink-300 transition-all">
-            <X className="w-3 h-3" />
-          </button>
-        </div>
-
-        {/* SQL toggle — visible for all ready tables */}
-        {item.status === 'ready' && (
-          <button
-            onClick={() => onToggleApprove(item)}
-            className={cn(
-              'flex items-center gap-1 text-[9px] font-semibold px-2 py-0.5 rounded-full border transition-all',
-              isApproved
-                ? 'bg-emerald-50 border-emerald-300 text-emerald-700 hover:bg-emerald-100'
-                : 'bg-white border-ink-200 text-ink-500 hover:bg-emerald-50 hover:border-emerald-300 hover:text-emerald-700'
-            )}
-            title={isApproved ? 'Remove from SQL sources' : 'Enable for SQL queries'}
-          >
-            <SquareCode className="w-2.5 h-2.5" />
-            {isApproved ? 'SQL On' : 'Use SQL'}
-          </button>
-        )}
-      </div>
-    </motion.div>
-  )
+PROHIBITED_READABLE = {
+    "DROP"    : "DROP TABLE/VIEW/SCHEMA",
+    "DELETE"  : "DELETE FROM",
+    "INSERT"  : "INSERT INTO",
+    "UPDATE"  : "UPDATE ... SET",
+    "TRUNCATE": "TRUNCATE",
+    "ALTER"   : "ALTER TABLE",
+    "GRANT"   : "GRANT",
+    "REVOKE"  : "REVOKE",
 }
+
+# Maximum rows returned to the LLM for interpretation
+MAX_RESULT_ROWS = 200
+
+
+# ── LLM prompts ──────────────────────────────────────────────────
+
+INTENT_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are an intent classifier for a SQL data agent.
+
+Classify the user's message into ONE of these intent types:
+- SIMPLE_LOOKUP: retrieve/filter rows from one table
+- AGGREGATION: sum/count/avg/group analytics
+- COMPARISON: compare across dimensions or time periods
+- JOIN_OPERATION: join two or more tables
+- MULTI_STEP: requires CTEs or nested sub-queries
+- CREATE_OBJECT: user wants to create a view or table
+- OUT_OF_SCOPE: references a table not in approved sources, or requests a prohibited write operation
+- NOT_SQL: question does not need SQL at all (can be answered from documents/context)
+
+Approved tables available:
+{approved_sources_list}
+
+User question: {question}
+
+Respond with ONLY the intent type keyword, nothing else."""),
+])
+
+SQL_GENERATION_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are a Databricks SQL expert generating read-only SQL queries.
+
+APPROVED TABLES (you may ONLY reference these):
+{approved_sources_list}
+
+CRITICAL RULES — READ CAREFULLY:
+1. Generate EXACTLY ONE SQL statement per response. Never output two SELECT statements.
+2. If the user asks about multiple tables (e.g. "show first 10 rows from all tables"):
+   - Pick the FIRST table in the approved list and query only that one.
+   - The system will automatically run subsequent queries for other tables.
+3. Only use SELECT, aggregations, window functions, CTEs, JOINs, subqueries.
+4. Never use DROP, DELETE, INSERT, UPDATE, TRUNCATE, ALTER, GRANT, REVOKE.
+5. Always use fully qualified table names exactly as shown in the approved list.
+6. Use clear column aliases. For complex queries, use CTEs.
+7. Add LIMIT 200 unless the user explicitly wants all rows or asks for aggregates.
+8. Return ONLY the SQL statement — no markdown fences, no explanation, no preamble, no semicolons at the end.
+9. ONE STATEMENT ONLY. If you generate more than one SELECT, your output is wrong.
+
+Table schema context (from RAG knowledge base):
+{schema_context}
+
+User request: {question}"""),
+    MessagesPlaceholder(variable_name="chat_history"),
+])
+
+THINK_ALOUD_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are a data analyst explaining your approach before running a query.
+In 2-3 sentences, explain what SQL operation you are about to perform and why.
+Be specific — mention the table name(s), the key columns, and the logic.
+Keep it concise and friendly. Do not include the actual SQL."""),
+    ("human", "User request: {question}\nApproved tables: {approved_sources_list}"),
+])
+
+INTERPRETATION_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are a senior data analyst interpreting SQL query results.
+
+Query context: {question}
+SQL executed: {sql}
+Row count: {row_count}
+
+Interpret the results below in plain English:
+- Summarise the key findings in 2-4 bullet points
+- Highlight any anomalies, trends, or notable values
+- If results are empty, explain possible reasons
+- If results are large (>50 rows), summarise patterns rather than listing all rows
+- Be specific — use actual numbers from the results
+
+Results (JSON):
+{results_json}"""),
+    MessagesPlaceholder(variable_name="chat_history"),
+    ("human", "Interpret these results for me."),
+])
+
+GOVERNANCE_OVERLAY_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are a data governance officer reviewing the results of a SQL query.
+
+Given the query and governance metadata below, produce a brief governance note.
+Format it as:
+
+⚠️ Governance Note:
+- [PII flags if any]
+- [Data owner]
+- [Sensitivity classification]
+- [Any relevant governance warnings]
+
+Keep it under 5 bullet points. If there are no governance concerns, say "✅ No governance flags for this query."
+
+Query: {question}
+Tables queried: {tables_queried}
+Governance metadata from knowledge base:
+{governance_context}"""),
+])
+
+ERROR_TRANSLATION_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are translating a Databricks SQL error into plain English for a business user.
+
+Rules:
+- Never show the raw error or stack trace
+- Diagnose the root cause in one sentence
+- Give a concrete corrective action the user can take
+- Available columns in the table: {available_columns}
+
+Error: {error}
+SQL attempted: {sql}"""),
+])
+
+
+# ── SQL validation ────────────────────────────────────────────────
+
+def _contains_prohibited_operation(sql: str) -> tuple[bool, str]:
+    """
+    Check if SQL contains any prohibited write/DDL operations.
+    Returns (is_prohibited, operation_name).
+    """
+    sql_upper = sql.upper()
+    for pattern in PROHIBITED_PATTERNS:
+        if re.search(pattern, sql_upper, re.IGNORECASE):
+            for kw, name in PROHIBITED_READABLE.items():
+                if kw in sql_upper:
+                    return True, name
+    return False, ""
+
+
+def _extract_table_references(sql: str) -> list[str]:
+    """
+    Extract table references from a SQL string.
+    Looks for patterns: FROM <table>, JOIN <table>, INTO <table>, UPDATE <table>
+    Handles backtick-quoted names like `catalog`.`schema`.`table`
+    """
+    # Match fully qualified names with optional backticks
+    pattern = r'(?:FROM|JOIN|INTO|UPDATE)\s+(`?[\w\-]+`?\.`?[\w\-]+`?\.`?[\w\-]+`?)'
+    matches = re.findall(pattern, sql, re.IGNORECASE)
+    # Strip backticks
+    return [m.replace("`", "") for m in matches]
+
+
+def _validate_tables_in_sql(sql: str, approved: list[str]) -> tuple[bool, list[str]]:
+    """
+    Verify every table referenced in the SQL is in the approved list.
+    Returns (all_approved, list_of_unapproved_tables).
+    """
+    referenced = _extract_table_references(sql)
+    approved_lower = [t.lower() for t in approved]
+    unapproved = [t for t in referenced if t.lower() not in approved_lower]
+    return len(unapproved) == 0, unapproved
+
+
+# ── Column listing helper ─────────────────────────────────────────
+
+def _get_table_columns(client: DatabricksClient, full_table: str) -> list[str]:
+    """Fetch column names for error translation context."""
+    try:
+        parts = full_table.split(".")
+        if len(parts) != 3:
+            return []
+        cat, sch, tbl = parts
+        rows = client.execute_query(
+            f"SELECT column_name FROM information_schema.columns "
+            f"WHERE table_catalog='{cat}' AND table_schema='{sch}' AND table_name='{tbl}' "
+            f"LIMIT 50"
+        )
+        return [r["column_name"] for r in rows]
+    except Exception:
+        return []
+
+
+# ── Core agentic function ─────────────────────────────────────────
+
+def run_sql_agent(
+    question: str,
+    session_id: str,
+    knowledge_set: str,
+    chat_history: list[BaseMessage],
+    rag_context: str = "",
+    governance_context: str = "",
+    schema_context: str = "",
+) -> dict:
+    """
+    Full 6-step agentic SQL loop.
+
+    Returns a structured result dict containing:
+    - intent, think_aloud, sql, results, interpretation,
+      governance_note, mode, row_count, duration_seconds, error
+    """
+    start  = time.time()
+    run_id = str(uuid.uuid4())
+    llm    = get_llm()
+    parser = StrOutputParser()
+
+    # ── Fetch approved sources ────────────────────────────────────
+    approved_sources   = get_approved_sources(session_id, knowledge_set)
+    approved_tables    = [s["full_table"] for s in approved_sources]
+    approved_list_str  = "\n".join(f"  - {t}" for t in approved_tables) or "  (none)"
+    connection_id      = get_connection_for_session(session_id, knowledge_set)
+
+    base_result = {
+        "run_id"          : run_id,
+        "session_id"      : session_id,
+        "knowledge_set"   : knowledge_set,
+        "question"        : question,
+        "approved_tables" : approved_tables,
+        "intent"          : "NOT_SQL",
+        "think_aloud"     : "",
+        "sql"             : "",
+        "row_count"       : 0,
+        "results"         : [],
+        "interpretation"  : "",
+        "governance_note" : "",
+        "mode"            : "sql_agent",
+        "error"           : None,
+        "duration_seconds": 0.0,
+        "model"           : CHAT_MODEL,
+        "created_at"      : datetime.now().isoformat(),
+    }
+
+    # ── STEP 1: Intent detection ──────────────────────────────────
+    try:
+        intent_chain = INTENT_PROMPT | llm | parser
+        intent = intent_chain.invoke({
+            "approved_sources_list": approved_list_str,
+            "question"             : question,
+        }).strip().upper()
+        # Sanitise — ensure it's a known intent
+        if intent not in INTENT_TYPES:
+            intent = "NOT_SQL"
+    except Exception:
+        intent = "NOT_SQL"
+
+    base_result["intent"] = intent
+
+    # ── NOT_SQL — no SQL needed, return early ─────────────────────
+    if intent == "NOT_SQL":
+        base_result["duration_seconds"] = round(time.time() - start, 2)
+        return base_result
+
+    # ── OUT_OF_SCOPE — access control response ────────────────────
+    if intent == "OUT_OF_SCOPE":
+        # Determine if it's a prohibited op or an unapproved table
+        sql_keywords = ["DROP", "DELETE", "INSERT", "UPDATE", "TRUNCATE", "ALTER"]
+        if any(kw in question.upper() for kw in sql_keywords):
+            op_name = next((kw for kw in sql_keywords if kw in question.upper()), "write")
+            base_result["interpretation"] = (
+                f"I'm not authorised to perform **{op_name}** operations on Databricks. "
+                "GovernGPT is restricted to read-only SELECT queries to protect data integrity. "
+                "Please contact your data platform team for write operations."
+            )
+        else:
+            base_result["interpretation"] = (
+                "That table is not part of your active sources. "
+                "Please add it to your source selection before querying.\n\n"
+                f"**Currently approved tables:**\n{approved_list_str}"
+            )
+        base_result["duration_seconds"] = round(time.time() - start, 2)
+        return base_result
+
+    # ── No approved sources at all ────────────────────────────────
+    if not approved_tables:
+        base_result["intent"] = "OUT_OF_SCOPE"
+        base_result["interpretation"] = (
+            "No approved Databricks tables are configured for this session. "
+            "Please add tables via the Databricks tab in the Sources panel before running SQL queries."
+        )
+        base_result["duration_seconds"] = round(time.time() - start, 2)
+        return base_result
+
+    # ── No connection available ───────────────────────────────────
+    if not connection_id:
+        base_result["intent"] = "OUT_OF_SCOPE"
+        base_result["interpretation"] = (
+            "No active Databricks connection found for this session. "
+            "Please connect to Databricks in the Sources panel first."
+        )
+        base_result["duration_seconds"] = round(time.time() - start, 2)
+        return base_result
+
+    # ── STEP 2: Think aloud ───────────────────────────────────────
+    try:
+        think_chain = THINK_ALOUD_PROMPT | llm | parser
+        think_aloud = think_chain.invoke({
+            "question"             : question,
+            "approved_sources_list": approved_list_str,
+        })
+    except Exception:
+        think_aloud = f"Running a {intent.lower().replace('_', ' ')} query against your approved tables..."
+
+    base_result["think_aloud"] = think_aloud
+
+    # ── STEP 3: SQL generation ────────────────────────────────────
+    try:
+        sql_chain = SQL_GENERATION_PROMPT | llm | parser
+        generated_sql = sql_chain.invoke({
+            "approved_sources_list": approved_list_str,
+            "schema_context"       : schema_context or rag_context,
+            "question"             : question,
+            "chat_history"         : chat_history,
+        }).strip()
+
+        # Strip any accidental markdown code fences
+        generated_sql = re.sub(r"^```sql\s*", "", generated_sql, flags=re.IGNORECASE)
+        generated_sql = re.sub(r"^```\s*", "", generated_sql)
+        generated_sql = re.sub(r"\s*```$", "", generated_sql).strip()
+
+    except Exception as e:
+        base_result["error"] = f"SQL generation failed: {str(e)}"
+        base_result["interpretation"] = "I was unable to generate a valid SQL query for your request. Please try rephrasing."
+        base_result["duration_seconds"] = round(time.time() - start, 2)
+        return base_result
+
+    base_result["sql"] = generated_sql
+
+    # ── Pre-execution validation ──────────────────────────────────
+    # 1. Prohibited operation check
+    is_prohibited, op_name = _contains_prohibited_operation(generated_sql)
+    if is_prohibited:
+        base_result["intent"] = "OUT_OF_SCOPE"
+        base_result["interpretation"] = (
+            f"I'm not authorised to perform **{op_name}** operations on Databricks. "
+            "GovernGPT is restricted to read-only SELECT queries to protect data integrity."
+        )
+        base_result["duration_seconds"] = round(time.time() - start, 2)
+        return base_result
+
+    # 2. Table whitelist check
+    all_approved, unapproved_tables = _validate_tables_in_sql(generated_sql, approved_tables)
+    if not all_approved:
+        unapproved_str = ", ".join(unapproved_tables)
+        base_result["intent"] = "OUT_OF_SCOPE"
+        base_result["interpretation"] = (
+            f"The generated SQL references table(s) not in your approved sources: **{unapproved_str}**. "
+            "Please add them to your source selection before querying."
+        )
+        base_result["duration_seconds"] = round(time.time() - start, 2)
+        return base_result
+
+    # ── For CREATE_OBJECT — require explicit confirmation ─────────
+    if intent == "CREATE_OBJECT":
+        base_result["interpretation"] = (
+            "I've prepared the following SQL to create the requested object. "
+            "Please confirm you want to execute this:\n\n"
+            f"```sql\n{generated_sql}\n```\n\n"
+            "Reply **'confirm'** to proceed, or describe any changes you'd like."
+        )
+        base_result["mode"] = "sql_agent_pending_confirm"
+        base_result["duration_seconds"] = round(time.time() - start, 2)
+        return base_result
+
+    # ── STEP 4: Execute via Databricks SQL API ────────────────────
+    results    = []
+    exec_error = None
+    final_sql  = generated_sql
+
+    # Detect multi-statement SQL — Databricks SQL Connector does not
+    # support executing multiple SELECT statements in one call.
+    statements = _split_sql_statements(generated_sql)
+
+    try:
+        with DatabricksClient(connection_id) as client:
+            if len(statements) > 1:
+                # Multi-table request: detect if user asked for data from all tables
+                multi_table_keywords = ["all tables", "each table", "both tables", "every table", "all approved"]
+                is_multi_table_browse = any(kw in question.lower() for kw in multi_table_keywords)
+
+                if is_multi_table_browse:
+                    # Execute SELECT * LIMIT N against each approved table sequentially
+                    results, final_sql = _execute_multi_table_query(
+                        client, question, approved_tables, limit=10
+                    )
+                    base_result["sql"] = final_sql
+                else:
+                    # Execute only the FIRST valid statement, ignore the rest
+                    first_stmt = statements[0]
+                    base_result["sql"] = first_stmt
+                    final_sql  = first_stmt
+                    results    = client.execute_query(first_stmt, limit=MAX_RESULT_ROWS)
+            else:
+                results = client.execute_query(generated_sql, limit=MAX_RESULT_ROWS)
+
+    except Exception as e:
+        exec_error = str(e)
+
+    if exec_error:
+        # Translate error into plain English
+        try:
+            tables_queried  = _extract_table_references(generated_sql)
+            avail_cols      = []
+            if tables_queried:
+                with DatabricksClient(connection_id) as client:
+                    avail_cols = _get_table_columns(client, tables_queried[0])
+
+            err_chain = ERROR_TRANSLATION_PROMPT | llm | parser
+            friendly_error = err_chain.invoke({
+                "error"            : exec_error,
+                "sql"              : generated_sql,
+                "available_columns": ", ".join(avail_cols) if avail_cols else "unknown (schema fetch failed)",
+            })
+        except Exception:
+            friendly_error = f"The query could not be executed. Please check your table access and try again."
+
+        base_result["error"]           = exec_error
+        base_result["interpretation"]  = friendly_error
+        base_result["duration_seconds"]= round(time.time() - start, 2)
+
+        _log_sql_execution(base_result)
+        return base_result
+
+    row_count            = len(results)
+    base_result["results"]   = results[:MAX_RESULT_ROWS]
+    base_result["row_count"] = row_count
+
+    # ── STEP 5: Interpret results ─────────────────────────────────
+    try:
+        # Truncate results sent to LLM to avoid context overflow
+        results_for_llm  = results[:50]
+        results_json_str = json.dumps(results_for_llm, default=str, indent=2)
+        if len(results_json_str) > 8000:
+            results_json_str = results_json_str[:8000] + "\n... [truncated for context window]"
+
+        interp_chain  = INTERPRETATION_PROMPT | llm | parser
+        interpretation = interp_chain.invoke({
+            "question"    : question,
+            "sql"         : generated_sql,
+            "row_count"   : row_count,
+            "results_json": results_json_str,
+            "chat_history": chat_history,
+        })
+    except Exception:
+        interpretation = f"Query returned {row_count} row(s). Results are available in the data panel."
+
+    base_result["interpretation"] = interpretation
+
+    # ── STEP 6: Governance overlay ────────────────────────────────
+    if governance_context:
+        try:
+            tables_queried = list({
+                t for t in _extract_table_references(generated_sql)
+                if any(t.lower() in a.lower() for a in approved_tables)
+            })
+            gov_chain = GOVERNANCE_OVERLAY_PROMPT | llm | parser
+            governance_note = gov_chain.invoke({
+                "question"         : question,
+                "tables_queried"   : ", ".join(tables_queried),
+                "governance_context": governance_context,
+            })
+        except Exception:
+            governance_note = ""
+        base_result["governance_note"] = governance_note
+
+    base_result["duration_seconds"] = round(time.time() - start, 2)
+    _log_sql_execution(base_result)
+    return base_result
+
+
+# ── Logging ───────────────────────────────────────────────────────
+
+def _split_sql_statements(sql: str) -> list[str]:
+    """
+    Split a SQL string into individual statements.
+    Handles semicolon separation and double-SELECT detection.
+    Returns a list of clean single statements.
+    """
+    # First try semicolon split
+    parts = [s.strip() for s in sql.split(";") if s.strip()]
+    if len(parts) > 1:
+        return parts
+
+    # Detect multiple SELECT blocks without semicolons
+    # Match SELECT...FROM blocks at the top level
+    select_positions = [m.start() for m in re.finditer(r'\bSELECT\b', sql, re.IGNORECASE)]
+    if len(select_positions) <= 1:
+        return [sql]
+
+    # Split at each SELECT boundary (except the first)
+    statements = []
+    for i, pos in enumerate(select_positions):
+        end = select_positions[i + 1] if i + 1 < len(select_positions) else len(sql)
+        stmt = sql[pos:end].strip()
+        if stmt:
+            statements.append(stmt)
+    return statements if statements else [sql]
+
+
+def _execute_multi_table_query(
+    client: DatabricksClient,
+    question: str,
+    approved_tables: list[str],
+    limit: int = 10,
+) -> tuple[list[dict], str]:
+    """
+    When the user asks to see data from multiple approved tables
+    (e.g. 'show me first 10 rows from all tables'), execute a simple
+    SELECT * LIMIT N against each table sequentially and combine results.
+
+    Returns (combined_results, sql_summary_string).
+    """
+    all_results = []
+    sqls_run    = []
+
+    for full_table in approved_tables[:5]:  # cap at 5 tables
+        sql = f"SELECT * FROM {full_table} LIMIT {limit}"
+        sqls_run.append(sql)
+        try:
+            rows = client.execute_query(sql, limit=limit)
+            # Tag each row with its source table
+            for row in rows:
+                row["__source_table__"] = full_table.split(".")[-1]
+            all_results.extend(rows)
+        except Exception:
+            pass  # skip tables that fail, continue with others
+
+    sql_summary = "\n".join(sqls_run)
+    return all_results, sql_summary
+    """Persist SQL agent execution log to SQLite."""
+    try:
+        db_insert("sql_agent_log", {
+            "run_id"          : result["run_id"],
+            "session_id"      : result["session_id"],
+            "knowledge_set"   : result["knowledge_set"],
+            "question"        : result["question"],
+            "intent"          : result["intent"],
+            "sql"             : result["sql"],
+            "row_count"       : str(result["row_count"]),
+            "duration_seconds": str(result["duration_seconds"]),
+            "has_error"       : str(bool(result.get("error"))),
+            "created_at"      : result["created_at"],
+        })
+    except Exception:
+        pass  # Non-fatal — log failure should never break the response
