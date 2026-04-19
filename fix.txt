@@ -1,208 +1,591 @@
-import type {
-  QueryResponse,
-  ConversationHistoryResponse,
-  ConversationStatsResponse,
-  DatabricksConnection,
-  DatabricksConnectResponse,
-  DatabricksCatalog,
-  DatabricksSchema,
-  DatabricksTable,
-  DatabricksTableDetail,
-  DatabricksIngestResult,
-  ApprovedSourcesResponse,
-} from '@/types'
+'use client'
+import { create } from 'zustand'
+import { persist, createJSONStorage } from 'zustand/middleware'
+import type { KnowledgeSet, SourceFile, ChatMessage, DatabricksConnection, DatabricksIngestItem } from '@/types'
+import { slugify } from '@/lib/utils'
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
-    ...options,
-  })
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error(err.detail || `Request failed: ${res.status}`)
-  }
-  return res.json()
+export interface SessionTokenUsage {
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  turn_count: number
 }
 
-export const api = {
+const DEFAULT_TOKEN_USAGE: SessionTokenUsage = {
+  prompt_tokens: 0,
+  completion_tokens: 0,
+  total_tokens: 0,
+  turn_count: 0,
+}
 
-  // ── Knowledge Sets ──────────────────────────────────────────────
-  listKnowledgeSets: () =>
-    request<{ total: number; knowledge_sets: { knowledge_set: string; collection_name: string; vector_count: number }[] }>('/api/knowledge-sets/'),
+interface SessionState {
+  sessions: KnowledgeSet[]
+  activeSessionId: string | null
+  files: Record<string, SourceFile[]>
+  chats: Record<string, ChatMessage[]>
+  tokenUsage: Record<string, SessionTokenUsage>
+  databricksConnections: DatabricksConnection[]
+  databricksIngestItems: Record<string, DatabricksIngestItem[]>
 
-  deleteKnowledgeSet: (ks: string) =>
-    request(`/api/knowledge-sets/${encodeURIComponent(ks)}`, { method: 'DELETE' }),
+  // ── SQL Agent: approved tables per session ────────────────────
+  // key: sessionId → { connection_id, tables: string[] }
+  // tables is a list of "catalog.schema.table" strings
+  approvedTables: Record<string, { connection_id: string; tables: string[] }>
 
-  // ── Ingest (files) ──────────────────────────────────────────────
-  ingestLoadingZone: (knowledge_set: string, rebuild = false) =>
-    request('/api/ingest/', {
-      method: 'POST',
-      body: JSON.stringify({ knowledge_set, rebuild }),
+  // ── Session actions ───────────────────────────────────────────
+  createSession: (name: string, summary: string) => KnowledgeSet
+  updateSession: (id: string, updates: Partial<KnowledgeSet>) => void
+  deleteSession: (id: string) => void
+  setActiveSession: (id: string | null) => void
+  getActiveSession: () => KnowledgeSet | null
+
+  // ── File actions ──────────────────────────────────────────────
+  addFiles: (sessionId: string, files: SourceFile[]) => void
+  updateFile: (sessionId: string, fileId: string, updates: Partial<SourceFile>) => void
+  removeFile: (sessionId: string, fileId: string) => void
+  getSessionFiles: (sessionId: string) => SourceFile[]
+
+  // ── Chat actions ──────────────────────────────────────────────
+  addMessage: (sessionId: string, msg: ChatMessage) => void
+  updateMessage: (sessionId: string, msgId: string, updates: Partial<ChatMessage>) => void
+  clearChat: (sessionId: string) => void
+  getSessionChat: (sessionId: string) => ChatMessage[]
+
+  // ── Token actions ─────────────────────────────────────────────
+  addTokenUsage: (sessionId: string, usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number }) => void
+  getSessionTokenUsage: (sessionId: string) => SessionTokenUsage
+  resetTokenUsage: (sessionId: string) => void
+
+  // ── Databricks connection actions ─────────────────────────────
+  setDatabricksConnections: (connections: DatabricksConnection[]) => void
+  addDatabricksConnection: (conn: DatabricksConnection) => void
+  removeDatabricksConnection: (connection_id: string) => void
+  getDatabricksConnections: () => DatabricksConnection[]
+
+  // ── Databricks ingest item actions ────────────────────────────
+  addDatabricksIngestItem: (sessionId: string, item: DatabricksIngestItem) => void
+  updateDatabricksIngestItem: (sessionId: string, itemId: string, updates: Partial<DatabricksIngestItem>) => void
+  removeDatabricksIngestItem: (sessionId: string, itemId: string) => void
+  getSessionDatabricksItems: (sessionId: string) => DatabricksIngestItem[]
+
+  // ── Approved tables actions ───────────────────────────────────
+  // Toggle a single table in/out of the approved list
+  toggleApprovedTable: (sessionId: string, connection_id: string, fullTable: string) => void
+  // Replace the entire approved list for a session
+  setApprovedTables: (sessionId: string, connection_id: string, tables: string[]) => void
+  // Clear all approved tables for a session
+  clearApprovedTables: (sessionId: string) => void
+  // Get the approved table names for a session
+  getApprovedTables: (sessionId: string) => string[]
+  // Get the connection_id associated with approved tables
+  getApprovedConnectionId: (sessionId: string) => string | null
+  // Check if a specific table is approved
+  isTableApproved: (sessionId: string, fullTable: string) => boolean
+}
+
+export const useStore = create<SessionState>()(
+  persist(
+    (set, get) => ({
+      sessions: [],
+      activeSessionId: null,
+      files: {},
+      chats: {},
+      tokenUsage: {},
+      databricksConnections: [],
+      databricksIngestItems: {},
+      approvedTables: {},
+
+      // ── Sessions ──────────────────────────────────────────────
+      createSession: (name, summary) => {
+        const id = slugify(name) + '_' + Date.now().toString(36)
+        const session: KnowledgeSet = {
+          id,
+          project_name: name,
+          summary,
+          created_at: new Date().toISOString(),
+          file_count: 0,
+          vector_count: 0,
+          collection_name: `ks_${id}`,
+        }
+        set(s => ({ sessions: [session, ...s.sessions] }))
+        return session
+      },
+
+      updateSession: (id, updates) =>
+        set(s => ({
+          sessions: s.sessions.map(sess =>
+            sess.id === id ? { ...sess, ...updates } : sess
+          ),
+        })),
+
+      deleteSession: (id) =>
+        set(s => {
+          const { [id]: _f, ...files }                 = s.files
+          const { [id]: _c, ...chats }                 = s.chats
+          const { [id]: _t, ...tokenUsage }            = s.tokenUsage
+          const { [id]: _d, ...databricksIngestItems } = s.databricksIngestItems
+          const { [id]: _a, ...approvedTables }        = s.approvedTables
+          return {
+            sessions: s.sessions.filter(sess => sess.id !== id),
+            activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
+            files, chats, tokenUsage, databricksIngestItems, approvedTables,
+          }
+        }),
+
+      setActiveSession: (id) => set({ activeSessionId: id }),
+
+      getActiveSession: () => {
+        const { sessions, activeSessionId } = get()
+        return sessions.find(s => s.id === activeSessionId) ?? null
+      },
+
+      // ── Files ─────────────────────────────────────────────────
+      addFiles: (sessionId, newFiles) =>
+        set(s => ({
+          files: { ...s.files, [sessionId]: [...(s.files[sessionId] ?? []), ...newFiles] },
+          sessions: s.sessions.map(sess =>
+            sess.id === sessionId
+              ? { ...sess, file_count: (s.files[sessionId]?.length ?? 0) + newFiles.length }
+              : sess
+          ),
+        })),
+
+      updateFile: (sessionId, fileId, updates) =>
+        set(s => ({
+          files: {
+            ...s.files,
+            [sessionId]: (s.files[sessionId] ?? []).map(f =>
+              f.id === fileId ? { ...f, ...updates } : f
+            ),
+          },
+        })),
+
+      removeFile: (sessionId, fileId) =>
+        set(s => {
+          const updated = (s.files[sessionId] ?? []).filter(f => f.id !== fileId)
+          return {
+            files: { ...s.files, [sessionId]: updated },
+            sessions: s.sessions.map(sess =>
+              sess.id === sessionId ? { ...sess, file_count: updated.length } : sess
+            ),
+          }
+        }),
+
+      getSessionFiles: (sessionId) => get().files[sessionId] ?? [],
+
+      // ── Chat ──────────────────────────────────────────────────
+      addMessage: (sessionId, msg) =>
+        set(s => ({
+          chats: { ...s.chats, [sessionId]: [...(s.chats[sessionId] ?? []), msg] },
+        })),
+
+      updateMessage: (sessionId, msgId, updates) =>
+        set(s => ({
+          chats: {
+            ...s.chats,
+            [sessionId]: (s.chats[sessionId] ?? []).map(m =>
+              m.id === msgId ? { ...m, ...updates } : m
+            ),
+          },
+        })),
+
+      clearChat: (sessionId) =>
+        set(s => ({ chats: { ...s.chats, [sessionId]: [] } })),
+
+      getSessionChat: (sessionId) => get().chats[sessionId] ?? [],
+
+      // ── Tokens ────────────────────────────────────────────────
+      addTokenUsage: (sessionId, usage) =>
+        set(s => {
+          const prev = s.tokenUsage[sessionId] ?? { ...DEFAULT_TOKEN_USAGE }
+          return {
+            tokenUsage: {
+              ...s.tokenUsage,
+              [sessionId]: {
+                prompt_tokens    : prev.prompt_tokens     + (usage.prompt_tokens     ?? 0),
+                completion_tokens: prev.completion_tokens + (usage.completion_tokens ?? 0),
+                total_tokens     : prev.total_tokens      + (usage.total_tokens      ?? 0),
+                turn_count       : prev.turn_count        + 1,
+              },
+            },
+          }
+        }),
+
+      getSessionTokenUsage: (sessionId) =>
+        get().tokenUsage[sessionId] ?? { ...DEFAULT_TOKEN_USAGE },
+
+      resetTokenUsage: (sessionId) =>
+        set(s => ({
+          tokenUsage: { ...s.tokenUsage, [sessionId]: { ...DEFAULT_TOKEN_USAGE } },
+        })),
+
+      // ── Databricks connections ─────────────────────────────────
+      setDatabricksConnections: (connections) =>
+        set({ databricksConnections: connections }),
+
+      addDatabricksConnection: (conn) =>
+        set(s => ({
+          databricksConnections: [conn, ...s.databricksConnections.filter(c => c.connection_id !== conn.connection_id)],
+        })),
+
+      removeDatabricksConnection: (connection_id) =>
+        set(s => ({
+          databricksConnections: s.databricksConnections.filter(c => c.connection_id !== connection_id),
+        })),
+
+      getDatabricksConnections: () => get().databricksConnections,
+
+      // ── Databricks ingest items ────────────────────────────────
+      addDatabricksIngestItem: (sessionId, item) =>
+        set(s => ({
+          databricksIngestItems: {
+            ...s.databricksIngestItems,
+            [sessionId]: [...(s.databricksIngestItems[sessionId] ?? []), item],
+          },
+        })),
+
+      updateDatabricksIngestItem: (sessionId, itemId, updates) =>
+        set(s => ({
+          databricksIngestItems: {
+            ...s.databricksIngestItems,
+            [sessionId]: (s.databricksIngestItems[sessionId] ?? []).map(item =>
+              item.id === itemId ? { ...item, ...updates } : item
+            ),
+          },
+        })),
+
+      removeDatabricksIngestItem: (sessionId, itemId) =>
+        set(s => ({
+          databricksIngestItems: {
+            ...s.databricksIngestItems,
+            [sessionId]: (s.databricksIngestItems[sessionId] ?? []).filter(item => item.id !== itemId),
+          },
+        })),
+
+      getSessionDatabricksItems: (sessionId) =>
+        get().databricksIngestItems[sessionId] ?? [],
+
+      // ── Approved tables ───────────────────────────────────────
+      toggleApprovedTable: (sessionId, connection_id, fullTable) =>
+        set(s => {
+          const current = s.approvedTables[sessionId] ?? { connection_id, tables: [] }
+          const tables  = current.tables.includes(fullTable)
+            ? current.tables.filter(t => t !== fullTable)
+            : [...current.tables, fullTable]
+          return {
+            approvedTables: {
+              ...s.approvedTables,
+              [sessionId]: { connection_id, tables },
+            },
+          }
+        }),
+
+      setApprovedTables: (sessionId, connection_id, tables) =>
+        set(s => ({
+          approvedTables: {
+            ...s.approvedTables,
+            [sessionId]: { connection_id, tables },
+          },
+        })),
+
+      clearApprovedTables: (sessionId) =>
+        set(s => {
+          const { [sessionId]: _, ...rest } = s.approvedTables
+          return { approvedTables: rest }
+        }),
+
+      getApprovedTables: (sessionId) =>
+        get().approvedTables[sessionId]?.tables ?? [],
+
+      getApprovedConnectionId: (sessionId) =>
+        get().approvedTables[sessionId]?.connection_id ?? null,
+
+      isTableApproved: (sessionId, fullTable) =>
+        (get().approvedTables[sessionId]?.tables ?? []).includes(fullTable),
     }),
-
-  uploadFiles: async (knowledge_set: string, files: File[]) => {
-    const form = new FormData()
-    form.append('knowledge_set', knowledge_set)
-    files.forEach(f => form.append('files', f))
-    const res = await fetch(`${API_URL}/api/ingest/upload`, {
-      method: 'POST',
-      body: form,
-    })
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: res.statusText }))
-      throw new Error(err.detail || `Upload failed: ${res.status}`)
+    {
+      name: 'governgpt-store',
+      version: 4,   // bumped — new approvedTables field
+      storage: createJSONStorage(() => {
+        if (typeof window === 'undefined') {
+          return { getItem: () => null, setItem: () => {}, removeItem: () => {} }
+        }
+        return localStorage
+      }),
+      partialize: (state) => ({
+        sessions              : state.sessions,
+        files                 : state.files,
+        chats                 : state.chats,
+        tokenUsage            : state.tokenUsage,
+        databricksIngestItems : state.databricksIngestItems,
+        approvedTables        : state.approvedTables,
+        // databricksConnections NOT persisted — loaded fresh from backend
+        // activeSessionId NOT persisted — prevents SSR hydration mismatch
+      }),
+      skipHydration: true,
     }
-    return res.json()
-  },
+  )
+)
 
-  // ── Query (RAG + SQL Agent hybrid) ──────────────────────────────
-  // The backend auto-detects SQL intent when enable_sql_agent=true
-  // and approved_tables are present, routing to the SQL agent or
-  // falling back to conversational RAG.
-  query: (payload: {
-    knowledge_set: string
-    session_id: string
-    question: string
-    use_rag: boolean
-    k: number
-    window_k?: number
-    enable_sql_agent?: boolean
-    approved_tables?: string[]   // catalog.schema.table list
-    connection_id?: string       // Databricks connection for SQL execution
-  }): Promise<QueryResponse> =>
-    request('/api/query/', {
-      method: 'POST',
-      body: JSON.stringify({
-        window_k        : 6,
-        enable_sql_agent: true,
-        approved_tables : [],
-        ...payload,
-      }),
-    }),
-
-  // ── Conversation History ─────────────────────────────────────────
-  getConversationHistory: (session_id: string, knowledge_set: string): Promise<ConversationHistoryResponse> =>
-    request(`/api/query/history?session_id=${encodeURIComponent(session_id)}&knowledge_set=${encodeURIComponent(knowledge_set)}`),
-
-  getConversationStats: (session_id: string, knowledge_set: string): Promise<ConversationStatsResponse> =>
-    request(`/api/query/history/stats?session_id=${encodeURIComponent(session_id)}&knowledge_set=${encodeURIComponent(knowledge_set)}`),
-
-  clearConversationHistory: (session_id: string, knowledge_set: string) =>
-    request(`/api/query/history?session_id=${encodeURIComponent(session_id)}&knowledge_set=${encodeURIComponent(knowledge_set)}`, { method: 'DELETE' }),
-
-  // ── Sources / Stats / Profile ───────────────────────────────────
-  getSources: (knowledge_set: string) =>
-    request(`/api/sources/?knowledge_set=${encodeURIComponent(knowledge_set)}`),
-
-  getStats: (knowledge_set: string) =>
-    request(`/api/logs/stats?knowledge_set=${encodeURIComponent(knowledge_set)}`),
-
-  profileFile: (filename: string) =>
-    request(`/api/profile/${encodeURIComponent(filename)}`),
-
-  health: () => request('/health'),
-
-  // ── SQL Agent ───────────────────────────────────────────────────
-  sqlAgent: {
-    /** Standalone SQL agent query (bypasses RAG entirely) */
-    query: (payload: {
-      knowledge_set: string
-      session_id: string
-      question: string
-      connection_id: string
-      approved_tables: string[]
-      window_k?: number
-    }) =>
-      request('/api/sql-agent/query', {
-        method: 'POST',
-        body: JSON.stringify({ window_k: 6, ...payload }),
-      }),
-
-    /** List approved tables for a session */
-    getApprovedSources: (session_id: string, knowledge_set: string): Promise<ApprovedSourcesResponse> =>
-      request(`/api/sql-agent/approved-sources?session_id=${encodeURIComponent(session_id)}&knowledge_set=${encodeURIComponent(knowledge_set)}`),
-
-    /** Sync the approved table list (replaces current list) */
-    syncApprovedSources: (payload: {
-      session_id: string
-      knowledge_set: string
-      connection_id: string
-      tables: string[]
-    }) =>
-      request('/api/sql-agent/approved-sources/sync', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }),
-
-    /** Remove all approved sources for a session */
-    clearApprovedSources: (session_id: string, knowledge_set: string) =>
-      request(`/api/sql-agent/approved-sources?session_id=${encodeURIComponent(session_id)}&knowledge_set=${encodeURIComponent(knowledge_set)}`, { method: 'DELETE' }),
-
-    /** SQL execution history for a session */
-    getLog: (session_id: string, knowledge_set: string, limit = 50) =>
-      request(`/api/sql-agent/log?session_id=${encodeURIComponent(session_id)}&knowledge_set=${encodeURIComponent(knowledge_set)}&limit=${limit}`),
-  },
-
-  // ── Databricks: Connection Management ───────────────────────────
-  databricks: {
-    connect: (payload: {
-      connection_name: string
-      workspace_url: string
-      pat: string
-      http_path: string
-      catalog?: string
-      description?: string
-      knowledge_set?: string
-    }): Promise<DatabricksConnectResponse> =>
-      request('/api/databricks/connect', { method: 'POST', body: JSON.stringify(payload) }),
-
-    listConnections: (knowledge_set?: string): Promise<DatabricksConnection[]> =>
-      request(`/api/databricks/connections${knowledge_set ? `?knowledge_set=${encodeURIComponent(knowledge_set)}` : ''}`),
-
-    deleteConnection: (connection_id: string) =>
-      request(`/api/databricks/connections/${encodeURIComponent(connection_id)}`, { method: 'DELETE' }),
-
-    testConnection: (connection_id: string) =>
-      request(`/api/databricks/connections/${encodeURIComponent(connection_id)}/test`, { method: 'POST' }),
-
-    listCatalogs: (connection_id: string): Promise<{ catalogs: DatabricksCatalog[] }> =>
-      request(`/api/databricks/${encodeURIComponent(connection_id)}/catalogs`),
-
-    listSchemas: (connection_id: string, catalog: string): Promise<{ catalog: string; schemas: DatabricksSchema[] }> =>
-      request(`/api/databricks/${encodeURIComponent(connection_id)}/schemas?catalog=${encodeURIComponent(catalog)}`),
-
-    listTables: (connection_id: string, catalog: string, schema: string, include_views = true): Promise<{ tables: DatabricksTable[]; count: number }> =>
-      request(`/api/databricks/${encodeURIComponent(connection_id)}/tables?catalog=${encodeURIComponent(catalog)}&schema=${encodeURIComponent(schema)}&include_views=${include_views}`),
-
-    getTableDetail: (connection_id: string, catalog: string, schema: string, table: string): Promise<DatabricksTableDetail> =>
-      request(`/api/databricks/${encodeURIComponent(connection_id)}/table-detail?catalog=${encodeURIComponent(catalog)}&schema=${encodeURIComponent(schema)}&table=${encodeURIComponent(table)}`),
-
-    profileTable: (connection_id: string, catalog: string, schema: string, table: string, sample_rows = 500000) =>
-      request(`/api/databricks/${encodeURIComponent(connection_id)}/profile?catalog=${encodeURIComponent(catalog)}&schema=${encodeURIComponent(schema)}&table=${encodeURIComponent(table)}&sample_rows=${sample_rows}`),
-
-    ingestTable: (connection_id: string, payload: {
-      knowledge_set: string; catalog: string; schema: string; table: string
-      sample_rows?: number; rebuild?: boolean
-    }): Promise<DatabricksIngestResult> =>
-      request(`/api/databricks/${encodeURIComponent(connection_id)}/ingest`, {
-        method: 'POST', body: JSON.stringify(payload),
-      }),
-
-    ingestMultiple: (connection_id: string, payload: {
-      knowledge_set: string
-      tables: { catalog: string; schema: string; table: string }[]
-      sample_rows?: number; rebuild_first?: boolean
-    }) =>
-      request(`/api/databricks/${encodeURIComponent(connection_id)}/ingest-multiple`, {
-        method: 'POST', body: JSON.stringify(payload),
-      }),
-
-    getIngestStatus: (job_id: string) =>
-      request(`/api/databricks/ingest-status/${encodeURIComponent(job_id)}`),
-
-    getIngestionLog: (connection_id: string, knowledge_set?: string) =>
-      request(`/api/databricks/${encodeURIComponent(connection_id)}/ingestion-log${knowledge_set ? `?knowledge_set=${encodeURIComponent(knowledge_set)}` : ''}`),
-  },
+  prompt_tokens: 0,
+  completion_tokens: 0,
+  total_tokens: 0,
+  turn_count: 0,
 }
+
+interface SessionState {
+  sessions: KnowledgeSet[]
+  activeSessionId: string | null
+  files: Record<string, SourceFile[]>
+  chats: Record<string, ChatMessage[]>
+  tokenUsage: Record<string, SessionTokenUsage>
+
+  // ── Databricks ────────────────────────────────────────────────
+  // Connections are global (not per-session) — one connection can
+  // be used across multiple knowledge sets.
+  databricksConnections: DatabricksConnection[]
+  // Ingested tables are tracked per session for UI status display
+  databricksIngestItems: Record<string, DatabricksIngestItem[]>
+
+  // ── Session actions ───────────────────────────────────────────
+  createSession: (name: string, summary: string) => KnowledgeSet
+  updateSession: (id: string, updates: Partial<KnowledgeSet>) => void
+  deleteSession: (id: string) => void
+  setActiveSession: (id: string | null) => void
+  getActiveSession: () => KnowledgeSet | null
+
+  // ── File actions ──────────────────────────────────────────────
+  addFiles: (sessionId: string, files: SourceFile[]) => void
+  updateFile: (sessionId: string, fileId: string, updates: Partial<SourceFile>) => void
+  removeFile: (sessionId: string, fileId: string) => void
+  getSessionFiles: (sessionId: string) => SourceFile[]
+
+  // ── Chat actions ──────────────────────────────────────────────
+  addMessage: (sessionId: string, msg: ChatMessage) => void
+  updateMessage: (sessionId: string, msgId: string, updates: Partial<ChatMessage>) => void
+  clearChat: (sessionId: string) => void
+  getSessionChat: (sessionId: string) => ChatMessage[]
+
+  // ── Token actions ─────────────────────────────────────────────
+  addTokenUsage: (sessionId: string, usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number }) => void
+  getSessionTokenUsage: (sessionId: string) => SessionTokenUsage
+  resetTokenUsage: (sessionId: string) => void
+
+  // ── Databricks connection actions ─────────────────────────────
+  setDatabricksConnections: (connections: DatabricksConnection[]) => void
+  addDatabricksConnection: (conn: DatabricksConnection) => void
+  removeDatabricksConnection: (connection_id: string) => void
+  getDatabricksConnections: () => DatabricksConnection[]
+
+  // ── Databricks ingest item actions ────────────────────────────
+  addDatabricksIngestItem: (sessionId: string, item: DatabricksIngestItem) => void
+  updateDatabricksIngestItem: (sessionId: string, itemId: string, updates: Partial<DatabricksIngestItem>) => void
+  removeDatabricksIngestItem: (sessionId: string, itemId: string) => void
+  getSessionDatabricksItems: (sessionId: string) => DatabricksIngestItem[]
+}
+
+export const useStore = create<SessionState>()(
+  persist(
+    (set, get) => ({
+      sessions: [],
+      activeSessionId: null,
+      files: {},
+      chats: {},
+      tokenUsage: {},
+      databricksConnections: [],
+      databricksIngestItems: {},
+
+      // ── Sessions ──────────────────────────────────────────────
+      createSession: (name, summary) => {
+        const id = slugify(name) + '_' + Date.now().toString(36)
+        const session: KnowledgeSet = {
+          id,
+          project_name: name,
+          summary,
+          created_at: new Date().toISOString(),
+          file_count: 0,
+          vector_count: 0,
+          collection_name: `ks_${id}`,
+        }
+        set(s => ({ sessions: [session, ...s.sessions] }))
+        return session
+      },
+
+      updateSession: (id, updates) =>
+        set(s => ({
+          sessions: s.sessions.map(sess =>
+            sess.id === id ? { ...sess, ...updates } : sess
+          ),
+        })),
+
+      deleteSession: (id) =>
+        set(s => {
+          const { [id]: _f, ...files }                    = s.files
+          const { [id]: _c, ...chats }                    = s.chats
+          const { [id]: _t, ...tokenUsage }               = s.tokenUsage
+          const { [id]: _d, ...databricksIngestItems }    = s.databricksIngestItems
+          return {
+            sessions: s.sessions.filter(sess => sess.id !== id),
+            activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
+            files, chats, tokenUsage, databricksIngestItems,
+          }
+        }),
+
+      setActiveSession: (id) => set({ activeSessionId: id }),
+
+      getActiveSession: () => {
+        const { sessions, activeSessionId } = get()
+        return sessions.find(s => s.id === activeSessionId) ?? null
+      },
+
+      // ── Files ─────────────────────────────────────────────────
+      addFiles: (sessionId, newFiles) =>
+        set(s => ({
+          files: { ...s.files, [sessionId]: [...(s.files[sessionId] ?? []), ...newFiles] },
+          sessions: s.sessions.map(sess =>
+            sess.id === sessionId
+              ? { ...sess, file_count: (s.files[sessionId]?.length ?? 0) + newFiles.length }
+              : sess
+          ),
+        })),
+
+      updateFile: (sessionId, fileId, updates) =>
+        set(s => ({
+          files: {
+            ...s.files,
+            [sessionId]: (s.files[sessionId] ?? []).map(f =>
+              f.id === fileId ? { ...f, ...updates } : f
+            ),
+          },
+        })),
+
+      removeFile: (sessionId, fileId) =>
+        set(s => {
+          const updated = (s.files[sessionId] ?? []).filter(f => f.id !== fileId)
+          return {
+            files: { ...s.files, [sessionId]: updated },
+            sessions: s.sessions.map(sess =>
+              sess.id === sessionId ? { ...sess, file_count: updated.length } : sess
+            ),
+          }
+        }),
+
+      getSessionFiles: (sessionId) => get().files[sessionId] ?? [],
+
+      // ── Chat ──────────────────────────────────────────────────
+      addMessage: (sessionId, msg) =>
+        set(s => ({
+          chats: { ...s.chats, [sessionId]: [...(s.chats[sessionId] ?? []), msg] },
+        })),
+
+      updateMessage: (sessionId, msgId, updates) =>
+        set(s => ({
+          chats: {
+            ...s.chats,
+            [sessionId]: (s.chats[sessionId] ?? []).map(m =>
+              m.id === msgId ? { ...m, ...updates } : m
+            ),
+          },
+        })),
+
+      clearChat: (sessionId) =>
+        set(s => ({ chats: { ...s.chats, [sessionId]: [] } })),
+
+      getSessionChat: (sessionId) => get().chats[sessionId] ?? [],
+
+      // ── Tokens ────────────────────────────────────────────────
+      addTokenUsage: (sessionId, usage) =>
+        set(s => {
+          const prev = s.tokenUsage[sessionId] ?? { ...DEFAULT_TOKEN_USAGE }
+          return {
+            tokenUsage: {
+              ...s.tokenUsage,
+              [sessionId]: {
+                prompt_tokens    : prev.prompt_tokens     + (usage.prompt_tokens     ?? 0),
+                completion_tokens: prev.completion_tokens + (usage.completion_tokens ?? 0),
+                total_tokens     : prev.total_tokens      + (usage.total_tokens      ?? 0),
+                turn_count       : prev.turn_count        + 1,
+              },
+            },
+          }
+        }),
+
+      getSessionTokenUsage: (sessionId) =>
+        get().tokenUsage[sessionId] ?? { ...DEFAULT_TOKEN_USAGE },
+
+      resetTokenUsage: (sessionId) =>
+        set(s => ({
+          tokenUsage: { ...s.tokenUsage, [sessionId]: { ...DEFAULT_TOKEN_USAGE } },
+        })),
+
+      // ── Databricks connections ─────────────────────────────────
+      // Loaded from backend on workspace open — not persisted locally
+      // (connections live in encrypted SQLite on the server)
+      setDatabricksConnections: (connections) =>
+        set({ databricksConnections: connections }),
+
+      addDatabricksConnection: (conn) =>
+        set(s => ({
+          databricksConnections: [conn, ...s.databricksConnections.filter(c => c.connection_id !== conn.connection_id)],
+        })),
+
+      removeDatabricksConnection: (connection_id) =>
+        set(s => ({
+          databricksConnections: s.databricksConnections.filter(c => c.connection_id !== connection_id),
+        })),
+
+      getDatabricksConnections: () => get().databricksConnections,
+
+      // ── Databricks ingest items ────────────────────────────────
+      addDatabricksIngestItem: (sessionId, item) =>
+        set(s => ({
+          databricksIngestItems: {
+            ...s.databricksIngestItems,
+            [sessionId]: [...(s.databricksIngestItems[sessionId] ?? []), item],
+          },
+        })),
+
+      updateDatabricksIngestItem: (sessionId, itemId, updates) =>
+        set(s => ({
+          databricksIngestItems: {
+            ...s.databricksIngestItems,
+            [sessionId]: (s.databricksIngestItems[sessionId] ?? []).map(item =>
+              item.id === itemId ? { ...item, ...updates } : item
+            ),
+          },
+        })),
+
+      removeDatabricksIngestItem: (sessionId, itemId) =>
+        set(s => ({
+          databricksIngestItems: {
+            ...s.databricksIngestItems,
+            [sessionId]: (s.databricksIngestItems[sessionId] ?? []).filter(item => item.id !== itemId),
+          },
+        })),
+
+      getSessionDatabricksItems: (sessionId) =>
+        get().databricksIngestItems[sessionId] ?? [],
+    }),
+    {
+      name: 'governgpt-store',
+      version: 3,   // bumped — new databricks fields
+      storage: createJSONStorage(() => {
+        if (typeof window === 'undefined') {
+          return { getItem: () => null, setItem: () => {}, removeItem: () => {} }
+        }
+        return localStorage
+      }),
+      partialize: (state) => ({
+        sessions              : state.sessions,
+        files                 : state.files,
+        chats                 : state.chats,
+        tokenUsage            : state.tokenUsage,
+        databricksIngestItems : state.databricksIngestItems,
+        // databricksConnections NOT persisted — loaded fresh from backend
+        // activeSessionId NOT persisted — prevents SSR hydration mismatch
+      }),
+      skipHydration: true,
+    }
+  )
+)
+
