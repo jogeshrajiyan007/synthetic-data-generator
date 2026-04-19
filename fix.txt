@@ -1,155 +1,171 @@
-from fastapi import APIRouter, HTTPException, Query
-from services.rag import query_governance
-from services.vectorstore import load_vector_store
-from services.memory import (
-    get_full_history, get_session_stats,
-    clear_history, DEFAULT_WINDOW_K
+"""
+routers/sql_agent.py
+
+Dedicated SQL Agent endpoints.
+
+Provides:
+  POST /api/sql-agent/query              — run the full 6-step agentic SQL loop
+  GET  /api/sql-agent/approved-sources   — list approved tables for a session
+  POST /api/sql-agent/approved-sources/sync — sync approved table list
+  DELETE /api/sql-agent/approved-sources — clear approved table list
+  GET  /api/sql-agent/log                — SQL execution history for a session
+"""
+
+from fastapi import APIRouter, HTTPException, Query as QParam
+
+from services.databricks.sql_agent import run_sql_agent
+from services.databricks.approved_sources import (
+    get_approved_sources,
+    sync_approved_sources,
+    clear_approved_sources,
+    get_connection_for_session,
 )
+from services.memory import load_history_as_messages
+from db import db_query
 from models.schemas import (
-    QueryRequest, QueryResponse,
-    ConversationHistoryResponse, ConversationMessage,
-    ConversationStatsResponse, ClearHistoryResponse
+    SqlAgentRequest, SqlAgentResponse,
+    ApprovedSourcesResponse, ApprovedSourceEntry,
+    SyncApprovedSourcesRequest, SyncApprovedSourcesResponse,
 )
 
-router = APIRouter(prefix="/api/query", tags=["Query"])
+router = APIRouter(prefix="/api/sql-agent", tags=["SQL Agent"])
 
 
-def _get_vectordb(knowledge_set: str):
-    try:
-        return load_vector_store(knowledge_set)
-    except Exception:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                f"Knowledge set '{knowledge_set}' not found or not yet initialised. "
-                f"Please call POST /api/ingest first with this knowledge_set name."
-            )
+# ── SQL Agent query ──────────────────────────────────────────────
+
+@router.post("/query", response_model=SqlAgentResponse)
+async def sql_agent_query(request: SqlAgentRequest):
+    """
+    Run the full 6-step agentic SQL loop:
+    1. Intent detection
+    2. Think aloud
+    3. SQL generation
+    4. Execute via Databricks SQL API (read-only enforced)
+    5. Interpret results
+    6. Governance overlay
+
+    Only tables listed in `approved_tables` can be queried.
+    Prohibited write operations are blocked at the validation layer.
+    """
+    # Sync approved sources to SQLite registry
+    if request.approved_tables:
+        sync_approved_sources(
+            session_id    = request.session_id,
+            knowledge_set = request.knowledge_set,
+            connection_id = request.connection_id,
+            tables        = request.approved_tables,
         )
 
-
-@router.post("/", response_model=QueryResponse)
-async def query_endpoint(request: QueryRequest):
-    """
-    Unified query endpoint — RAG + SQL Agent hybrid.
-
-    If `enable_sql_agent=True` and `approved_tables` contains Databricks
-    table names, the engine first attempts to classify and execute SQL.
-    Falls back to standard conversational RAG if no SQL intent is detected.
-
-    Request body:
-    {
-        "knowledge_set":    "claims_2024",
-        "session_id":       "claims_2024",
-        "question":         "Show me total claims by region for 2024",
-        "use_rag":          true,
-        "k":                5,
-        "window_k":         6,
-        "enable_sql_agent": true,
-        "approved_tables":  ["catalog.schema.fact_claims"],
-        "connection_id":    "uuid-of-saved-connection"
-    }
-    """
-    vectordb = _get_vectordb(request.knowledge_set)
-    result   = query_governance(
-        question         = request.question,
-        vectordb         = vectordb,
-        knowledge_set    = request.knowledge_set,
-        session_id       = request.session_id,
-        use_rag          = request.use_rag,
-        k                = request.k,
-        window_k         = request.window_k,
-        enable_sql_agent = request.enable_sql_agent,
-        approved_tables  = request.approved_tables,
-        connection_id    = request.connection_id,
+    # Load conversation history for context
+    chat_history = load_history_as_messages(
+        request.session_id,
+        request.knowledge_set,
+        request.window_k,
     )
-    return QueryResponse(**result)
 
-
-@router.post("/batch", response_model=list[QueryResponse])
-async def batch_query(requests: list[QueryRequest]):
-    """
-    Run multiple queries sequentially. Each has its own session_id
-    and approved_tables list.
-    Max 20 queries per batch.
-    """
-    if len(requests) > 20:
-        raise HTTPException(status_code=400, detail="Max 20 queries per batch.")
-
-    results = []
-    for req in requests:
-        vectordb = _get_vectordb(req.knowledge_set)
-        result   = query_governance(
-            question         = req.question,
-            vectordb         = vectordb,
-            knowledge_set    = req.knowledge_set,
-            session_id       = req.session_id,
-            use_rag          = req.use_rag,
-            k                = req.k,
-            window_k         = req.window_k,
-            enable_sql_agent = req.enable_sql_agent,
-            approved_tables  = req.approved_tables,
-            connection_id    = req.connection_id,
+    try:
+        result = run_sql_agent(
+            question      = request.question,
+            session_id    = request.session_id,
+            knowledge_set = request.knowledge_set,
+            chat_history  = chat_history,
         )
-        results.append(QueryResponse(**result))
-    return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"SQL agent error: {str(e)}")
+
+    return SqlAgentResponse(**result)
 
 
-# ── Conversation History ──────────────────────────────────────────
+# ── Approved Sources management ──────────────────────────────────
 
-@router.get("/history", response_model=ConversationHistoryResponse)
-async def get_conversation_history(
-    session_id:    str = Query(...),
-    knowledge_set: str = Query(...),
+@router.get("/approved-sources", response_model=ApprovedSourcesResponse)
+async def get_approved(
+    session_id:    str = QParam(...),
+    knowledge_set: str = QParam(...),
 ):
-    rows = get_full_history(session_id, knowledge_set)
-    messages = [
-        ConversationMessage(
-            id            = row["id"],
-            session_id    = row["session_id"],
-            knowledge_set = row["knowledge_set"],
-            role          = row["role"],
-            content       = row["content"],
-            run_id        = row.get("run_id"),
-            token_count   = row.get("token_count"),
-            created_at    = row["created_at"],
+    """List all approved Databricks tables for a session."""
+    rows = get_approved_sources(session_id, knowledge_set)
+    sources = [
+        ApprovedSourceEntry(
+            full_table   = r["full_table"],
+            catalog      = r["catalog"],
+            schema       = r["db_schema"],
+            table_name   = r["table_name"],
+            connection_id= r["connection_id"],
+            added_at     = r["added_at"],
         )
-        for row in rows
+        for r in rows
     ]
-    return ConversationHistoryResponse(
+    return ApprovedSourcesResponse(
         session_id    = session_id,
         knowledge_set = knowledge_set,
-        total_messages= len(messages),
-        turns         = len(messages) // 2,
-        messages      = messages,
+        total         = len(sources),
+        sources       = sources,
     )
 
 
-@router.get("/history/stats", response_model=ConversationStatsResponse)
-async def get_conversation_stats(
-    session_id:    str = Query(...),
-    knowledge_set: str = Query(...),
+@router.post("/approved-sources/sync", response_model=SyncApprovedSourcesResponse)
+async def sync_approved(request: SyncApprovedSourcesRequest):
+    """
+    Sync the approved table list for a session.
+    Replaces the current list with the provided one.
+    Called by the frontend whenever the user changes their active source selection.
+    """
+    summary = sync_approved_sources(
+        session_id    = request.session_id,
+        knowledge_set = request.knowledge_set,
+        connection_id = request.connection_id,
+        tables        = request.tables,
+    )
+    return SyncApprovedSourcesResponse(
+        session_id    = request.session_id,
+        knowledge_set = request.knowledge_set,
+        added         = summary["added"],
+        removed       = summary["removed"],
+        total         = summary["total"],
+    )
+
+
+@router.delete("/approved-sources")
+async def clear_approved(
+    session_id:    str = QParam(...),
+    knowledge_set: str = QParam(...),
 ):
-    stats = get_session_stats(session_id, knowledge_set)
-    return ConversationStatsResponse(
-        session_id       = session_id,
-        knowledge_set    = knowledge_set,
-        total_messages   = int(stats.get("total_messages") or 0),
-        human_turns      = int(stats.get("human_turns") or 0),
-        ai_turns         = int(stats.get("ai_turns") or 0),
-        first_message_at = stats.get("first_message_at"),
-        last_message_at  = stats.get("last_message_at"),
-    )
+    """Remove all approved sources for a session."""
+    deleted = clear_approved_sources(session_id, knowledge_set)
+    return {
+        "status"          : "cleared",
+        "session_id"      : session_id,
+        "knowledge_set"   : knowledge_set,
+        "entries_deleted" : deleted,
+    }
 
 
-@router.delete("/history", response_model=ClearHistoryResponse)
-async def clear_conversation_history(
-    session_id:    str = Query(...),
-    knowledge_set: str = Query(...),
+# ── SQL execution log ────────────────────────────────────────────
+
+@router.get("/log")
+async def get_sql_log(
+    session_id:    str = QParam(...),
+    knowledge_set: str = QParam(...),
+    limit: int = QParam(default=50, ge=1, le=200),
 ):
-    deleted = clear_history(session_id, knowledge_set)
-    return ClearHistoryResponse(
-        status           = "cleared",
-        session_id       = session_id,
-        knowledge_set    = knowledge_set,
-        messages_deleted = deleted,
+    """
+    Get the SQL execution history for a session.
+    Shows intent, SQL executed, row count, duration, errors.
+    """
+    rows = db_query(
+        """
+        SELECT run_id, question, intent, sql, row_count,
+               duration_seconds, has_error, created_at
+        FROM sql_agent_log
+        WHERE session_id = ? AND knowledge_set = ?
+        ORDER BY rowid DESC LIMIT ?
+        """,
+        (session_id, knowledge_set, limit),
     )
+    return {
+        "session_id"   : session_id,
+        "knowledge_set": knowledge_set,
+        "count"        : len(rows),
+        "records"      : rows,
+    }
