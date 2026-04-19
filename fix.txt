@@ -1,441 +1,155 @@
-"""
-services/rag.py
+from fastapi import APIRouter, HTTPException, Query
+from services.rag import query_governance
+from services.vectorstore import load_vector_store
+from services.memory import (
+    get_full_history, get_session_stats,
+    clear_history, DEFAULT_WINDOW_K
+)
+from models.schemas import (
+    QueryRequest, QueryResponse,
+    ConversationHistoryResponse, ConversationMessage,
+    ConversationStatsResponse, ClearHistoryResponse
+)
 
-Conversational RAG + SQL Agent hybrid engine.
-
-Routing logic:
-  1. If enable_sql_agent=True and approved Databricks tables exist:
-     → Run intent detection
-     → If SQL intent found: execute agentic SQL loop, then optionally
-       augment with RAG context for governance overlay
-     → If NOT_SQL intent: fall through to standard RAG
-  2. Standard RAG: condense → retrieve → answer
-  3. Direct (no retrieval): history-aware direct LLM call
-
-Compatible with LangChain >= 0.2.x — no deprecated chains used.
-"""
-
-import time
-import uuid
-from datetime import datetime
-from typing import Optional
-
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.documents import Document
-from langchain_community.vectorstores import Chroma
-
-from llm import get_llm
-from db import db_insert
-from config import CHAT_MODEL, RETRIEVAL_K
-from services.memory import save_turn, load_history_as_messages, DEFAULT_WINDOW_K
+router = APIRouter(prefix="/api/query", tags=["Query"])
 
 
-# ── Prompts ──────────────────────────────────────────────────────
-
-CONDENSE_PROMPT = ChatPromptTemplate.from_messages([
-    (
-        "system",
-        "You are a question rewriter. "
-        "Given the conversation history below and a follow-up question, "
-        "rewrite the follow-up question into a fully self-contained standalone question "
-        "that captures all relevant context from the history. "
-        "Return ONLY the rewritten question — no explanation, no preamble.",
-    ),
-    MessagesPlaceholder(variable_name="chat_history"),
-    ("human", "{question}"),
-])
-
-QA_PROMPT = ChatPromptTemplate.from_messages([
-    (
-        "system",
-        """You are an expert Data Governance Advisor specialising in the insurance industry, \
-with deep knowledge of GDPR, Solvency II, IFRS 17, and enterprise data management.
-
-{approved_sources_block}
-
-You have been provided with retrieved document context below. \
-Use it as your primary source of evidence.
-
---- RETRIEVED CONTEXT ---
-{context}
---- END CONTEXT ---
-
-You also have the full conversation history for this session. Use it to:
-- Refer back to findings from earlier in the conversation
-- Build on previously identified entities, owners, issues, or recommendations
-- Avoid repeating analysis already covered unless asked to expand
-- Explicitly reference prior findings when relevant
-
-Response structure (adapt based on question type):
-- Analysis questions : Summary → Key Findings → Governance Signals → Recommended Actions
-- Modelling questions: Propose tables, columns, data types, transformation logic
-- Compliance questions: Cite the specific regulation and article number
-- Follow-up questions : Reference and build on previous answers in this session
-
-Always state which source file your insights are drawn from.
-If the answer is not in the context or history, say so clearly. Do not hallucinate.
-
-IMPORTANT — SQL on local files:
-If the user asks to run SQL against a locally uploaded file (CSV, Excel, PDF), respond:
-"SQL query execution is only supported for approved Databricks tables, \
-not for locally uploaded files." """,
-    ),
-    MessagesPlaceholder(variable_name="chat_history"),
-    ("human", "{question}"),
-])
-
-
-# ── Approved sources block builder ───────────────────────────────
-
-def _build_approved_sources_block(approved_tables: list[str]) -> str:
-    """
-    Build the <approved_sources> XML block injected into the system prompt.
-    This tells the LLM exactly which Databricks tables are approved for SQL.
-    """
-    if not approved_tables:
-        return ""
-    lines = "\n".join(f"  - {t}" for t in approved_tables)
-    return f"""
-APPROVED DATABRICKS SOURCES for this session:
-<approved_sources>
-{lines}
-</approved_sources>
-
-You MAY execute SQL queries against ONLY these tables.
-If the user references a table NOT in approved_sources, tell them it is not in their active sources.
-SQL operations are only available for Databricks tables — not for locally uploaded files.
-"""
-
-
-# ── Retriever ─────────────────────────────────────────────────────
-
-def _build_retriever(vectordb: Chroma, k: int):
-    base = vectordb.as_retriever(
-        search_type="mmr",
-        search_kwargs={"k": k * 2, "fetch_k": k * 6},
-    )
-
-    def multi_source_retrieve(query: str) -> list[Document]:
-        docs = base.invoke(query)
-        seen: dict[str, Document] = {}
-        for doc in docs:
-            src = doc.metadata.get("source_file", "unknown")
-            if src not in seen:
-                seen[src] = doc
-        if len(seen) < 2:
-            try:
-                all_srcs = list({
-                    d.metadata.get("source_file", "unknown")
-                    for d in vectordb.similarity_search("data governance summary", k=50)
-                })
-                for src in all_srcs:
-                    if src not in seen:
-                        results = vectordb.similarity_search(
-                            query, k=2, filter={"source_file": src}
-                        )
-                        if results:
-                            seen[src] = results[0]
-            except Exception:
-                pass
-        truncated: list[Document] = []
-        for doc in seen.values():
-            if len(doc.page_content) > 1500:
-                doc = Document(
-                    page_content=doc.page_content[:1500] + "\n[...truncated]",
-                    metadata=doc.metadata,
-                )
-            truncated.append(doc)
-        return truncated
-
-    return multi_source_retrieve
-
-
-def _format_docs(docs: list[Document]) -> str:
-    parts = []
-    for doc in docs:
-        src = doc.metadata.get("source_file", "unknown")
-        parts.append(f"[Source: {src}]\n{doc.page_content}")
-    return "\n\n---\n\n".join(parts)
-
-
-# ── Token extraction ──────────────────────────────────────────────
-
-def _extract_tokens(llm_response) -> dict:
+def _get_vectordb(knowledge_set: str):
     try:
-        usage = getattr(llm_response, "usage_metadata", None) or {}
-        return {
-            "prompt_tokens"    : int(usage.get("input_tokens",  0)),
-            "completion_tokens": int(usage.get("output_tokens", 0)),
-            "total_tokens"     : int(usage.get("total_tokens",  0)),
-        }
+        return load_vector_store(knowledge_set)
     except Exception:
-        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-
-
-# ── Main query function ───────────────────────────────────────────
-
-def query_governance(
-    question: str,
-    vectordb: Chroma,
-    knowledge_set: str = "default",
-    session_id: str = "",
-    use_rag: bool = True,
-    k: int = RETRIEVAL_K,
-    window_k: int = DEFAULT_WINDOW_K,
-    enable_sql_agent: bool = True,
-    approved_tables: Optional[list[str]] = None,
-    connection_id: Optional[str] = None,
-) -> dict:
-    """
-    Hybrid query engine: SQL Agent + RAG.
-
-    Routing:
-      1. If enable_sql_agent=True and approved tables exist:
-         → Detect SQL intent
-         → If SQL needed: run sql_agent, optionally augment with RAG governance context
-         → If NOT_SQL: fall through to standard RAG
-      2. Standard LCEL RAG (condense → retrieve → answer)
-      3. Direct LLM (no retrieval, history-aware)
-    """
-    start  = time.time()
-    run_id = str(uuid.uuid4())
-    answer = ""
-    llm    = get_llm()
-    parser = StrOutputParser()
-
-    if not session_id:
-        session_id = knowledge_set
-
-    approved_tables = approved_tables or []
-
-    # ── Sync approved sources to SQLite ──────────────────────────
-    # This keeps the backend registry in sync with the frontend's
-    # active source selection on every query.
-    if approved_tables and connection_id:
-        try:
-            from services.databricks.approved_sources import sync_approved_sources
-            sync_approved_sources(
-                session_id=session_id,
-                knowledge_set=knowledge_set,
-                connection_id=connection_id,
-                tables=approved_tables,
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Knowledge set '{knowledge_set}' not found or not yet initialised. "
+                f"Please call POST /api/ingest first with this knowledge_set name."
             )
-        except Exception:
-            pass  # Non-fatal — proceed without sync
+        )
 
-    # ── Load conversation history ─────────────────────────────────
-    chat_history: list[BaseMessage] = load_history_as_messages(
-        session_id, knowledge_set, window_k
+
+@router.post("/", response_model=QueryResponse)
+async def query_endpoint(request: QueryRequest):
+    """
+    Unified query endpoint — RAG + SQL Agent hybrid.
+
+    If `enable_sql_agent=True` and `approved_tables` contains Databricks
+    table names, the engine first attempts to classify and execute SQL.
+    Falls back to standard conversational RAG if no SQL intent is detected.
+
+    Request body:
+    {
+        "knowledge_set":    "claims_2024",
+        "session_id":       "claims_2024",
+        "question":         "Show me total claims by region for 2024",
+        "use_rag":          true,
+        "k":                5,
+        "window_k":         6,
+        "enable_sql_agent": true,
+        "approved_tables":  ["catalog.schema.fact_claims"],
+        "connection_id":    "uuid-of-saved-connection"
+    }
+    """
+    vectordb = _get_vectordb(request.knowledge_set)
+    result   = query_governance(
+        question         = request.question,
+        vectordb         = vectordb,
+        knowledge_set    = request.knowledge_set,
+        session_id       = request.session_id,
+        use_rag          = request.use_rag,
+        k                = request.k,
+        window_k         = request.window_k,
+        enable_sql_agent = request.enable_sql_agent,
+        approved_tables  = request.approved_tables,
+        connection_id    = request.connection_id,
+    )
+    return QueryResponse(**result)
+
+
+@router.post("/batch", response_model=list[QueryResponse])
+async def batch_query(requests: list[QueryRequest]):
+    """
+    Run multiple queries sequentially. Each has its own session_id
+    and approved_tables list.
+    Max 20 queries per batch.
+    """
+    if len(requests) > 20:
+        raise HTTPException(status_code=400, detail="Max 20 queries per batch.")
+
+    results = []
+    for req in requests:
+        vectordb = _get_vectordb(req.knowledge_set)
+        result   = query_governance(
+            question         = req.question,
+            vectordb         = vectordb,
+            knowledge_set    = req.knowledge_set,
+            session_id       = req.session_id,
+            use_rag          = req.use_rag,
+            k                = req.k,
+            window_k         = req.window_k,
+            enable_sql_agent = req.enable_sql_agent,
+            approved_tables  = req.approved_tables,
+            connection_id    = req.connection_id,
+        )
+        results.append(QueryResponse(**result))
+    return results
+
+
+# ── Conversation History ──────────────────────────────────────────
+
+@router.get("/history", response_model=ConversationHistoryResponse)
+async def get_conversation_history(
+    session_id:    str = Query(...),
+    knowledge_set: str = Query(...),
+):
+    rows = get_full_history(session_id, knowledge_set)
+    messages = [
+        ConversationMessage(
+            id            = row["id"],
+            session_id    = row["session_id"],
+            knowledge_set = row["knowledge_set"],
+            role          = row["role"],
+            content       = row["content"],
+            run_id        = row.get("run_id"),
+            token_count   = row.get("token_count"),
+            created_at    = row["created_at"],
+        )
+        for row in rows
+    ]
+    return ConversationHistoryResponse(
+        session_id    = session_id,
+        knowledge_set = knowledge_set,
+        total_messages= len(messages),
+        turns         = len(messages) // 2,
+        messages      = messages,
     )
 
-    # ── SQL Agent routing ─────────────────────────────────────────
-    if enable_sql_agent and approved_tables:
-        try:
-            from services.databricks.sql_agent import run_sql_agent
 
-            # Pull RAG context first for governance overlay and schema hints
-            rag_context         = ""
-            governance_context  = ""
-            schema_context      = ""
-            rag_sources         = []
-            rag_chunks          = 0
-
-            try:
-                retriever_fn = _build_retriever(vectordb, k)
-                source_docs  = retriever_fn(question)
-                rag_context  = _format_docs(source_docs)
-                rag_sources  = list({
-                    doc.metadata.get("source_file", "unknown") for doc in source_docs
-                })
-                rag_chunks   = len(source_docs)
-
-                # Separate governance-tagged docs for overlay
-                gov_docs = [
-                    d for d in source_docs
-                    if d.metadata.get("source_type") == "databricks"
-                    or any(t in d.page_content.lower() for t in
-                           ["pii", "sensitivity", "owner", "gdpr", "solvency"])
-                ]
-                governance_context = _format_docs(gov_docs)
-
-                # Schema docs for SQL generation context
-                schema_docs   = [
-                    d for d in source_docs
-                    if d.metadata.get("file_type") in ("databricks_schema", "databricks_stats")
-                ]
-                schema_context = _format_docs(schema_docs)
-
-            except Exception:
-                pass  # RAG unavailable — SQL agent still works without it
-
-            agent_result = run_sql_agent(
-                question           = question,
-                session_id         = session_id,
-                knowledge_set      = knowledge_set,
-                chat_history       = chat_history,
-                rag_context        = rag_context,
-                governance_context = governance_context,
-                schema_context     = schema_context,
-            )
-
-            intent = agent_result.get("intent", "NOT_SQL")
-
-            # If SQL was successfully executed, return hybrid result
-            if intent not in ("NOT_SQL",):
-                # Build the full answer text combining think_aloud + interpretation + governance
-                answer_parts = []
-                if agent_result.get("think_aloud"):
-                    answer_parts.append(f"_{agent_result['think_aloud']}_\n")
-                if agent_result.get("interpretation"):
-                    answer_parts.append(agent_result["interpretation"])
-                if agent_result.get("governance_note"):
-                    answer_parts.append(f"\n\n{agent_result['governance_note']}")
-                answer = "\n".join(answer_parts) if answer_parts else "Query executed."
-
-                result = {
-                    "run_id"             : run_id,
-                    "session_id"         : session_id,
-                    "knowledge_set"      : knowledge_set,
-                    "question"           : question,
-                    "rephrased_question" : question,
-                    "answer"             : answer,
-                    "mode"               : agent_result.get("mode", "sql_agent"),
-                    "sources_used"       : rag_sources,
-                    "chunks_retrieved"   : rag_chunks,
-                    "model"              : CHAT_MODEL,
-                    "prompt_tokens"      : 0,
-                    "completion_tokens"  : 0,
-                    "total_tokens"       : 0,
-                    "created_at"         : datetime.now().isoformat(),
-                    "duration_seconds"   : round(time.time() - start, 2),
-                    # SQL agent extensions
-                    "sql_intent"         : intent,
-                    "sql_executed"       : agent_result.get("sql", ""),
-                    "sql_row_count"      : agent_result.get("row_count", 0),
-                    "sql_results"        : agent_result.get("results", []),
-                    "sql_think_aloud"    : agent_result.get("think_aloud", ""),
-                    "governance_note"    : agent_result.get("governance_note", ""),
-                }
-
-                db_insert("llm_responses", {k: v for k, v in result.items()
-                                            if not isinstance(v, (list, dict)) or k == "sources_used"})
-                save_turn(
-                    session_id=session_id, knowledge_set=knowledge_set,
-                    human_message=question, ai_message=answer,
-                    run_id=run_id, token_count=0,
-                )
-                return result
-
-        except Exception:
-            pass  # If SQL agent fails, fall through to standard RAG
-
-    # ── Standard RAG ─────────────────────────────────────────────
-    approved_sources_block = _build_approved_sources_block(approved_tables)
-
-    if use_rag:
-        if chat_history:
-            condense_chain = CONDENSE_PROMPT | llm | parser
-            rephrased      = condense_chain.invoke({
-                "chat_history": chat_history,
-                "question"    : question,
-            })
-        else:
-            rephrased = question
-
-        retriever_fn = _build_retriever(vectordb, k)
-        source_docs  = retriever_fn(rephrased)
-        context      = _format_docs(source_docs)
-        sources      = list({
-            doc.metadata.get("source_file", "unknown") for doc in source_docs
-        })
-
-        qa_messages = QA_PROMPT.format_messages(
-            approved_sources_block = approved_sources_block,
-            context                = context,
-            chat_history           = chat_history,
-            question               = question,
-        )
-        llm_response = llm.invoke(qa_messages)
-        answer       = llm_response.content
-        token_usage  = _extract_tokens(llm_response)
-
-        result = {
-            "run_id"             : run_id,
-            "session_id"         : session_id,
-            "knowledge_set"      : knowledge_set,
-            "question"           : question,
-            "rephrased_question" : rephrased,
-            "answer"             : answer,
-            "mode"               : "conversational_rag",
-            "sources_used"       : sources,
-            "chunks_retrieved"   : len(source_docs),
-            "model"              : CHAT_MODEL,
-            "prompt_tokens"      : token_usage["prompt_tokens"],
-            "completion_tokens"  : token_usage["completion_tokens"],
-            "total_tokens"       : token_usage["total_tokens"],
-            "created_at"         : datetime.now().isoformat(),
-            "duration_seconds"   : round(time.time() - start, 2),
-            "sql_intent"         : None,
-            "sql_executed"       : None,
-            "sql_row_count"      : None,
-            "sql_results"        : None,
-            "sql_think_aloud"    : None,
-            "governance_note"    : None,
-        }
-
-    else:
-        # ── Direct mode ──────────────────────────────────────────
-        direct_prompt = ChatPromptTemplate.from_messages([
-            (
-                "system",
-                "You are a Data Governance Expert for the insurance industry. "
-                "You have full memory of this conversation. "
-                "Build on previous answers when relevant.\n\n"
-                f"{approved_sources_block}",
-            ),
-            MessagesPlaceholder(variable_name="chat_history"),
-            ("human", "{question}"),
-        ])
-        direct_messages = direct_prompt.format_messages(
-            chat_history=chat_history,
-            question=question,
-        )
-        llm_response = llm.invoke(direct_messages)
-        answer       = llm_response.content
-        token_usage  = _extract_tokens(llm_response)
-
-        result = {
-            "run_id"             : run_id,
-            "session_id"         : session_id,
-            "knowledge_set"      : knowledge_set,
-            "question"           : question,
-            "rephrased_question" : question,
-            "answer"             : answer,
-            "mode"               : "direct",
-            "sources_used"       : [],
-            "chunks_retrieved"   : 0,
-            "model"              : CHAT_MODEL,
-            "prompt_tokens"      : token_usage["prompt_tokens"],
-            "completion_tokens"  : token_usage["completion_tokens"],
-            "total_tokens"       : token_usage["total_tokens"],
-            "created_at"         : datetime.now().isoformat(),
-            "duration_seconds"   : round(time.time() - start, 2),
-            "sql_intent"         : None,
-            "sql_executed"       : None,
-            "sql_row_count"      : None,
-            "sql_results"        : None,
-            "sql_think_aloud"    : None,
-            "governance_note"    : None,
-        }
-
-    # ── Persist ───────────────────────────────────────────────────
-    db_insert("llm_responses", {k: v for k, v in result.items()
-                                if not isinstance(v, (list, dict)) or k == "sources_used"})
-    save_turn(
-        session_id=session_id, knowledge_set=knowledge_set,
-        human_message=question, ai_message=answer,
-        run_id=run_id, token_count=result.get("total_tokens", 0),
+@router.get("/history/stats", response_model=ConversationStatsResponse)
+async def get_conversation_stats(
+    session_id:    str = Query(...),
+    knowledge_set: str = Query(...),
+):
+    stats = get_session_stats(session_id, knowledge_set)
+    return ConversationStatsResponse(
+        session_id       = session_id,
+        knowledge_set    = knowledge_set,
+        total_messages   = int(stats.get("total_messages") or 0),
+        human_turns      = int(stats.get("human_turns") or 0),
+        ai_turns         = int(stats.get("ai_turns") or 0),
+        first_message_at = stats.get("first_message_at"),
+        last_message_at  = stats.get("last_message_at"),
     )
-    return result
+
+
+@router.delete("/history", response_model=ClearHistoryResponse)
+async def clear_conversation_history(
+    session_id:    str = Query(...),
+    knowledge_set: str = Query(...),
+):
+    deleted = clear_history(session_id, knowledge_set)
+    return ClearHistoryResponse(
+        status           = "cleared",
+        session_id       = session_id,
+        knowledge_set    = knowledge_set,
+        messages_deleted = deleted,
+    )
