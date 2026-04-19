@@ -1,16 +1,18 @@
 'use client'
 import { motion } from 'framer-motion'
-import { Table, Eye, X, CheckCircle, AlertCircle, Loader2, Layers } from 'lucide-react'
+import { Table, Eye, X, CheckCircle, AlertCircle, Loader2, Layers, SquareCode } from 'lucide-react'
 import type { DatabricksIngestItem } from '@/types'
 import { cn } from '@/lib/utils'
 
 interface TableIngestCardProps {
   item: DatabricksIngestItem
   index: number
+  isApproved: boolean
+  onToggleApprove: (item: DatabricksIngestItem) => void
   onRemove: (id: string) => void
 }
 
-export function TableIngestCard({ item, index, onRemove }: TableIngestCardProps) {
+export function TableIngestCard({ item, index, isApproved, onToggleApprove, onRemove }: TableIngestCardProps) {
   const isLoading = item.status === 'profiling' || item.status === 'ingesting'
 
   const statusLabel = {
@@ -38,19 +40,31 @@ export function TableIngestCard({ item, index, onRemove }: TableIngestCardProps)
       className="group flex items-start gap-2.5 px-3 py-2.5 hover:bg-ink-50 rounded-lg mx-1 transition-colors"
     >
       {/* Icon */}
-      <div className="w-7 h-7 rounded-lg bg-axa-50 border border-axa-100 flex items-center justify-center flex-shrink-0 mt-0.5">
+      <div className={cn(
+        'w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 border transition-colors',
+        isApproved
+          ? 'bg-emerald-50 border-emerald-200'
+          : 'bg-axa-50 border-axa-100'
+      )}>
         {item.table_type === 'VIEW'
-          ? <Eye className="w-3.5 h-3.5 text-axa-700" />
-          : <Table className="w-3.5 h-3.5 text-axa-800" />
+          ? <Eye className={cn('w-3.5 h-3.5', isApproved ? 'text-emerald-600' : 'text-axa-700')} />
+          : <Table className={cn('w-3.5 h-3.5', isApproved ? 'text-emerald-700' : 'text-axa-800')} />
         }
       </div>
 
       {/* Info */}
       <div className="flex-1 min-w-0">
-        <p className="text-xs font-semibold text-ink-700 truncate">{item.table}</p>
+        <div className="flex items-center gap-1.5">
+          <p className="text-xs font-semibold text-ink-700 truncate">{item.table}</p>
+          {isApproved && (
+            <span className="flex items-center gap-0.5 text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full flex-shrink-0">
+              <SquareCode className="w-2 h-2" /> SQL
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-1.5 mt-0.5">
           <Layers className="w-2.5 h-2.5 text-ink-300" />
-          <span className="text-[10px] text-ink-400 truncate">
+          <span className="text-[10px] text-ink-400 truncate font-mono">
             {item.catalog}.{item.schema}
           </span>
         </div>
@@ -65,23 +79,17 @@ export function TableIngestCard({ item, index, onRemove }: TableIngestCardProps)
           </div>
         )}
 
-        {/* Stats */}
+        {/* Stats row */}
         {item.status === 'ready' && (
-          <div className="flex items-center gap-2 mt-1">
+          <div className="flex items-center gap-2 mt-1 flex-wrap">
             {item.row_count && (
-              <span className="text-[9px] text-ink-400 font-mono">
-                {item.row_count.toLocaleString()} rows
-              </span>
+              <span className="text-[9px] text-ink-400 font-mono">{item.row_count.toLocaleString()} rows</span>
             )}
             {item.chunk_count && (
-              <span className="text-[9px] text-ink-400 font-mono">
-                · {item.chunk_count} chunks
-              </span>
+              <span className="text-[9px] text-ink-400 font-mono">· {item.chunk_count} chunks</span>
             )}
             {item.duration_seconds && (
-              <span className="text-[9px] text-ink-400 font-mono">
-                · {item.duration_seconds}s
-              </span>
+              <span className="text-[9px] text-ink-400 font-mono">· {item.duration_seconds}s</span>
             )}
           </div>
         )}
@@ -91,23 +99,43 @@ export function TableIngestCard({ item, index, onRemove }: TableIngestCardProps)
         )}
       </div>
 
-      {/* Status icon + remove */}
-      <div className="flex items-center gap-1 flex-shrink-0">
-        <span className={cn('text-[9px] font-semibold', statusColor)}>{statusLabel}</span>
-        {isLoading
-          ? <Loader2 className="w-3 h-3 text-axa-800 animate-spin" />
-          : item.status === 'ready'
-          ? <CheckCircle className="w-3 h-3 text-emerald-500" />
-          : item.status === 'error'
-          ? <AlertCircle className="w-3 h-3 text-axared-500" />
-          : null
-        }
-        <button
-          onClick={() => onRemove(item.id)}
-          className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-axared-50 hover:text-axared-500 text-ink-300 transition-all"
-        >
-          <X className="w-3 h-3" />
-        </button>
+      {/* Right actions */}
+      <div className="flex flex-col items-end gap-1 flex-shrink-0">
+        <div className="flex items-center gap-1">
+          <span className={cn('text-[9px] font-semibold', statusColor)}>{statusLabel}</span>
+          {isLoading
+            ? <Loader2 className="w-3 h-3 text-axa-800 animate-spin" />
+            : item.status === 'ready'
+            ? <CheckCircle className="w-3 h-3 text-emerald-500" />
+            : item.status === 'error'
+            ? <AlertCircle className="w-3 h-3 text-axared-500" />
+            : null
+          }
+          <button
+            onClick={() => onRemove(item.id)}
+            className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-axared-50 hover:text-axared-500 text-ink-300 transition-all"
+            title="Remove"
+          >
+            <X className="w-3 h-3" />
+          </button>
+        </div>
+
+        {/* SQL approve toggle — only shown for ready tables */}
+        {item.status === 'ready' && (
+          <button
+            onClick={() => onToggleApprove(item)}
+            className={cn(
+              'flex items-center gap-1 text-[9px] font-semibold px-1.5 py-0.5 rounded-full border transition-all',
+              isApproved
+                ? 'bg-emerald-50 border-emerald-300 text-emerald-700 hover:bg-emerald-100'
+                : 'bg-ink-50 border-ink-200 text-ink-400 hover:bg-emerald-50 hover:border-emerald-200 hover:text-emerald-700'
+            )}
+            title={isApproved ? 'Remove from SQL sources' : 'Approve for SQL queries'}
+          >
+            <SquareCode className="w-2.5 h-2.5" />
+            {isApproved ? 'SQL ✓' : 'Use SQL'}
+          </button>
+        )}
       </div>
     </motion.div>
   )
