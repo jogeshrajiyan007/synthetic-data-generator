@@ -89,14 +89,16 @@ INTENT_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """You are an intent classifier for a SQL data agent.
 
 Classify the user's message into ONE of these intent types:
-- SIMPLE_LOOKUP: retrieve/filter rows from one table
+- SIMPLE_LOOKUP: retrieve/filter/show rows from one OR multiple tables. ANY request to "show", "display", "get", "fetch", "give me" rows from approved tables is SIMPLE_LOOKUP.
 - AGGREGATION: sum/count/avg/group analytics
-- COMPARISON: compare across dimensions or time periods
-- JOIN_OPERATION: join two or more tables
+- COMPARISON: compare values across dimensions or time periods
+- JOIN_OPERATION: join two or more tables on a key
 - MULTI_STEP: requires CTEs or nested sub-queries
 - CREATE_OBJECT: user wants to create a view or table
-- OUT_OF_SCOPE: references a table not in approved sources, or requests a prohibited write operation
-- NOT_SQL: question does not need SQL at all (can be answered from documents/context)
+- OUT_OF_SCOPE: references a table NOT in approved sources, or requests a prohibited write operation (DELETE/DROP/UPDATE/INSERT)
+- NOT_SQL: question is about governance, compliance, documentation, policies, or anything that does NOT require querying live data. "What is PII?" is NOT_SQL. "Show me rows" is SIMPLE_LOOKUP.
+
+IMPORTANT: If the user asks to "show", "display", "get", "fetch", "preview", or "give me" data from any approved table — even multiple tables — classify as SIMPLE_LOOKUP, never NOT_SQL.
 
 Approved tables available:
 {approved_sources_list}
