@@ -1,276 +1,194 @@
-'use client'
-import { create } from 'zustand'
-import { persist, createJSONStorage } from 'zustand/middleware'
-import type { KnowledgeSet, SourceFile, ChatMessage, DatabricksConnection, DatabricksIngestItem } from '@/types'
-import { slugify } from '@/lib/utils'
+"""
+services/databricks/approved_sources.py
 
-export interface SessionTokenUsage {
-  prompt_tokens: number
-  completion_tokens: number
-  total_tokens: number
-  turn_count: number
-}
+Per-session approved Databricks table registry.
 
-const DEFAULT_TOKEN_USAGE: SessionTokenUsage = {
-  prompt_tokens: 0,
-  completion_tokens: 0,
-  total_tokens: 0,
-  turn_count: 0,
-}
+Design:
+- Each session (knowledge_set + session_id) has an explicit whitelist
+  of Databricks tables the LLM is permitted to query via SQL.
+- Tables are stored in the `approved_sources` SQLite table.
+- The frontend sends the approved list with every query request
+  (as the user's active source selection).
+- The SQL agent validates every generated query against this list
+  before execution — no table outside the list is ever queried.
 
-interface SessionState {
-  sessions: KnowledgeSet[]
-  activeSessionId: string | null
-  files: Record<string, SourceFile[]>
-  chats: Record<string, ChatMessage[]>
-  tokenUsage: Record<string, SessionTokenUsage>
+Table schema:
+    approved_sources(
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id    TEXT NOT NULL,
+        knowledge_set TEXT NOT NULL,
+        connection_id TEXT NOT NULL,
+        full_table    TEXT NOT NULL,   -- catalog.schema.table
+        catalog       TEXT NOT NULL,
+        schema        TEXT NOT NULL,
+        table_name    TEXT NOT NULL,
+        added_at      TEXT NOT NULL
+    )
+"""
 
-  // ── Databricks ────────────────────────────────────────────────
-  // Connections are global (not per-session) — one connection can
-  // be used across multiple knowledge sets.
-  databricksConnections: DatabricksConnection[]
-  // Ingested tables are tracked per session for UI status display
-  databricksIngestItems: Record<string, DatabricksIngestItem[]>
+from datetime import datetime
+from db import _get_conn, db_query
 
-  // ── Session actions ───────────────────────────────────────────
-  createSession: (name: string, summary: string) => KnowledgeSet
-  updateSession: (id: string, updates: Partial<KnowledgeSet>) => void
-  deleteSession: (id: string) => void
-  setActiveSession: (id: string | null) => void
-  getActiveSession: () => KnowledgeSet | null
 
-  // ── File actions ──────────────────────────────────────────────
-  addFiles: (sessionId: string, files: SourceFile[]) => void
-  updateFile: (sessionId: string, fileId: string, updates: Partial<SourceFile>) => void
-  removeFile: (sessionId: string, fileId: string) => void
-  getSessionFiles: (sessionId: string) => SourceFile[]
+# ── Table management ─────────────────────────────────────────────
 
-  // ── Chat actions ──────────────────────────────────────────────
-  addMessage: (sessionId: string, msg: ChatMessage) => void
-  updateMessage: (sessionId: string, msgId: string, updates: Partial<ChatMessage>) => void
-  clearChat: (sessionId: string) => void
-  getSessionChat: (sessionId: string) => ChatMessage[]
+def _ensure_approved_sources_table() -> None:
+    with _get_conn() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS approved_sources (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id    TEXT NOT NULL,
+                knowledge_set TEXT NOT NULL,
+                connection_id TEXT NOT NULL,
+                full_table    TEXT NOT NULL,
+                catalog       TEXT NOT NULL,
+                db_schema     TEXT NOT NULL,
+                table_name    TEXT NOT NULL,
+                added_at      TEXT NOT NULL,
+                UNIQUE(session_id, knowledge_set, full_table)
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_approved_session
+            ON approved_sources (session_id, knowledge_set)
+        """)
+        conn.commit()
 
-  // ── Token actions ─────────────────────────────────────────────
-  addTokenUsage: (sessionId: string, usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number }) => void
-  getSessionTokenUsage: (sessionId: string) => SessionTokenUsage
-  resetTokenUsage: (sessionId: string) => void
 
-  // ── Databricks connection actions ─────────────────────────────
-  setDatabricksConnections: (connections: DatabricksConnection[]) => void
-  addDatabricksConnection: (conn: DatabricksConnection) => void
-  removeDatabricksConnection: (connection_id: string) => void
-  getDatabricksConnections: () => DatabricksConnection[]
+# ── Write ────────────────────────────────────────────────────────
 
-  // ── Databricks ingest item actions ────────────────────────────
-  addDatabricksIngestItem: (sessionId: string, item: DatabricksIngestItem) => void
-  updateDatabricksIngestItem: (sessionId: string, itemId: string, updates: Partial<DatabricksIngestItem>) => void
-  removeDatabricksIngestItem: (sessionId: string, itemId: string) => void
-  getSessionDatabricksItems: (sessionId: string) => DatabricksIngestItem[]
-}
+def add_approved_source(
+    session_id: str,
+    knowledge_set: str,
+    connection_id: str,
+    catalog: str,
+    schema: str,
+    table_name: str,
+) -> None:
+    """Add a table to the approved list for this session. Idempotent."""
+    _ensure_approved_sources_table()
+    full_table = f"{catalog}.{schema}.{table_name}"
+    now = datetime.now().isoformat()
+    with _get_conn() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO approved_sources
+                (session_id, knowledge_set, connection_id, full_table,
+                 catalog, db_schema, table_name, added_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, knowledge_set, connection_id,
+             full_table, catalog, schema, table_name, now),
+        )
+        conn.commit()
 
-export const useStore = create<SessionState>()(
-  persist(
-    (set, get) => ({
-      sessions: [],
-      activeSessionId: null,
-      files: {},
-      chats: {},
-      tokenUsage: {},
-      databricksConnections: [],
-      databricksIngestItems: {},
 
-      // ── Sessions ──────────────────────────────────────────────
-      createSession: (name, summary) => {
-        const id = slugify(name) + '_' + Date.now().toString(36)
-        const session: KnowledgeSet = {
-          id,
-          project_name: name,
-          summary,
-          created_at: new Date().toISOString(),
-          file_count: 0,
-          vector_count: 0,
-          collection_name: `ks_${id}`,
-        }
-        set(s => ({ sessions: [session, ...s.sessions] }))
-        return session
-      },
+def remove_approved_source(
+    session_id: str,
+    knowledge_set: str,
+    full_table: str,
+) -> int:
+    """Remove a table from the approved list. Returns rows deleted."""
+    _ensure_approved_sources_table()
+    with _get_conn() as conn:
+        cursor = conn.execute(
+            "DELETE FROM approved_sources WHERE session_id=? AND knowledge_set=? AND full_table=?",
+            (session_id, knowledge_set, full_table),
+        )
+        conn.commit()
+        return cursor.rowcount
 
-      updateSession: (id, updates) =>
-        set(s => ({
-          sessions: s.sessions.map(sess =>
-            sess.id === id ? { ...sess, ...updates } : sess
-          ),
-        })),
 
-      deleteSession: (id) =>
-        set(s => {
-          const { [id]: _f, ...files }                    = s.files
-          const { [id]: _c, ...chats }                    = s.chats
-          const { [id]: _t, ...tokenUsage }               = s.tokenUsage
-          const { [id]: _d, ...databricksIngestItems }    = s.databricksIngestItems
-          return {
-            sessions: s.sessions.filter(sess => sess.id !== id),
-            activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
-            files, chats, tokenUsage, databricksIngestItems,
-          }
-        }),
+def clear_approved_sources(session_id: str, knowledge_set: str) -> int:
+    """Remove all approved sources for a session."""
+    _ensure_approved_sources_table()
+    with _get_conn() as conn:
+        cursor = conn.execute(
+            "DELETE FROM approved_sources WHERE session_id=? AND knowledge_set=?",
+            (session_id, knowledge_set),
+        )
+        conn.commit()
+        return cursor.rowcount
 
-      setActiveSession: (id) => set({ activeSessionId: id }),
 
-      getActiveSession: () => {
-        const { sessions, activeSessionId } = get()
-        return sessions.find(s => s.id === activeSessionId) ?? null
-      },
+# ── Read ─────────────────────────────────────────────────────────
 
-      // ── Files ─────────────────────────────────────────────────
-      addFiles: (sessionId, newFiles) =>
-        set(s => ({
-          files: { ...s.files, [sessionId]: [...(s.files[sessionId] ?? []), ...newFiles] },
-          sessions: s.sessions.map(sess =>
-            sess.id === sessionId
-              ? { ...sess, file_count: (s.files[sessionId]?.length ?? 0) + newFiles.length }
-              : sess
-          ),
-        })),
+def get_approved_sources(session_id: str, knowledge_set: str) -> list[dict]:
+    """Return all approved tables for a session with full metadata."""
+    _ensure_approved_sources_table()
+    return db_query(
+        """
+        SELECT id, session_id, knowledge_set, connection_id,
+               full_table, catalog, db_schema, table_name, added_at
+        FROM approved_sources
+        WHERE session_id = ? AND knowledge_set = ?
+        ORDER BY added_at ASC
+        """,
+        (session_id, knowledge_set),
+    )
 
-      updateFile: (sessionId, fileId, updates) =>
-        set(s => ({
-          files: {
-            ...s.files,
-            [sessionId]: (s.files[sessionId] ?? []).map(f =>
-              f.id === fileId ? { ...f, ...updates } : f
-            ),
-          },
-        })),
 
-      removeFile: (sessionId, fileId) =>
-        set(s => {
-          const updated = (s.files[sessionId] ?? []).filter(f => f.id !== fileId)
-          return {
-            files: { ...s.files, [sessionId]: updated },
-            sessions: s.sessions.map(sess =>
-              sess.id === sessionId ? { ...sess, file_count: updated.length } : sess
-            ),
-          }
-        }),
+def get_approved_table_names(session_id: str, knowledge_set: str) -> list[str]:
+    """Return only the full table name strings (catalog.schema.table)."""
+    rows = get_approved_sources(session_id, knowledge_set)
+    return [r["full_table"] for r in rows]
 
-      getSessionFiles: (sessionId) => get().files[sessionId] ?? [],
 
-      // ── Chat ──────────────────────────────────────────────────
-      addMessage: (sessionId, msg) =>
-        set(s => ({
-          chats: { ...s.chats, [sessionId]: [...(s.chats[sessionId] ?? []), msg] },
-        })),
+def is_table_approved(
+    session_id: str,
+    knowledge_set: str,
+    full_table: str,
+) -> bool:
+    """Check whether a specific table is in the approved list."""
+    approved = get_approved_table_names(session_id, knowledge_set)
+    return full_table.lower() in [t.lower() for t in approved]
 
-      updateMessage: (sessionId, msgId, updates) =>
-        set(s => ({
-          chats: {
-            ...s.chats,
-            [sessionId]: (s.chats[sessionId] ?? []).map(m =>
-              m.id === msgId ? { ...m, ...updates } : m
-            ),
-          },
-        })),
 
-      clearChat: (sessionId) =>
-        set(s => ({ chats: { ...s.chats, [sessionId]: [] } })),
+def get_connection_for_session(session_id: str, knowledge_set: str) -> str | None:
+    """
+    Return the connection_id associated with the session's approved sources.
+    All approved sources for a session should share the same connection.
+    Returns None if no approved sources exist.
+    """
+    _ensure_approved_sources_table()
+    rows = db_query(
+        "SELECT connection_id FROM approved_sources "
+        "WHERE session_id=? AND knowledge_set=? LIMIT 1",
+        (session_id, knowledge_set),
+    )
+    return rows[0]["connection_id"] if rows else None
 
-      getSessionChat: (sessionId) => get().chats[sessionId] ?? [],
 
-      // ── Tokens ────────────────────────────────────────────────
-      addTokenUsage: (sessionId, usage) =>
-        set(s => {
-          const prev = s.tokenUsage[sessionId] ?? { ...DEFAULT_TOKEN_USAGE }
-          return {
-            tokenUsage: {
-              ...s.tokenUsage,
-              [sessionId]: {
-                prompt_tokens    : prev.prompt_tokens     + (usage.prompt_tokens     ?? 0),
-                completion_tokens: prev.completion_tokens + (usage.completion_tokens ?? 0),
-                total_tokens     : prev.total_tokens      + (usage.total_tokens      ?? 0),
-                turn_count       : prev.turn_count        + 1,
-              },
-            },
-          }
-        }),
+def sync_approved_sources(
+    session_id: str,
+    knowledge_set: str,
+    connection_id: str,
+    tables: list[str],
+) -> dict:
+    """
+    Sync the approved list to exactly the provided list of full table names.
+    Adds new entries, removes entries no longer in the list.
+    Returns a summary of changes.
+    """
+    _ensure_approved_sources_table()
+    current = set(get_approved_table_names(session_id, knowledge_set))
+    desired = set(tables)
 
-      getSessionTokenUsage: (sessionId) =>
-        get().tokenUsage[sessionId] ?? { ...DEFAULT_TOKEN_USAGE },
+    to_add    = desired - current
+    to_remove = current - desired
 
-      resetTokenUsage: (sessionId) =>
-        set(s => ({
-          tokenUsage: { ...s.tokenUsage, [sessionId]: { ...DEFAULT_TOKEN_USAGE } },
-        })),
+    for full_table in to_remove:
+        remove_approved_source(session_id, knowledge_set, full_table)
 
-      // ── Databricks connections ─────────────────────────────────
-      // Loaded from backend on workspace open — not persisted locally
-      // (connections live in encrypted SQLite on the server)
-      setDatabricksConnections: (connections) =>
-        set({ databricksConnections: connections }),
+    for full_table in to_add:
+        parts = full_table.split(".")
+        if len(parts) != 3:
+            continue   # skip malformed entries
+        cat, sch, tbl = parts
+        add_approved_source(session_id, knowledge_set, connection_id, cat, sch, tbl)
 
-      addDatabricksConnection: (conn) =>
-        set(s => ({
-          databricksConnections: [conn, ...s.databricksConnections.filter(c => c.connection_id !== conn.connection_id)],
-        })),
-
-      removeDatabricksConnection: (connection_id) =>
-        set(s => ({
-          databricksConnections: s.databricksConnections.filter(c => c.connection_id !== connection_id),
-        })),
-
-      getDatabricksConnections: () => get().databricksConnections,
-
-      // ── Databricks ingest items ────────────────────────────────
-      addDatabricksIngestItem: (sessionId, item) =>
-        set(s => ({
-          databricksIngestItems: {
-            ...s.databricksIngestItems,
-            [sessionId]: [...(s.databricksIngestItems[sessionId] ?? []), item],
-          },
-        })),
-
-      updateDatabricksIngestItem: (sessionId, itemId, updates) =>
-        set(s => ({
-          databricksIngestItems: {
-            ...s.databricksIngestItems,
-            [sessionId]: (s.databricksIngestItems[sessionId] ?? []).map(item =>
-              item.id === itemId ? { ...item, ...updates } : item
-            ),
-          },
-        })),
-
-      removeDatabricksIngestItem: (sessionId, itemId) =>
-        set(s => ({
-          databricksIngestItems: {
-            ...s.databricksIngestItems,
-            [sessionId]: (s.databricksIngestItems[sessionId] ?? []).filter(item => item.id !== itemId),
-          },
-        })),
-
-      getSessionDatabricksItems: (sessionId) =>
-        get().databricksIngestItems[sessionId] ?? [],
-    }),
-    {
-      name: 'governgpt-store',
-      version: 3,   // bumped — new databricks fields
-      storage: createJSONStorage(() => {
-        if (typeof window === 'undefined') {
-          return { getItem: () => null, setItem: () => {}, removeItem: () => {} }
-        }
-        return localStorage
-      }),
-      partialize: (state) => ({
-        sessions              : state.sessions,
-        files                 : state.files,
-        chats                 : state.chats,
-        tokenUsage            : state.tokenUsage,
-        databricksIngestItems : state.databricksIngestItems,
-        // databricksConnections NOT persisted — loaded fresh from backend
-        // activeSessionId NOT persisted — prevents SSR hydration mismatch
-      }),
-      skipHydration: true,
+    return {
+        "added"  : sorted(to_add),
+        "removed": sorted(to_remove),
+        "total"  : len(desired),
     }
-  )
-)
-
