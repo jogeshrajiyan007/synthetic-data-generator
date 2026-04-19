@@ -1,328 +1,247 @@
 'use client'
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Send, Shield, Sparkles, RotateCcw, Sliders, Brain, Zap, SquareCode } from 'lucide-react'
-import { MessageBubble, TypingIndicator } from './MessageBubble'
-import type { KnowledgeSet, ChatMessage } from '@/types'
-import { api } from '@/lib/api'
-import { useStore } from '@/store'
-import { cn } from '@/lib/utils'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import { User, Bot, Clock, FileText, Copy, Check, Brain, Zap, SquareCode, AlertTriangle } from 'lucide-react'
+import type { ChatMessage } from '@/types'
+import { formatTime, cn } from '@/lib/utils'
 
-const SUGGESTED_RAG = [
-  'What are these documents about? Provide a high-level summary.',
-  'What PII data is present and how should it be governed?',
-  'What regulatory frameworks apply (GDPR, Solvency II, IFRS 17)?',
-  'Propose a star schema based on the uploaded datasets.',
-  'What data quality issues can you identify?',
-]
-
-const SUGGESTED_SQL = [
-  'Show me the first 10 rows from my approved tables.',
-  'How many records are in each approved table?',
-  'What are the distinct values in the most important categorical column?',
-  'What is the date range covered by this dataset?',
-  'Show total count grouped by the key dimension column.',
-]
-
-interface ChatWindowProps {
-  session: KnowledgeSet
-  messages: ChatMessage[]
-  onAddMessage: (msg: ChatMessage) => void
-  onUpdateMessage: (id: string, updates: Partial<ChatMessage>) => void
-  onClearChat: () => void
+const INTENT_META: Record<string, { label: string; color: string }> = {
+  SIMPLE_LOOKUP : { label: 'Lookup',     color: 'bg-blue-50 border-blue-200 text-blue-700' },
+  AGGREGATION   : { label: 'Aggregation',color: 'bg-purple-50 border-purple-200 text-purple-700' },
+  COMPARISON    : { label: 'Comparison', color: 'bg-orange-50 border-orange-200 text-orange-700' },
+  JOIN_OPERATION: { label: 'Join',       color: 'bg-pink-50 border-pink-200 text-pink-700' },
+  MULTI_STEP    : { label: 'Multi-step', color: 'bg-indigo-50 border-indigo-200 text-indigo-700' },
+  CREATE_OBJECT : { label: 'Create',     color: 'bg-yellow-50 border-yellow-200 text-yellow-700' },
+  OUT_OF_SCOPE  : { label: 'Restricted', color: 'bg-red-50 border-red-200 text-red-600' },
 }
 
-export function ChatWindow({ session, messages, onAddMessage, onUpdateMessage, onClearChat }: ChatWindowProps) {
-  const [input, setInput]                       = useState('')
-  const [isLoading, setIsLoading]               = useState(false)
-  const [useRag, setUseRag]                     = useState(true)
-  const [enableSqlAgent, setEnableSqlAgent]     = useState(true)
-  const [k, setK]                               = useState(5)
-  const [windowK, setWindowK]                   = useState(6)
-  const [showSettings, setShowSettings]         = useState(false)
-  const [isClearingMemory, setIsClearingMemory] = useState(false)
-  const bottomRef = useRef<HTMLDivElement>(null)
-  const inputRef  = useRef<HTMLTextAreaElement>(null)
+interface MessageBubbleProps {
+  message: ChatMessage
+  index: number
+}
 
-  const { addTokenUsage, getSessionTokenUsage, resetTokenUsage, getApprovedTables, getApprovedConnectionId } = useStore()
+export function MessageBubble({ message, index }: MessageBubbleProps) {
+  const [copied, setCopied]               = useState(false)
+  const [showMeta, setShowMeta]           = useState(false)
+  const [showSql, setShowSql]             = useState(false)
+  const [showResults, setShowResults]     = useState(false)
+  const isUser    = message.role === 'user'
+  const isSql     = message.mode === 'sql_agent' || message.mode === 'hybrid'
+  const intentMeta = message.sql_intent ? INTENT_META[message.sql_intent] : null
 
-  const tokenUsage     = getSessionTokenUsage(session.id)
-  const approvedTables = getApprovedTables(session.id)
-  const connectionId   = getApprovedConnectionId(session.id)
-  const hasSqlSources  = approvedTables.length > 0
-  const assistantTurns = messages.filter(m => m.role === 'assistant' && m.content).length
-
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages, isLoading])
-
-  const sendMessage = useCallback(async (question: string) => {
-    if (!question.trim() || isLoading) return
-    setInput(''); setShowSettings(false)
-
-    const userMsg: ChatMessage = {
-      id: Math.random().toString(36).slice(2), role: 'user',
-      content: question.trim(), timestamp: new Date().toISOString(),
-    }
-    onAddMessage(userMsg)
-    setIsLoading(true)
-
-    const assistantId = Math.random().toString(36).slice(2)
-    onAddMessage({ id: assistantId, role: 'assistant', content: '', timestamp: new Date().toISOString() })
-
-    try {
-      const result = await api.query({
-        knowledge_set   : session.id,
-        session_id      : session.id,
-        question        : question.trim(),
-        use_rag         : useRag,
-        k,
-        window_k        : windowK,
-        enable_sql_agent: enableSqlAgent && hasSqlSources,
-        approved_tables : approvedTables,
-        connection_id   : connectionId ?? undefined,
-      })
-
-      onUpdateMessage(assistantId, {
-        content           : result.answer,
-        sources_used      : result.sources_used,
-        chunks_retrieved  : result.chunks_retrieved,
-        duration_seconds  : result.duration_seconds,
-        run_id            : result.run_id,
-        rephrased_question: result.rephrased_question,
-        prompt_tokens     : result.prompt_tokens,
-        completion_tokens : result.completion_tokens,
-        total_tokens      : result.total_tokens,
-        mode              : result.mode,
-        sql_intent        : result.sql_intent ?? undefined,
-        sql_executed      : result.sql_executed ?? undefined,
-        sql_row_count     : result.sql_row_count ?? undefined,
-        sql_results       : result.sql_results ?? undefined,
-        sql_think_aloud   : result.sql_think_aloud ?? undefined,
-        governance_note   : result.governance_note ?? undefined,
-      })
-
-      addTokenUsage(session.id, {
-        prompt_tokens    : result.prompt_tokens,
-        completion_tokens: result.completion_tokens,
-        total_tokens     : result.total_tokens,
-      })
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Request failed'
-      onUpdateMessage(assistantId, { content: `**Error:** ${msg}\n\nPlease ensure the backend is running and this knowledge set has been indexed.` })
-    } finally {
-      setIsLoading(false)
-      setTimeout(() => inputRef.current?.focus(), 100)
-    }
-  }, [isLoading, session.id, useRag, k, windowK, enableSqlAgent, hasSqlSources, approvedTables, connectionId, onAddMessage, onUpdateMessage, addTokenUsage])
-
-  const handleClearChat = async () => {
-    setIsClearingMemory(true)
-    try { await api.clearConversationHistory(session.id, session.id) } catch (_) {}
-    finally { onClearChat(); resetTokenUsage(session.id); setIsClearingMemory(false) }
+  const handleCopy = async () => {
+    await navigator.clipboard.writeText(message.content)
+    setCopied(true); setTimeout(() => setCopied(false), 2000)
   }
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(input) }
-  }
-  const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setInput(e.target.value)
-    e.target.style.height = 'auto'
-    e.target.style.height = Math.min(e.target.scrollHeight, 140) + 'px'
-  }
-
-  const visibleMessages = messages.filter(m => m.content !== '' || m.role === 'user')
-  const isTyping        = isLoading && messages[messages.length - 1]?.content === ''
+  const showRephrased = !isUser && !isSql && message.rephrased_question &&
+    message.rephrased_question !== message.content
 
   return (
-    <div className="h-full flex flex-col bg-ink-50">
-
-      {/* Header */}
-      <div className="flex-shrink-0 px-6 py-3 border-b border-ink-200 bg-white">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-axa-800 flex items-center justify-center">
-              <Shield className="w-4 h-4 text-white" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-sm font-semibold text-ink-800 font-display">GovernGPT Agent</span>
-                <span className="axa-badge">GPT-4o</span>
-                {assistantTurns > 0 && (
-                  <span className="flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-axa-50 border border-axa-100 text-axa-800">
-                    <Brain className="w-2.5 h-2.5" />{assistantTurns} in memory
-                  </span>
-                )}
-                {hasSqlSources && enableSqlAgent && (
-                  <span className="flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700">
-                    <SquareCode className="w-2.5 h-2.5" />{approvedTables.length} SQL source{approvedTables.length !== 1 ? 's' : ''}
-                  </span>
-                )}
-              </div>
-              <p className="text-[10px] text-ink-400">{session.project_name}</p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-1.5">
-            {tokenUsage.total_tokens > 0 && (
-              <div className="hidden md:flex items-center gap-1.5 text-[10px] text-ink-400 bg-ink-50 border border-ink-100 px-2.5 py-1.5 rounded-lg">
-                <Zap className="w-3 h-3 text-axa-400" />
-                <span className="font-mono font-medium text-ink-600">{tokenUsage.total_tokens.toLocaleString()}</span>
-                <span>tokens</span>
-              </div>
-            )}
-            <button onClick={() => setShowSettings(s => !s)}
-              className={cn('p-2 rounded-lg transition-colors text-ink-400', showSettings ? 'bg-axa-50 text-axa-800 border border-axa-100' : 'hover:bg-ink-100 hover:text-ink-700')}
-              title="Settings">
-              <Sliders className="w-4 h-4" />
-            </button>
-            {messages.length > 0 && (
-              <button onClick={handleClearChat} disabled={isClearingMemory}
-                className="p-2 rounded-lg hover:bg-axared-50 text-ink-400 hover:text-axared-500 transition-colors disabled:opacity-50" title="Clear chat">
-                <RotateCcw className={cn('w-4 h-4', isClearingMemory && 'animate-spin')} />
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Settings panel */}
-        <AnimatePresence>
-          {showSettings && (
-            <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="mt-3 overflow-hidden">
-              <div className="flex items-center flex-wrap gap-4 py-2.5 px-3 bg-axa-50 rounded-xl border border-axa-100">
-                <Toggle label="Use RAG" value={useRag} onChange={setUseRag} />
-                <Toggle label="SQL Agent" value={enableSqlAgent} onChange={setEnableSqlAgent}
-                  disabled={!hasSqlSources} disabledTitle="Approve tables in Databricks tab to enable" activeColor="bg-emerald-600" />
-                <label className="flex items-center gap-2 text-xs text-ink-600">
-                  <span className="font-medium">Top-K</span>
-                  <select value={k} onChange={e => setK(Number(e.target.value))}
-                    className="bg-white border border-ink-200 rounded-lg px-2 py-0.5 text-xs text-ink-700 focus:outline-none focus:border-axa-400">
-                    {[3,5,8,10,15,20].map(v => <option key={v} value={v}>{v}</option>)}
-                  </select>
-                </label>
-                <label className="flex items-center gap-2 text-xs text-ink-600">
-                  <Brain className="w-3.5 h-3.5 text-axa-700" />
-                  <span className="font-medium">Memory</span>
-                  <select value={windowK} onChange={e => setWindowK(Number(e.target.value))}
-                    className="bg-white border border-ink-200 rounded-lg px-2 py-0.5 text-xs text-ink-700 focus:outline-none focus:border-axa-400">
-                    {[2,4,6,8,10,12].map(v => <option key={v} value={v}>{v}</option>)}
-                  </select>
-                </label>
-                {tokenUsage.turn_count > 0 && (
-                  <div className="ml-auto flex items-center gap-3 text-[10px] text-ink-500 font-mono">
-                    <span>↑{tokenUsage.prompt_tokens.toLocaleString()}</span>
-                    <span>↓{tokenUsage.completion_tokens.toLocaleString()}</span>
-                    <span className="font-semibold text-axa-800">={tokenUsage.total_tokens.toLocaleString()}</span>
-                  </div>
-                )}
-              </div>
-
-              {hasSqlSources && (
-                <div className="mt-2 px-3 py-2 bg-emerald-50 border border-emerald-100 rounded-xl">
-                  <p className="text-[10px] font-semibold text-emerald-700 mb-1 flex items-center gap-1">
-                    <SquareCode className="w-3 h-3" />SQL-approved tables
-                  </p>
-                  <div className="flex flex-wrap gap-1">
-                    {approvedTables.map(t => (
-                      <span key={t} className="text-[9px] font-mono bg-white border border-emerald-200 text-emerald-700 px-1.5 py-0.5 rounded">{t.split('.').pop()}</span>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </motion.div>
-          )}
-        </AnimatePresence>
+    <motion.div
+      initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: Math.min(index * 0.04, 0.25), duration: 0.3 }}
+      className={cn('flex gap-3 group', isUser ? 'flex-row-reverse' : 'flex-row')}
+    >
+      {/* Avatar */}
+      <div className={cn('w-8 h-8 rounded-lg flex-shrink-0 flex items-center justify-center mt-0.5',
+        isUser ? 'bg-axa-800' : 'bg-white border border-ink-200 shadow-sm')}>
+        {isUser ? <User className="w-4 h-4 text-white" /> : <Bot className="w-4 h-4 text-axa-800" />}
       </div>
 
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-6 py-6 space-y-5">
-        {messages.length === 0 ? (
-          <WelcomeScreen sessionName={session.project_name} hasSqlSources={hasSqlSources} approvedCount={approvedTables.length} onSuggest={sendMessage} />
-        ) : (
-          <>
-            {visibleMessages.map((msg, i) =>
-              isTyping && i === visibleMessages.length - 1 && msg.role === 'assistant' ? (
-                <TypingIndicator key={msg.id} />
-              ) : (
-                <MessageBubble key={msg.id} message={msg} index={i} />
-              )
-            )}
-            <div ref={bottomRef} />
-          </>
+      {/* Content */}
+      <div className={cn('flex-1 min-w-0 max-w-[85%] flex flex-col gap-1', isUser ? 'items-end' : 'items-start')}>
+
+        {/* SQL think-aloud */}
+        {!isUser && message.sql_think_aloud && (
+          <div className="flex items-start gap-1.5 mb-0.5 w-full">
+            <SquareCode className="w-3 h-3 text-emerald-600 flex-shrink-0 mt-0.5" />
+            <span className="text-[10px] text-emerald-700 bg-emerald-50 border border-emerald-100 px-2 py-1 rounded-lg italic leading-relaxed">
+              {message.sql_think_aloud}
+            </span>
+          </div>
+        )}
+
+        {/* RAG rephrased question */}
+        {showRephrased && (
+          <div className="flex items-center gap-1.5 mb-0.5">
+            <Brain className="w-3 h-3 text-axa-600 flex-shrink-0" />
+            <span className="text-[10px] text-axa-700 bg-axa-50 border border-axa-100 px-2 py-0.5 rounded-full italic">
+              Searched: "{message.rephrased_question}"
+            </span>
+          </div>
+        )}
+
+        {/* Bubble */}
+        <div className={cn('relative rounded-2xl px-4 py-3 text-sm w-full',
+          isUser ? 'bg-axa-800 text-white rounded-tr-sm ml-auto' : 'bg-white border border-ink-200 shadow-sm rounded-tl-sm')}>
+          {isUser ? (
+            <p className="text-white leading-relaxed">{message.content}</p>
+          ) : (
+            <div className="prose-governance">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+            </div>
+          )}
+          {!isUser && message.content && (
+            <button onClick={handleCopy}
+              className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1 rounded-lg bg-ink-50 hover:bg-ink-100 text-ink-400 hover:text-ink-700 transition-all border border-ink-200">
+              {copied ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
+            </button>
+          )}
+        </div>
+
+        {/* SQL results table toggle */}
+        {!isUser && message.sql_results && message.sql_results.length > 0 && (
+          <div className="w-full mt-1">
+            <button onClick={() => setShowResults(v => !v)}
+              className="flex items-center gap-1.5 text-[10px] text-emerald-700 bg-emerald-50 border border-emerald-100 px-2.5 py-1 rounded-lg hover:bg-emerald-100 transition-colors">
+              <SquareCode className="w-3 h-3" />
+              <span className="font-semibold">{message.sql_row_count ?? message.sql_results.length} rows returned</span>
+              <span className="text-emerald-400">{showResults ? '▲ hide' : '▼ show'}</span>
+            </button>
+            <AnimatePresence>
+              {showResults && (
+                <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
+                  <SqlResultsTable results={message.sql_results} />
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        )}
+
+        {/* SQL view toggle */}
+        {!isUser && message.sql_executed && (
+          <div className="w-full mt-0.5">
+            <button onClick={() => setShowSql(v => !v)} className="text-[10px] text-ink-400 hover:text-ink-600 transition-colors">
+              {showSql ? '▲ hide SQL' : '▼ view SQL'}
+            </button>
+            <AnimatePresence>
+              {showSql && (
+                <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden mt-1">
+                  <pre className="text-[10px] font-mono bg-ink-900 text-emerald-300 rounded-xl px-4 py-3 overflow-x-auto whitespace-pre-wrap leading-relaxed">
+                    {message.sql_executed}
+                  </pre>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        )}
+
+        {/* Governance note */}
+        {!isUser && message.governance_note && (
+          <div className="w-full mt-1 flex items-start gap-2 px-3 py-2 bg-amber-50 border border-amber-100 rounded-xl">
+            <AlertTriangle className="w-3 h-3 text-amber-500 flex-shrink-0 mt-0.5" />
+            <div className="text-[10px] text-amber-700 leading-relaxed prose-governance">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.governance_note}</ReactMarkdown>
+            </div>
+          </div>
+        )}
+
+        {/* Meta row */}
+        <div className={cn('flex items-center gap-3 px-1 flex-wrap', isUser ? 'flex-row-reverse' : 'flex-row')}>
+          <span className="text-[10px] text-ink-400 flex items-center gap-1 flex-shrink-0">
+            <Clock className="w-2.5 h-2.5" />{formatTime(message.timestamp)}
+          </span>
+
+          {/* Intent badge */}
+          {!isUser && intentMeta && (
+            <span className={cn('flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded-full border flex-shrink-0', intentMeta.color)}>
+              <SquareCode className="w-2.5 h-2.5" />{intentMeta.label}
+            </span>
+          )}
+
+          {/* Sources (RAG mode) */}
+          {!isUser && !isSql && message.sources_used && message.sources_used.length > 0 && (
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <FileText className="w-2.5 h-2.5 text-ink-400 flex-shrink-0" />
+              {message.sources_used.map(src => (
+                <span key={src} className="text-[10px] font-mono text-axa-800 bg-axa-50 px-1.5 py-0.5 rounded border border-axa-100">{src}</span>
+              ))}
+            </div>
+          )}
+
+          {!isUser && message.duration_seconds && (
+            <span className="text-[10px] text-ink-300 flex-shrink-0">{message.duration_seconds}s</span>
+          )}
+
+          {!isUser && message.total_tokens && message.total_tokens > 0 && (
+            <button onClick={() => setShowMeta(v => !v)} className="flex items-center gap-1 text-[10px] text-ink-400 hover:text-axa-700 transition-colors flex-shrink-0">
+              <Zap className="w-2.5 h-2.5" /><span className="font-mono">{message.total_tokens.toLocaleString()}</span>
+            </button>
+          )}
+        </div>
+
+        {/* Token breakdown */}
+        {!isUser && showMeta && message.total_tokens && message.total_tokens > 0 && (
+          <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="px-1 overflow-hidden">
+            <div className="flex items-center gap-3 text-[10px] font-mono text-ink-400 bg-ink-50 border border-ink-100 rounded-lg px-3 py-2 mt-1">
+              <span>↑ {(message.prompt_tokens ?? 0).toLocaleString()} prompt</span>
+              <span className="text-ink-200">·</span>
+              <span>↓ {(message.completion_tokens ?? 0).toLocaleString()} completion</span>
+              <span className="text-ink-200">·</span>
+              <span className="font-semibold text-axa-700">= {(message.total_tokens ?? 0).toLocaleString()} total</span>
+              {message.mode && <><span className="text-ink-200">·</span><span className="text-ink-500">{message.mode}</span></>}
+            </div>
+          </motion.div>
         )}
       </div>
+    </motion.div>
+  )
+}
 
-      {/* Input */}
-      <div className="flex-shrink-0 px-6 pb-6 pt-3 border-t border-ink-200 bg-white">
-        <div className={cn('flex items-end gap-3 bg-white border rounded-xl px-4 py-3 transition-all', 'focus-within:border-axa-400 focus-within:ring-2 focus-within:ring-axa-50 border-ink-200')}>
-          <textarea ref={inputRef} value={input} onChange={handleInput} onKeyDown={handleKeyDown}
-            placeholder={hasSqlSources && enableSqlAgent ? 'Ask a governance question or query your SQL tables…' : 'Ask a governance question…'}
-            disabled={isLoading} rows={1} maxLength={32000}
-            className="flex-1 bg-transparent text-sm text-ink-800 placeholder-ink-300 resize-none focus:outline-none leading-relaxed py-0.5 max-h-36 disabled:opacity-60"
-            style={{ height: '24px' }} />
-          <button onClick={() => sendMessage(input)} disabled={!input.trim() || isLoading}
-            className={cn('w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 transition-all',
-              input.trim() && !isLoading ? 'bg-axa-800 text-white hover:bg-axa-700 shadow-axa' : 'bg-ink-100 text-ink-300 cursor-not-allowed')}>
-            <Send className="w-3.5 h-3.5" />
-          </button>
+function SqlResultsTable({ results }: { results: Record<string, unknown>[] }) {
+  if (!results.length) return null
+  const cols    = Object.keys(results[0])
+  const display = results.slice(0, 50)
+
+  return (
+    <div className="mt-1.5 overflow-x-auto rounded-xl border border-emerald-100 bg-white shadow-sm">
+      <table className="min-w-full text-[10px]">
+        <thead>
+          <tr className="bg-emerald-50 border-b border-emerald-100">
+            {cols.map(col => (
+              <th key={col} className="px-3 py-1.5 text-left font-semibold text-emerald-700 whitespace-nowrap font-mono">{col}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {display.map((row, ri) => (
+            <tr key={ri} className={cn('border-b border-ink-50', ri % 2 === 0 ? 'bg-white' : 'bg-ink-50/50')}>
+              {cols.map(col => {
+                const v   = row[col]
+                const str = v === null || v === undefined ? '—' : String(v)
+                return (
+                  <td key={col} className="px-3 py-1.5 text-ink-700 font-mono whitespace-nowrap max-w-[180px] truncate" title={str}>
+                    {str === '—' ? <span className="text-ink-300">—</span> : str}
+                  </td>
+                )
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {results.length > 50 && (
+        <div className="px-3 py-1.5 text-[10px] text-ink-400 bg-ink-50 border-t border-ink-100">
+          Showing first 50 of {results.length} rows
         </div>
-        <div className="flex items-center justify-between mt-1.5 px-1">
-          <p className="text-[10px] text-ink-300">
-            <kbd className="font-mono bg-ink-100 px-1 rounded text-ink-400">Enter</kbd> send ·{' '}
-            <kbd className="font-mono bg-ink-100 px-1 rounded text-ink-400">Shift+Enter</kbd> new line
-          </p>
-          {input.length > 500 && <p className="text-[10px] text-ink-400 font-mono">{input.length.toLocaleString()} / 32,000</p>}
-        </div>
-      </div>
+      )}
     </div>
   )
 }
 
-function Toggle({ label, value, onChange, disabled, disabledTitle, activeColor = 'bg-axa-800' }: {
-  label: string; value: boolean; onChange: (v: boolean) => void
-  disabled?: boolean; disabledTitle?: string; activeColor?: string
-}) {
+export function TypingIndicator() {
   return (
-    <label className={cn('flex items-center gap-2 text-xs text-ink-600 select-none', disabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer')} title={disabled ? disabledTitle : undefined}>
-      <div onClick={() => !disabled && onChange(!value)}
-        className={cn('w-8 h-4 rounded-full transition-colors relative', !disabled && 'cursor-pointer', value && !disabled ? activeColor : 'bg-ink-200')}>
-        <div className={cn('absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform shadow-sm', value ? 'translate-x-4' : 'translate-x-0.5')} />
+    <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 8 }} className="flex gap-3">
+      <div className="w-8 h-8 rounded-lg bg-white border border-ink-200 shadow-sm flex items-center justify-center flex-shrink-0">
+        <Bot className="w-4 h-4 text-axa-800" />
       </div>
-      <span className="font-medium">{label}</span>
-    </label>
-  )
-}
-
-function WelcomeScreen({ sessionName, hasSqlSources, approvedCount, onSuggest }: {
-  sessionName: string; hasSqlSources: boolean; approvedCount: number; onSuggest: (q: string) => void
-}) {
-  return (
-    <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="flex flex-col items-center justify-center min-h-[60%] text-center py-8">
-      <div className="w-14 h-14 rounded-2xl bg-axa-800 flex items-center justify-center mb-5 shadow-axa">
-        <Sparkles className="w-7 h-7 text-white" />
-      </div>
-      <h2 className="font-display text-2xl text-ink-800 mb-2">Ask GovernGPT</h2>
-      <p className="text-ink-500 text-sm max-w-sm mb-2 leading-relaxed">
-        Query your <span className="text-axa-800 font-semibold">{sessionName}</span> knowledge set.
-      </p>
-      <div className="flex flex-col items-center gap-1.5 mb-8">
-        <p className="flex items-center gap-1.5 text-[11px] text-axa-700 bg-axa-50 border border-axa-100 px-3 py-1.5 rounded-full">
-          <Brain className="w-3 h-3" />Conversational memory active
-        </p>
-        {hasSqlSources && (
-          <p className="flex items-center gap-1.5 text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-100 px-3 py-1.5 rounded-full">
-            <SquareCode className="w-3 h-3" />SQL Agent active · {approvedCount} table{approvedCount !== 1 ? 's' : ''} approved
-          </p>
-        )}
-      </div>
-      <div className="w-full max-w-lg space-y-2">
-        <p className="text-[10px] font-semibold text-ink-400 uppercase tracking-widest mb-3">
-          {hasSqlSources ? 'Suggested SQL queries' : 'Suggested queries'}
-        </p>
-        {(hasSqlSources ? SUGGESTED_SQL : SUGGESTED_RAG).map((q, i) => (
-          <motion.button key={i} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.07 }}
-            onClick={() => onSuggest(q)}
-            className="w-full text-left px-4 py-2.5 rounded-xl bg-white border border-ink-200 text-xs text-ink-600 hover:border-axa-300 hover:text-axa-800 hover:bg-axa-50 transition-all">
-            {q}
-          </motion.button>
+      <div className="bg-white border border-ink-200 shadow-sm rounded-2xl rounded-tl-sm px-4 py-3 flex items-center gap-1.5">
+        {[0, 0.2, 0.4].map((delay, i) => (
+          <motion.div key={i} className="w-1.5 h-1.5 rounded-full bg-axa-800"
+            animate={{ scale: [1, 1.4, 1], opacity: [0.3, 1, 0.3] }}
+            transition={{ duration: 0.8, delay, repeat: Infinity }} />
         ))}
       </div>
     </motion.div>
