@@ -1,212 +1,246 @@
 'use client'
-import { useState, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import {
-  ChevronRight, ChevronDown, Database, Table, Eye,
-  Download, Loader2, RefreshCw, AlertCircle, CheckCircle,
-  BookOpen, Layers
-} from 'lucide-react'
+import { Plus, Plug, Trash2, CheckCircle, RefreshCw, Loader2, ServerCrash } from 'lucide-react'
+import { ConnectModal } from './ConnectModal'
+import { CatalogBrowser } from './CatalogBrowser'
+import { TableIngestCard } from './TableIngestCard'
 import { api } from '@/lib/api'
+import { useStore } from '@/store'
 import { cn } from '@/lib/utils'
-import type {
-  DatabricksConnection, DatabricksCatalog,
-  DatabricksSchema, DatabricksTable, DatabricksIngestItem
-} from '@/types'
+import type { KnowledgeSet, DatabricksConnection, DatabricksIngestItem } from '@/types'
 
-interface CatalogBrowserProps {
-  connection: DatabricksConnection
-  sessionId: string
-  knowledgeSetId: string
-  ingestItems: DatabricksIngestItem[]
-  onIngestItem: (item: DatabricksIngestItem) => void
-  onUpdateItem: (itemId: string, updates: Partial<DatabricksIngestItem>) => void
-  onAutoApprove: (fullTable: string) => void
+interface DatabricksPanelProps {
+  session: KnowledgeSet
 }
 
-export function CatalogBrowser({
-  connection, sessionId, knowledgeSetId,
-  ingestItems, onIngestItem, onUpdateItem, onAutoApprove,
-}: CatalogBrowserProps) {
-  const [catalogs, setCatalogs]             = useState<DatabricksCatalog[]>([])
-  const [schemas, setSchemas]               = useState<Record<string, DatabricksSchema[]>>({})
-  const [tables, setTables]                 = useState<Record<string, DatabricksTable[]>>({})
-  const [expanded, setExpanded]             = useState<Record<string, boolean>>({})
-  const [loading, setLoading]               = useState<Record<string, boolean>>({})
-  const [errors, setErrors]                 = useState<Record<string, string>>({})
-  const [catalogsLoaded, setCatalogsLoaded] = useState(false)
+export function DatabricksPanel({ session }: DatabricksPanelProps) {
+  const {
+    getDatabricksConnections,
+    setDatabricksConnections,
+    addDatabricksConnection,
+    removeDatabricksConnection,
+    getSessionDatabricksItems,
+    addDatabricksIngestItem,
+    updateDatabricksIngestItem,
+    removeDatabricksIngestItem,
+  } = useStore()
 
-  const setLoad = (key: string, v: boolean) => setLoading(p => ({ ...p, [key]: v }))
-  const setErr  = (key: string, v: string)  => setErrors(p => ({ ...p, [key]: v }))
-  const toggle  = (key: string)             => setExpanded(p => ({ ...p, [key]: !p[key] }))
+  const connections  = getDatabricksConnections()
+  const ingestItems  = getSessionDatabricksItems(session.id)
 
-  const loadCatalogs = useCallback(async () => {
-    if (catalogsLoaded) return
-    setLoad('catalogs', true); setErr('catalogs', '')
+  const [showModal, setShowModal]     = useState(false)
+  const [activeConn, setActiveConn]   = useState<string | null>(null)
+  const [loadingConns, setLoadingConns] = useState(false)
+  const [testing, setTesting]         = useState<string | null>(null)
+
+  // Load saved connections from backend on mount
+  useEffect(() => {
+    loadConnections()
+  }, [session.id])
+
+  const loadConnections = async () => {
+    setLoadingConns(true)
     try {
-      const res = await api.databricks.listCatalogs(connection.connection_id)
-      setCatalogs(res.catalogs); setCatalogsLoaded(true)
-    } catch (e: unknown) {
-      setErr('catalogs', e instanceof Error ? e.message : 'Failed')
-    } finally { setLoad('catalogs', false) }
-  }, [connection.connection_id, catalogsLoaded])
-
-  const loadSchemas = useCallback(async (catalog: string) => {
-    if (schemas[catalog]) { toggle(catalog); return }
-    setLoad(catalog, true); setErr(catalog, '')
-    try {
-      const res = await api.databricks.listSchemas(connection.connection_id, catalog)
-      setSchemas(p => ({ ...p, [catalog]: res.schemas })); toggle(catalog)
-    } catch (e: unknown) {
-      setErr(catalog, e instanceof Error ? e.message : 'Failed')
-    } finally { setLoad(catalog, false) }
-  }, [connection.connection_id, schemas])
-
-  const loadTables = useCallback(async (catalog: string, schema: string) => {
-    const key = `${catalog}.${schema}`
-    if (tables[key]) { toggle(key); return }
-    setLoad(key, true); setErr(key, '')
-    try {
-      const res = await api.databricks.listTables(connection.connection_id, catalog, schema)
-      setTables(p => ({ ...p, [key]: res.tables })); toggle(key)
-    } catch (e: unknown) {
-      setErr(key, e instanceof Error ? e.message : 'Failed')
-    } finally { setLoad(key, false) }
-  }, [connection.connection_id, tables])
-
-  const handleIngest = useCallback(async (tbl: DatabricksTable) => {
-    const itemId = Math.random().toString(36).slice(2)
-    const newItem: DatabricksIngestItem = {
-      id: itemId, connection_id: connection.connection_id,
-      catalog: tbl.catalog, schema: tbl.schema,
-      table: tbl.table_name, table_type: tbl.table_type,
-      status: 'profiling', progress: 0,
+      const list = await api.databricks.listConnections(session.id)
+      setDatabricksConnections(list)
+      // Auto-expand first connection if available
+      if (list.length > 0 && !activeConn) {
+        setActiveConn(list[0].connection_id)
+      }
+    } catch (_) {
+      // Non-fatal
+    } finally {
+      setLoadingConns(false)
     }
-    onIngestItem(newItem)
-    const tick = setInterval(() => onUpdateItem(itemId, { progress: Math.min(80, (newItem.progress||0)+8) }), 600)
-    try {
-      const result = await api.databricks.ingestTable(connection.connection_id, {
-        knowledge_set: knowledgeSetId, catalog: tbl.catalog,
-        db_schema: tbl.schema, table: tbl.table_name, sample_rows: 500_000,
-      })
-      clearInterval(tick)
-      onUpdateItem(itemId, {
-        status: 'ready', progress: 100,
-        chunk_count: result.chunks, row_count: result.row_count,
-        duration_seconds: result.duration_seconds, ingested_at: result.profiled_at,
-      })
-      // Auto-approve for SQL after successful ingest
-      onAutoApprove(tbl.full_name)
-    } catch (e: unknown) {
-      clearInterval(tick)
-      onUpdateItem(itemId, { status: 'error', error: e instanceof Error ? e.message : 'Failed' })
-    }
-  }, [connection.connection_id, knowledgeSetId, onIngestItem, onUpdateItem, onAutoApprove])
+  }
 
-  const isIngested  = (tbl: DatabricksTable) =>
-    ingestItems.some(i => i.catalog === tbl.catalog && i.schema === tbl.schema && i.table === tbl.table_name && i.status === 'ready')
-  const isIngesting = (tbl: DatabricksTable) =>
-    ingestItems.some(i => i.catalog === tbl.catalog && i.schema === tbl.schema && i.table === tbl.table_name && (i.status === 'profiling' || i.status === 'ingesting'))
+  const handleConnected = (conn: DatabricksConnection) => {
+    addDatabricksConnection(conn)
+    setActiveConn(conn.connection_id)
+  }
+
+  const handleDelete = async (connection_id: string) => {
+    try {
+      await api.databricks.deleteConnection(connection_id)
+      removeDatabricksConnection(connection_id)
+      if (activeConn === connection_id) setActiveConn(null)
+    } catch (_) {}
+  }
+
+  const handleTest = async (connection_id: string) => {
+    setTesting(connection_id)
+    try {
+      await api.databricks.testConnection(connection_id)
+    } catch (_) {}
+    finally { setTesting(null) }
+  }
+
+  const readyCount = ingestItems.filter(i => i.status === 'ready').length
 
   return (
-    <div className="text-xs">
-      {/* Connection root row */}
-      <button onClick={() => { loadCatalogs(); toggle('root') }}
-        className="w-full flex items-center gap-2 px-2 py-2 rounded-lg hover:bg-axa-50 text-ink-700 transition-colors group">
-        {loading['catalogs']
-          ? <Loader2 className="w-3.5 h-3.5 text-axa-800 animate-spin flex-shrink-0" />
-          : expanded['root']
-          ? <ChevronDown className="w-3.5 h-3.5 text-ink-400 flex-shrink-0" />
-          : <ChevronRight className="w-3.5 h-3.5 text-ink-400 flex-shrink-0" />}
-        <BookOpen className="w-3.5 h-3.5 text-axa-800 flex-shrink-0" />
-        <span className="font-semibold text-ink-800 truncate flex-1">{connection.connection_name}</span>
-        <button onClick={e => { e.stopPropagation(); setCatalogsLoaded(false); loadCatalogs() }}
-          className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-axa-100 text-ink-400 flex-shrink-0" title="Refresh">
-          <RefreshCw className="w-3 h-3" />
-        </button>
-      </button>
+    <div className="flex flex-col h-full">
 
-      {errors['catalogs'] && (
-        <div className="flex items-center gap-1.5 px-3 py-1.5 text-axared-500 bg-axared-50 rounded-lg mt-1 mx-2">
-          <AlertCircle className="w-3 h-3 flex-shrink-0" />{errors['catalogs']}
+      {/* Header row */}
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-ink-100">
+        <div className="flex items-center gap-1.5">
+          <Plug className="w-3.5 h-3.5 text-axa-800" />
+          <span className="text-[10px] font-semibold text-axa-800 uppercase tracking-widest">Databricks</span>
+          {readyCount > 0 && (
+            <span className="text-[9px] font-bold text-emerald-600 bg-emerald-50 border border-emerald-100 px-1.5 py-0.5 rounded-full">
+              {readyCount} indexed
+            </span>
+          )}
         </div>
-      )}
+        <div className="flex items-center gap-1">
+          <button
+            onClick={loadConnections}
+            disabled={loadingConns}
+            className="p-1 rounded-md hover:bg-ink-100 text-ink-400 transition-colors"
+            title="Refresh connections"
+          >
+            <RefreshCw className={cn('w-3 h-3', loadingConns && 'animate-spin')} />
+          </button>
+          <button
+            onClick={() => setShowModal(true)}
+            className="flex items-center gap-1 px-2 py-1 rounded-md bg-axa-50 border border-axa-100 text-axa-800 text-[10px] font-semibold hover:bg-axa-100 transition-colors"
+          >
+            <Plus className="w-3 h-3" />
+            Connect
+          </button>
+        </div>
+      </div>
 
-      <AnimatePresence>
-        {expanded['root'] && (
-          <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden ml-2">
-            {catalogs.map(cat => (
-              <div key={cat.catalog}>
-                <button onClick={() => loadSchemas(cat.catalog)}
-                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-ink-50 text-ink-600 transition-colors">
-                  {loading[cat.catalog] ? <Loader2 className="w-3 h-3 animate-spin flex-shrink-0" />
-                    : expanded[cat.catalog] ? <ChevronDown className="w-3 h-3 text-ink-300 flex-shrink-0" />
-                    : <ChevronRight className="w-3 h-3 text-ink-300 flex-shrink-0" />}
-                  <Layers className="w-3 h-3 text-axa-600 flex-shrink-0" />
-                  <span className="truncate font-medium">{cat.catalog}</span>
-                </button>
-                {errors[cat.catalog] && <p className="text-[10px] text-axared-500 px-8 py-1">{errors[cat.catalog]}</p>}
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto">
+        {loadingConns && connections.length === 0 ? (
+          <div className="flex items-center justify-center py-8">
+            <Loader2 className="w-5 h-5 text-axa-800 animate-spin" />
+          </div>
+        ) : connections.length === 0 ? (
+          <EmptyState onConnect={() => setShowModal(true)} />
+        ) : (
+          <div className="py-2 space-y-1">
+            {connections.map(conn => (
+              <div key={conn.connection_id}>
+                {/* Connection row */}
+                <div
+                  className={cn(
+                    'flex items-center gap-2 px-3 py-2 rounded-lg mx-2 cursor-pointer transition-colors',
+                    activeConn === conn.connection_id ? 'bg-axa-50 border border-axa-100' : 'hover:bg-ink-50'
+                  )}
+                  onClick={() => setActiveConn(
+                    activeConn === conn.connection_id ? null : conn.connection_id
+                  )}
+                >
+                  <div className="w-5 h-5 rounded-md bg-axa-800 flex items-center justify-center flex-shrink-0">
+                    <Plug className="w-3 h-3 text-white" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-semibold text-ink-800 truncate">{conn.connection_name}</p>
+                    <p className="text-[9px] text-ink-400 truncate font-mono">
+                      {conn.workspace_url.replace('https://', '')}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    {conn.last_tested_at && (
+                      <CheckCircle className="w-3 h-3 text-emerald-500" title="Recently tested" />
+                    )}
+                    <button
+                      onClick={e => { e.stopPropagation(); handleTest(conn.connection_id) }}
+                      disabled={testing === conn.connection_id}
+                      className="p-1 rounded hover:bg-axa-100 text-ink-400 hover:text-axa-700 transition-colors"
+                      title="Test connection"
+                    >
+                      {testing === conn.connection_id
+                        ? <Loader2 className="w-3 h-3 animate-spin" />
+                        : <RefreshCw className="w-3 h-3" />
+                      }
+                    </button>
+                    <button
+                      onClick={e => { e.stopPropagation(); handleDelete(conn.connection_id) }}
+                      className="p-1 rounded hover:bg-axared-50 text-ink-300 hover:text-axared-500 transition-colors"
+                      title="Remove connection"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </div>
+                </div>
 
+                {/* Catalog browser (expanded when active) */}
                 <AnimatePresence>
-                  {expanded[cat.catalog] && (schemas[cat.catalog] ?? []).map(sch => {
-                    const schKey = `${cat.catalog}.${sch.schema}`
-                    return (
-                      <motion.div key={sch.schema} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="ml-4">
-                        <button onClick={() => loadTables(cat.catalog, sch.schema)}
-                          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-ink-50 text-ink-500 transition-colors">
-                          {loading[schKey] ? <Loader2 className="w-3 h-3 animate-spin flex-shrink-0" />
-                            : expanded[schKey] ? <ChevronDown className="w-3 h-3 text-ink-300 flex-shrink-0" />
-                            : <ChevronRight className="w-3 h-3 text-ink-300 flex-shrink-0" />}
-                          <Database className="w-3 h-3 text-ink-400 flex-shrink-0" />
-                          <span className="truncate">{sch.schema}</span>
-                        </button>
-
-                        <AnimatePresence>
-                          {expanded[schKey] && (tables[schKey] ?? []).map(tbl => {
-                            const ingested  = isIngested(tbl)
-                            const ingesting = isIngesting(tbl)
-                            return (
-                              <motion.div key={tbl.table_name}
-                                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                                className="ml-4 flex items-center gap-1 px-2 py-1.5 rounded-lg hover:bg-axa-50 group transition-colors"
-                              >
-                                {tbl.table_type === 'VIEW'
-                                  ? <Eye className="w-3 h-3 text-ink-300 flex-shrink-0" />
-                                  : <Table className="w-3 h-3 text-ink-400 flex-shrink-0" />}
-
-                                <span className={cn('flex-1 truncate', ingested ? 'text-emerald-700 font-semibold' : 'text-ink-600')}>
-                                  {tbl.table_name}
-                                </span>
-
-                                <span className="text-[9px] text-ink-300 flex-shrink-0">{tbl.table_type}</span>
-
-                                {/* Ingest button ONLY — no SQL approve here */}
-                                {ingested ? (
-                                  <CheckCircle className="w-3 h-3 text-emerald-500 flex-shrink-0" title="Indexed" />
-                                ) : ingesting ? (
-                                  <Loader2 className="w-3 h-3 text-axa-800 animate-spin flex-shrink-0" />
-                                ) : (
-                                  <button onClick={() => handleIngest(tbl)}
-                                    className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-axa-100 text-axa-700 flex-shrink-0 transition-all"
-                                    title={`Ingest ${tbl.table_name} into knowledge set`}>
-                                    <Download className="w-3 h-3" />
-                                  </button>
-                                )}
-                              </motion.div>
-                            )
-                          })}
-                        </AnimatePresence>
-                      </motion.div>
-                    )
-                  })}
+                  {activeConn === conn.connection_id && (
+                    <motion.div
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: 'auto' }}
+                      exit={{ opacity: 0, height: 0 }}
+                      className="overflow-hidden ml-4 mr-2 mt-1 mb-2 bg-white border border-ink-100 rounded-xl p-2"
+                    >
+                      <CatalogBrowser
+                        connection={conn}
+                        sessionId={session.id}
+                        knowledgeSetId={session.id}
+                        ingestItems={ingestItems}
+                        onIngestItem={(item) => addDatabricksIngestItem(session.id, item)}
+                        onUpdateItem={(itemId, updates) =>
+                          updateDatabricksIngestItem(session.id, itemId, updates)
+                        }
+                      />
+                    </motion.div>
+                  )}
                 </AnimatePresence>
               </div>
             ))}
-            {catalogsLoaded && catalogs.length === 0 && (
-              <p className="text-[10px] text-ink-400 px-6 py-2">No catalogs found.</p>
-            )}
-          </motion.div>
+          </div>
         )}
-      </AnimatePresence>
+
+        {/* Ingested tables list */}
+        {ingestItems.length > 0 && (
+          <div className="border-t border-ink-100 pt-2 mt-1">
+            <p className="text-[10px] font-semibold text-ink-400 uppercase tracking-wider px-4 mb-1.5">
+              Ingested Tables
+            </p>
+            <AnimatePresence initial={false}>
+              {ingestItems.map((item, i) => (
+                <TableIngestCard
+                  key={item.id}
+                  item={item}
+                  index={i}
+                  onRemove={(id) => removeDatabricksIngestItem(session.id, id)}
+                />
+              ))}
+            </AnimatePresence>
+          </div>
+        )}
+      </div>
+
+      <ConnectModal
+        isOpen={showModal}
+        onClose={() => setShowModal(false)}
+        knowledgeSetId={session.id}
+        onConnected={handleConnected}
+      />
+    </div>
+  )
+}
+
+function EmptyState({ onConnect }: { onConnect: () => void }) {
+  return (
+    <div className="flex flex-col items-center justify-center py-10 text-center px-4">
+      <div className="w-10 h-10 rounded-xl bg-axa-50 border border-axa-100 flex items-center justify-center mb-3">
+        <ServerCrash className="w-5 h-5 text-axa-300" />
+      </div>
+      <p className="text-xs font-semibold text-ink-600 mb-1">No connections yet</p>
+      <p className="text-[10px] text-ink-400 leading-relaxed mb-3">
+        Connect to a Databricks workspace to browse Hive Metastore tables and ingest them into your knowledge set.
+      </p>
+      <button
+        onClick={onConnect}
+        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-axa-800 text-white text-xs font-semibold hover:bg-axa-700 transition-colors shadow-axa"
+      >
+        <Plus className="w-3.5 h-3.5" />
+        Add Connection
+      </button>
     </div>
   )
 }
