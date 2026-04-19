@@ -1,171 +1,134 @@
-"""
-routers/sql_agent.py
+import urllib3
+from contextlib import asynccontextmanager
+from datetime import datetime
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-Dedicated SQL Agent endpoints.
-
-Provides:
-  POST /api/sql-agent/query              — run the full 6-step agentic SQL loop
-  GET  /api/sql-agent/approved-sources   — list approved tables for a session
-  POST /api/sql-agent/approved-sources/sync — sync approved table list
-  DELETE /api/sql-agent/approved-sources — clear approved table list
-  GET  /api/sql-agent/log                — SQL execution history for a session
-"""
-
-from fastapi import APIRouter, HTTPException, Query as QParam
-
-from services.databricks.sql_agent import run_sql_agent
-from services.databricks.approved_sources import (
-    get_approved_sources,
-    sync_approved_sources,
-    clear_approved_sources,
-    get_connection_for_session,
+from routers.all_routers import (
+    sources_router, logs_router,
+    profile_router, reset_router, ks_router
 )
-from services.memory import load_history_as_messages
-from db import db_query
-from models.schemas import (
-    SqlAgentRequest, SqlAgentResponse,
-    ApprovedSourcesResponse, ApprovedSourceEntry,
-    SyncApprovedSourcesRequest, SyncApprovedSourcesResponse,
+from routers.ingest     import router as ingest_router
+from routers.query      import router as query_router
+from routers.databricks import router as databricks_router
+from routers.sql_agent  import router as sql_agent_router
+from services.vectorstore import load_vector_store, get_vector_count
+from services.memory import _ensure_history_table
+from services.databricks.client import _ensure_connections_table
+from services.databricks.approved_sources import _ensure_approved_sources_table
+from db import db_count, db_table_exists
+from models.schemas import HealthResponse
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+# ── Startup ───────────────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("🏛️  AXA GovernGPT API starting...")
+
+    from llm import get_embeddings_singleton
+    get_embeddings_singleton()
+    print("✅ Embeddings model loaded.")
+
+    _ensure_history_table()
+    print("✅ Conversation history table ready.")
+
+    _ensure_connections_table()
+    print("✅ Databricks connections table ready.")
+
+    _ensure_approved_sources_table()
+    print("✅ Approved sources table ready.")
+
+    yield
+    print("👋 Shutting down.")
+
+
+# ── App ───────────────────────────────────────────────────────────
+app = FastAPI(
+    title="AXA GovernGPT — Data Governance RAG + SQL Agent API",
+    description=(
+        "AI-powered Data Governance platform for AXA Insurance. "
+        "Combines conversational RAG over documents with an agentic SQL engine "
+        "for live Databricks queries against approved source tables. "
+        "Powered by GPT-4o via AXA SecureGPT Hub."
+    ),
+    version="4.0.0",
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
 
-router = APIRouter(prefix="/api/sql-agent", tags=["SQL Agent"])
+# ── CORS ──────────────────────────────────────────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000", "http://localhost:5173",
+        "http://127.0.0.1:3000", "http://127.0.0.1:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Routers ───────────────────────────────────────────────────────
+app.include_router(ingest_router)
+app.include_router(query_router)
+app.include_router(sources_router)
+app.include_router(logs_router)
+app.include_router(profile_router)
+app.include_router(reset_router)
+app.include_router(ks_router)
+app.include_router(databricks_router)
+app.include_router(sql_agent_router)    # ← NEW
 
 
-# ── SQL Agent query ──────────────────────────────────────────────
-
-@router.post("/query", response_model=SqlAgentResponse)
-async def sql_agent_query(request: SqlAgentRequest):
-    """
-    Run the full 6-step agentic SQL loop:
-    1. Intent detection
-    2. Think aloud
-    3. SQL generation
-    4. Execute via Databricks SQL API (read-only enforced)
-    5. Interpret results
-    6. Governance overlay
-
-    Only tables listed in `approved_tables` can be queried.
-    Prohibited write operations are blocked at the validation layer.
-    """
-    # Sync approved sources to SQLite registry
-    if request.approved_tables:
-        sync_approved_sources(
-            session_id    = request.session_id,
-            knowledge_set = request.knowledge_set,
-            connection_id = request.connection_id,
-            tables        = request.approved_tables,
-        )
-
-    # Load conversation history for context
-    chat_history = load_history_as_messages(
-        request.session_id,
-        request.knowledge_set,
-        request.window_k,
-    )
-
+# ── Health ────────────────────────────────────────────────────────
+@app.get("/health", response_model=HealthResponse, tags=["Health"])
+async def health():
+    chroma_count  = 0
+    sources_count = 0
     try:
-        result = run_sql_agent(
-            question      = request.question,
-            session_id    = request.session_id,
-            knowledge_set = request.knowledge_set,
-            chat_history  = chat_history,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"SQL agent error: {str(e)}")
+        vdb = load_vector_store()
+        chroma_count = get_vector_count(vdb)
+        if db_table_exists("document_chunks"):
+            from db import db_query
+            sources_count = len(db_query(
+                "SELECT DISTINCT source_file FROM document_chunks"
+            ))
+    except Exception:
+        pass
 
-    return SqlAgentResponse(**result)
-
-
-# ── Approved Sources management ──────────────────────────────────
-
-@router.get("/approved-sources", response_model=ApprovedSourcesResponse)
-async def get_approved(
-    session_id:    str = QParam(...),
-    knowledge_set: str = QParam(...),
-):
-    """List all approved Databricks tables for a session."""
-    rows = get_approved_sources(session_id, knowledge_set)
-    sources = [
-        ApprovedSourceEntry(
-            full_table   = r["full_table"],
-            catalog      = r["catalog"],
-            schema       = r["db_schema"],
-            table_name   = r["table_name"],
-            connection_id= r["connection_id"],
-            added_at     = r["added_at"],
-        )
-        for r in rows
-    ]
-    return ApprovedSourcesResponse(
-        session_id    = session_id,
-        knowledge_set = knowledge_set,
-        total         = len(sources),
-        sources       = sources,
+    return HealthResponse(
+        status="healthy",
+        version="4.0.0",
+        chroma_vectors=chroma_count,
+        sqlite_chunks=db_count("document_chunks"),
+        sqlite_responses=db_count("llm_responses"),
+        sqlite_conversation_messages=db_count("conversation_history"),
+        sources_loaded=sources_count,
+        timestamp=datetime.now().isoformat()
     )
 
 
-@router.post("/approved-sources/sync", response_model=SyncApprovedSourcesResponse)
-async def sync_approved(request: SyncApprovedSourcesRequest):
-    """
-    Sync the approved table list for a session.
-    Replaces the current list with the provided one.
-    Called by the frontend whenever the user changes their active source selection.
-    """
-    summary = sync_approved_sources(
-        session_id    = request.session_id,
-        knowledge_set = request.knowledge_set,
-        connection_id = request.connection_id,
-        tables        = request.tables,
-    )
-    return SyncApprovedSourcesResponse(
-        session_id    = request.session_id,
-        knowledge_set = request.knowledge_set,
-        added         = summary["added"],
-        removed       = summary["removed"],
-        total         = summary["total"],
-    )
-
-
-@router.delete("/approved-sources")
-async def clear_approved(
-    session_id:    str = QParam(...),
-    knowledge_set: str = QParam(...),
-):
-    """Remove all approved sources for a session."""
-    deleted = clear_approved_sources(session_id, knowledge_set)
+@app.get("/", tags=["Health"])
+async def root():
     return {
-        "status"          : "cleared",
-        "session_id"      : session_id,
-        "knowledge_set"   : knowledge_set,
-        "entries_deleted" : deleted,
+        "service" : "AXA GovernGPT — Data Governance RAG + SQL Agent API",
+        "version" : "4.0.0",
+        "docs"    : "/docs",
+        "health"  : "/health",
+        "features": [
+            "Conversational RAG with SQLite-persisted memory",
+            "Agentic SQL engine with intent detection and source enforcement",
+            "Approved source whitelist — only query explicitly approved tables",
+            "Prohibited operation enforcement (DDL/DML blocked)",
+            "Governance overlay — PII, sensitivity, ownership surfaced on results",
+            "Multi-knowledge-set isolation (ChromaDB)",
+            "File ingestion: PDF, DOCX, CSV, XLSX, JSON, XML, MD, Images",
+            "Databricks Hive Metastore + Unity Catalog integration",
+            "STRUCT / ARRAY / MAP type schema parsing and profiling",
+        ]
     }
 
 
-# ── SQL execution log ────────────────────────────────────────────
-
-@router.get("/log")
-async def get_sql_log(
-    session_id:    str = QParam(...),
-    knowledge_set: str = QParam(...),
-    limit: int = QParam(default=50, ge=1, le=200),
-):
-    """
-    Get the SQL execution history for a session.
-    Shows intent, SQL executed, row count, duration, errors.
-    """
-    rows = db_query(
-        """
-        SELECT run_id, question, intent, sql, row_count,
-               duration_seconds, has_error, created_at
-        FROM sql_agent_log
-        WHERE session_id = ? AND knowledge_set = ?
-        ORDER BY rowid DESC LIMIT ?
-        """,
-        (session_id, knowledge_set, limit),
-    )
-    return {
-        "session_id"   : session_id,
-        "knowledge_set": knowledge_set,
-        "count"        : len(rows),
-        "records"      : rows,
-    }
