@@ -1,591 +1,292 @@
 'use client'
-import { create } from 'zustand'
-import { persist, createJSONStorage } from 'zustand/middleware'
-import type { KnowledgeSet, SourceFile, ChatMessage, DatabricksConnection, DatabricksIngestItem } from '@/types'
-import { slugify } from '@/lib/utils'
+import { useState, useCallback } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+import {
+  ChevronRight, ChevronDown, Database, Table, Eye,
+  Download, Loader2, RefreshCw, AlertCircle, CheckCircle,
+  BookOpen, Layers
+} from 'lucide-react'
+import { api } from '@/lib/api'
+import { cn } from '@/lib/utils'
+import type {
+  DatabricksConnection, DatabricksCatalog,
+  DatabricksSchema, DatabricksTable, DatabricksIngestItem
+} from '@/types'
 
-export interface SessionTokenUsage {
-  prompt_tokens: number
-  completion_tokens: number
-  total_tokens: number
-  turn_count: number
+interface CatalogBrowserProps {
+  connection: DatabricksConnection
+  sessionId: string
+  knowledgeSetId: string
+  ingestItems: DatabricksIngestItem[]
+  onIngestItem: (item: DatabricksIngestItem) => void
+  onUpdateItem: (itemId: string, updates: Partial<DatabricksIngestItem>) => void
 }
 
-const DEFAULT_TOKEN_USAGE: SessionTokenUsage = {
-  prompt_tokens: 0,
-  completion_tokens: 0,
-  total_tokens: 0,
-  turn_count: 0,
-}
+export function CatalogBrowser({
+  connection, sessionId, knowledgeSetId,
+  ingestItems, onIngestItem, onUpdateItem,
+}: CatalogBrowserProps) {
+  const [catalogs, setCatalogs]         = useState<DatabricksCatalog[]>([])
+  const [schemas, setSchemas]           = useState<Record<string, DatabricksSchema[]>>({})
+  const [tables, setTables]             = useState<Record<string, DatabricksTable[]>>({})
+  const [expanded, setExpanded]         = useState<Record<string, boolean>>({})
+  const [loading, setLoading]           = useState<Record<string, boolean>>({})
+  const [errors, setErrors]             = useState<Record<string, string>>({})
+  const [catalogsLoaded, setCatalogsLoaded] = useState(false)
 
-interface SessionState {
-  sessions: KnowledgeSet[]
-  activeSessionId: string | null
-  files: Record<string, SourceFile[]>
-  chats: Record<string, ChatMessage[]>
-  tokenUsage: Record<string, SessionTokenUsage>
-  databricksConnections: DatabricksConnection[]
-  databricksIngestItems: Record<string, DatabricksIngestItem[]>
+  const setLoad  = (key: string, v: boolean) => setLoading(p => ({ ...p, [key]: v }))
+  const setErr   = (key: string, v: string)  => setErrors(p => ({ ...p, [key]: v }))
+  const toggle   = (key: string)             => setExpanded(p => ({ ...p, [key]: !p[key] }))
 
-  // ── SQL Agent: approved tables per session ────────────────────
-  // key: sessionId → { connection_id, tables: string[] }
-  // tables is a list of "catalog.schema.table" strings
-  approvedTables: Record<string, { connection_id: string; tables: string[] }>
-
-  // ── Session actions ───────────────────────────────────────────
-  createSession: (name: string, summary: string) => KnowledgeSet
-  updateSession: (id: string, updates: Partial<KnowledgeSet>) => void
-  deleteSession: (id: string) => void
-  setActiveSession: (id: string | null) => void
-  getActiveSession: () => KnowledgeSet | null
-
-  // ── File actions ──────────────────────────────────────────────
-  addFiles: (sessionId: string, files: SourceFile[]) => void
-  updateFile: (sessionId: string, fileId: string, updates: Partial<SourceFile>) => void
-  removeFile: (sessionId: string, fileId: string) => void
-  getSessionFiles: (sessionId: string) => SourceFile[]
-
-  // ── Chat actions ──────────────────────────────────────────────
-  addMessage: (sessionId: string, msg: ChatMessage) => void
-  updateMessage: (sessionId: string, msgId: string, updates: Partial<ChatMessage>) => void
-  clearChat: (sessionId: string) => void
-  getSessionChat: (sessionId: string) => ChatMessage[]
-
-  // ── Token actions ─────────────────────────────────────────────
-  addTokenUsage: (sessionId: string, usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number }) => void
-  getSessionTokenUsage: (sessionId: string) => SessionTokenUsage
-  resetTokenUsage: (sessionId: string) => void
-
-  // ── Databricks connection actions ─────────────────────────────
-  setDatabricksConnections: (connections: DatabricksConnection[]) => void
-  addDatabricksConnection: (conn: DatabricksConnection) => void
-  removeDatabricksConnection: (connection_id: string) => void
-  getDatabricksConnections: () => DatabricksConnection[]
-
-  // ── Databricks ingest item actions ────────────────────────────
-  addDatabricksIngestItem: (sessionId: string, item: DatabricksIngestItem) => void
-  updateDatabricksIngestItem: (sessionId: string, itemId: string, updates: Partial<DatabricksIngestItem>) => void
-  removeDatabricksIngestItem: (sessionId: string, itemId: string) => void
-  getSessionDatabricksItems: (sessionId: string) => DatabricksIngestItem[]
-
-  // ── Approved tables actions ───────────────────────────────────
-  // Toggle a single table in/out of the approved list
-  toggleApprovedTable: (sessionId: string, connection_id: string, fullTable: string) => void
-  // Replace the entire approved list for a session
-  setApprovedTables: (sessionId: string, connection_id: string, tables: string[]) => void
-  // Clear all approved tables for a session
-  clearApprovedTables: (sessionId: string) => void
-  // Get the approved table names for a session
-  getApprovedTables: (sessionId: string) => string[]
-  // Get the connection_id associated with approved tables
-  getApprovedConnectionId: (sessionId: string) => string | null
-  // Check if a specific table is approved
-  isTableApproved: (sessionId: string, fullTable: string) => boolean
-}
-
-export const useStore = create<SessionState>()(
-  persist(
-    (set, get) => ({
-      sessions: [],
-      activeSessionId: null,
-      files: {},
-      chats: {},
-      tokenUsage: {},
-      databricksConnections: [],
-      databricksIngestItems: {},
-      approvedTables: {},
-
-      // ── Sessions ──────────────────────────────────────────────
-      createSession: (name, summary) => {
-        const id = slugify(name) + '_' + Date.now().toString(36)
-        const session: KnowledgeSet = {
-          id,
-          project_name: name,
-          summary,
-          created_at: new Date().toISOString(),
-          file_count: 0,
-          vector_count: 0,
-          collection_name: `ks_${id}`,
-        }
-        set(s => ({ sessions: [session, ...s.sessions] }))
-        return session
-      },
-
-      updateSession: (id, updates) =>
-        set(s => ({
-          sessions: s.sessions.map(sess =>
-            sess.id === id ? { ...sess, ...updates } : sess
-          ),
-        })),
-
-      deleteSession: (id) =>
-        set(s => {
-          const { [id]: _f, ...files }                 = s.files
-          const { [id]: _c, ...chats }                 = s.chats
-          const { [id]: _t, ...tokenUsage }            = s.tokenUsage
-          const { [id]: _d, ...databricksIngestItems } = s.databricksIngestItems
-          const { [id]: _a, ...approvedTables }        = s.approvedTables
-          return {
-            sessions: s.sessions.filter(sess => sess.id !== id),
-            activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
-            files, chats, tokenUsage, databricksIngestItems, approvedTables,
-          }
-        }),
-
-      setActiveSession: (id) => set({ activeSessionId: id }),
-
-      getActiveSession: () => {
-        const { sessions, activeSessionId } = get()
-        return sessions.find(s => s.id === activeSessionId) ?? null
-      },
-
-      // ── Files ─────────────────────────────────────────────────
-      addFiles: (sessionId, newFiles) =>
-        set(s => ({
-          files: { ...s.files, [sessionId]: [...(s.files[sessionId] ?? []), ...newFiles] },
-          sessions: s.sessions.map(sess =>
-            sess.id === sessionId
-              ? { ...sess, file_count: (s.files[sessionId]?.length ?? 0) + newFiles.length }
-              : sess
-          ),
-        })),
-
-      updateFile: (sessionId, fileId, updates) =>
-        set(s => ({
-          files: {
-            ...s.files,
-            [sessionId]: (s.files[sessionId] ?? []).map(f =>
-              f.id === fileId ? { ...f, ...updates } : f
-            ),
-          },
-        })),
-
-      removeFile: (sessionId, fileId) =>
-        set(s => {
-          const updated = (s.files[sessionId] ?? []).filter(f => f.id !== fileId)
-          return {
-            files: { ...s.files, [sessionId]: updated },
-            sessions: s.sessions.map(sess =>
-              sess.id === sessionId ? { ...sess, file_count: updated.length } : sess
-            ),
-          }
-        }),
-
-      getSessionFiles: (sessionId) => get().files[sessionId] ?? [],
-
-      // ── Chat ──────────────────────────────────────────────────
-      addMessage: (sessionId, msg) =>
-        set(s => ({
-          chats: { ...s.chats, [sessionId]: [...(s.chats[sessionId] ?? []), msg] },
-        })),
-
-      updateMessage: (sessionId, msgId, updates) =>
-        set(s => ({
-          chats: {
-            ...s.chats,
-            [sessionId]: (s.chats[sessionId] ?? []).map(m =>
-              m.id === msgId ? { ...m, ...updates } : m
-            ),
-          },
-        })),
-
-      clearChat: (sessionId) =>
-        set(s => ({ chats: { ...s.chats, [sessionId]: [] } })),
-
-      getSessionChat: (sessionId) => get().chats[sessionId] ?? [],
-
-      // ── Tokens ────────────────────────────────────────────────
-      addTokenUsage: (sessionId, usage) =>
-        set(s => {
-          const prev = s.tokenUsage[sessionId] ?? { ...DEFAULT_TOKEN_USAGE }
-          return {
-            tokenUsage: {
-              ...s.tokenUsage,
-              [sessionId]: {
-                prompt_tokens    : prev.prompt_tokens     + (usage.prompt_tokens     ?? 0),
-                completion_tokens: prev.completion_tokens + (usage.completion_tokens ?? 0),
-                total_tokens     : prev.total_tokens      + (usage.total_tokens      ?? 0),
-                turn_count       : prev.turn_count        + 1,
-              },
-            },
-          }
-        }),
-
-      getSessionTokenUsage: (sessionId) =>
-        get().tokenUsage[sessionId] ?? { ...DEFAULT_TOKEN_USAGE },
-
-      resetTokenUsage: (sessionId) =>
-        set(s => ({
-          tokenUsage: { ...s.tokenUsage, [sessionId]: { ...DEFAULT_TOKEN_USAGE } },
-        })),
-
-      // ── Databricks connections ─────────────────────────────────
-      setDatabricksConnections: (connections) =>
-        set({ databricksConnections: connections }),
-
-      addDatabricksConnection: (conn) =>
-        set(s => ({
-          databricksConnections: [conn, ...s.databricksConnections.filter(c => c.connection_id !== conn.connection_id)],
-        })),
-
-      removeDatabricksConnection: (connection_id) =>
-        set(s => ({
-          databricksConnections: s.databricksConnections.filter(c => c.connection_id !== connection_id),
-        })),
-
-      getDatabricksConnections: () => get().databricksConnections,
-
-      // ── Databricks ingest items ────────────────────────────────
-      addDatabricksIngestItem: (sessionId, item) =>
-        set(s => ({
-          databricksIngestItems: {
-            ...s.databricksIngestItems,
-            [sessionId]: [...(s.databricksIngestItems[sessionId] ?? []), item],
-          },
-        })),
-
-      updateDatabricksIngestItem: (sessionId, itemId, updates) =>
-        set(s => ({
-          databricksIngestItems: {
-            ...s.databricksIngestItems,
-            [sessionId]: (s.databricksIngestItems[sessionId] ?? []).map(item =>
-              item.id === itemId ? { ...item, ...updates } : item
-            ),
-          },
-        })),
-
-      removeDatabricksIngestItem: (sessionId, itemId) =>
-        set(s => ({
-          databricksIngestItems: {
-            ...s.databricksIngestItems,
-            [sessionId]: (s.databricksIngestItems[sessionId] ?? []).filter(item => item.id !== itemId),
-          },
-        })),
-
-      getSessionDatabricksItems: (sessionId) =>
-        get().databricksIngestItems[sessionId] ?? [],
-
-      // ── Approved tables ───────────────────────────────────────
-      toggleApprovedTable: (sessionId, connection_id, fullTable) =>
-        set(s => {
-          const current = s.approvedTables[sessionId] ?? { connection_id, tables: [] }
-          const tables  = current.tables.includes(fullTable)
-            ? current.tables.filter(t => t !== fullTable)
-            : [...current.tables, fullTable]
-          return {
-            approvedTables: {
-              ...s.approvedTables,
-              [sessionId]: { connection_id, tables },
-            },
-          }
-        }),
-
-      setApprovedTables: (sessionId, connection_id, tables) =>
-        set(s => ({
-          approvedTables: {
-            ...s.approvedTables,
-            [sessionId]: { connection_id, tables },
-          },
-        })),
-
-      clearApprovedTables: (sessionId) =>
-        set(s => {
-          const { [sessionId]: _, ...rest } = s.approvedTables
-          return { approvedTables: rest }
-        }),
-
-      getApprovedTables: (sessionId) =>
-        get().approvedTables[sessionId]?.tables ?? [],
-
-      getApprovedConnectionId: (sessionId) =>
-        get().approvedTables[sessionId]?.connection_id ?? null,
-
-      isTableApproved: (sessionId, fullTable) =>
-        (get().approvedTables[sessionId]?.tables ?? []).includes(fullTable),
-    }),
-    {
-      name: 'governgpt-store',
-      version: 4,   // bumped — new approvedTables field
-      storage: createJSONStorage(() => {
-        if (typeof window === 'undefined') {
-          return { getItem: () => null, setItem: () => {}, removeItem: () => {} }
-        }
-        return localStorage
-      }),
-      partialize: (state) => ({
-        sessions              : state.sessions,
-        files                 : state.files,
-        chats                 : state.chats,
-        tokenUsage            : state.tokenUsage,
-        databricksIngestItems : state.databricksIngestItems,
-        approvedTables        : state.approvedTables,
-        // databricksConnections NOT persisted — loaded fresh from backend
-        // activeSessionId NOT persisted — prevents SSR hydration mismatch
-      }),
-      skipHydration: true,
+  // ── Load catalogs ──────────────────────────────────────────────
+  const loadCatalogs = useCallback(async () => {
+    if (catalogsLoaded) return
+    setLoad('catalogs', true)
+    setErr('catalogs', '')
+    try {
+      const res = await api.databricks.listCatalogs(connection.connection_id)
+      setCatalogs(res.catalogs)
+      setCatalogsLoaded(true)
+    } catch (e: unknown) {
+      setErr('catalogs', e instanceof Error ? e.message : 'Failed to load catalogs')
+    } finally {
+      setLoad('catalogs', false)
     }
-  )
-)
+  }, [connection.connection_id, catalogsLoaded])
 
-  prompt_tokens: 0,
-  completion_tokens: 0,
-  total_tokens: 0,
-  turn_count: 0,
-}
-
-interface SessionState {
-  sessions: KnowledgeSet[]
-  activeSessionId: string | null
-  files: Record<string, SourceFile[]>
-  chats: Record<string, ChatMessage[]>
-  tokenUsage: Record<string, SessionTokenUsage>
-
-  // ── Databricks ────────────────────────────────────────────────
-  // Connections are global (not per-session) — one connection can
-  // be used across multiple knowledge sets.
-  databricksConnections: DatabricksConnection[]
-  // Ingested tables are tracked per session for UI status display
-  databricksIngestItems: Record<string, DatabricksIngestItem[]>
-
-  // ── Session actions ───────────────────────────────────────────
-  createSession: (name: string, summary: string) => KnowledgeSet
-  updateSession: (id: string, updates: Partial<KnowledgeSet>) => void
-  deleteSession: (id: string) => void
-  setActiveSession: (id: string | null) => void
-  getActiveSession: () => KnowledgeSet | null
-
-  // ── File actions ──────────────────────────────────────────────
-  addFiles: (sessionId: string, files: SourceFile[]) => void
-  updateFile: (sessionId: string, fileId: string, updates: Partial<SourceFile>) => void
-  removeFile: (sessionId: string, fileId: string) => void
-  getSessionFiles: (sessionId: string) => SourceFile[]
-
-  // ── Chat actions ──────────────────────────────────────────────
-  addMessage: (sessionId: string, msg: ChatMessage) => void
-  updateMessage: (sessionId: string, msgId: string, updates: Partial<ChatMessage>) => void
-  clearChat: (sessionId: string) => void
-  getSessionChat: (sessionId: string) => ChatMessage[]
-
-  // ── Token actions ─────────────────────────────────────────────
-  addTokenUsage: (sessionId: string, usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number }) => void
-  getSessionTokenUsage: (sessionId: string) => SessionTokenUsage
-  resetTokenUsage: (sessionId: string) => void
-
-  // ── Databricks connection actions ─────────────────────────────
-  setDatabricksConnections: (connections: DatabricksConnection[]) => void
-  addDatabricksConnection: (conn: DatabricksConnection) => void
-  removeDatabricksConnection: (connection_id: string) => void
-  getDatabricksConnections: () => DatabricksConnection[]
-
-  // ── Databricks ingest item actions ────────────────────────────
-  addDatabricksIngestItem: (sessionId: string, item: DatabricksIngestItem) => void
-  updateDatabricksIngestItem: (sessionId: string, itemId: string, updates: Partial<DatabricksIngestItem>) => void
-  removeDatabricksIngestItem: (sessionId: string, itemId: string) => void
-  getSessionDatabricksItems: (sessionId: string) => DatabricksIngestItem[]
-}
-
-export const useStore = create<SessionState>()(
-  persist(
-    (set, get) => ({
-      sessions: [],
-      activeSessionId: null,
-      files: {},
-      chats: {},
-      tokenUsage: {},
-      databricksConnections: [],
-      databricksIngestItems: {},
-
-      // ── Sessions ──────────────────────────────────────────────
-      createSession: (name, summary) => {
-        const id = slugify(name) + '_' + Date.now().toString(36)
-        const session: KnowledgeSet = {
-          id,
-          project_name: name,
-          summary,
-          created_at: new Date().toISOString(),
-          file_count: 0,
-          vector_count: 0,
-          collection_name: `ks_${id}`,
-        }
-        set(s => ({ sessions: [session, ...s.sessions] }))
-        return session
-      },
-
-      updateSession: (id, updates) =>
-        set(s => ({
-          sessions: s.sessions.map(sess =>
-            sess.id === id ? { ...sess, ...updates } : sess
-          ),
-        })),
-
-      deleteSession: (id) =>
-        set(s => {
-          const { [id]: _f, ...files }                    = s.files
-          const { [id]: _c, ...chats }                    = s.chats
-          const { [id]: _t, ...tokenUsage }               = s.tokenUsage
-          const { [id]: _d, ...databricksIngestItems }    = s.databricksIngestItems
-          return {
-            sessions: s.sessions.filter(sess => sess.id !== id),
-            activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
-            files, chats, tokenUsage, databricksIngestItems,
-          }
-        }),
-
-      setActiveSession: (id) => set({ activeSessionId: id }),
-
-      getActiveSession: () => {
-        const { sessions, activeSessionId } = get()
-        return sessions.find(s => s.id === activeSessionId) ?? null
-      },
-
-      // ── Files ─────────────────────────────────────────────────
-      addFiles: (sessionId, newFiles) =>
-        set(s => ({
-          files: { ...s.files, [sessionId]: [...(s.files[sessionId] ?? []), ...newFiles] },
-          sessions: s.sessions.map(sess =>
-            sess.id === sessionId
-              ? { ...sess, file_count: (s.files[sessionId]?.length ?? 0) + newFiles.length }
-              : sess
-          ),
-        })),
-
-      updateFile: (sessionId, fileId, updates) =>
-        set(s => ({
-          files: {
-            ...s.files,
-            [sessionId]: (s.files[sessionId] ?? []).map(f =>
-              f.id === fileId ? { ...f, ...updates } : f
-            ),
-          },
-        })),
-
-      removeFile: (sessionId, fileId) =>
-        set(s => {
-          const updated = (s.files[sessionId] ?? []).filter(f => f.id !== fileId)
-          return {
-            files: { ...s.files, [sessionId]: updated },
-            sessions: s.sessions.map(sess =>
-              sess.id === sessionId ? { ...sess, file_count: updated.length } : sess
-            ),
-          }
-        }),
-
-      getSessionFiles: (sessionId) => get().files[sessionId] ?? [],
-
-      // ── Chat ──────────────────────────────────────────────────
-      addMessage: (sessionId, msg) =>
-        set(s => ({
-          chats: { ...s.chats, [sessionId]: [...(s.chats[sessionId] ?? []), msg] },
-        })),
-
-      updateMessage: (sessionId, msgId, updates) =>
-        set(s => ({
-          chats: {
-            ...s.chats,
-            [sessionId]: (s.chats[sessionId] ?? []).map(m =>
-              m.id === msgId ? { ...m, ...updates } : m
-            ),
-          },
-        })),
-
-      clearChat: (sessionId) =>
-        set(s => ({ chats: { ...s.chats, [sessionId]: [] } })),
-
-      getSessionChat: (sessionId) => get().chats[sessionId] ?? [],
-
-      // ── Tokens ────────────────────────────────────────────────
-      addTokenUsage: (sessionId, usage) =>
-        set(s => {
-          const prev = s.tokenUsage[sessionId] ?? { ...DEFAULT_TOKEN_USAGE }
-          return {
-            tokenUsage: {
-              ...s.tokenUsage,
-              [sessionId]: {
-                prompt_tokens    : prev.prompt_tokens     + (usage.prompt_tokens     ?? 0),
-                completion_tokens: prev.completion_tokens + (usage.completion_tokens ?? 0),
-                total_tokens     : prev.total_tokens      + (usage.total_tokens      ?? 0),
-                turn_count       : prev.turn_count        + 1,
-              },
-            },
-          }
-        }),
-
-      getSessionTokenUsage: (sessionId) =>
-        get().tokenUsage[sessionId] ?? { ...DEFAULT_TOKEN_USAGE },
-
-      resetTokenUsage: (sessionId) =>
-        set(s => ({
-          tokenUsage: { ...s.tokenUsage, [sessionId]: { ...DEFAULT_TOKEN_USAGE } },
-        })),
-
-      // ── Databricks connections ─────────────────────────────────
-      // Loaded from backend on workspace open — not persisted locally
-      // (connections live in encrypted SQLite on the server)
-      setDatabricksConnections: (connections) =>
-        set({ databricksConnections: connections }),
-
-      addDatabricksConnection: (conn) =>
-        set(s => ({
-          databricksConnections: [conn, ...s.databricksConnections.filter(c => c.connection_id !== conn.connection_id)],
-        })),
-
-      removeDatabricksConnection: (connection_id) =>
-        set(s => ({
-          databricksConnections: s.databricksConnections.filter(c => c.connection_id !== connection_id),
-        })),
-
-      getDatabricksConnections: () => get().databricksConnections,
-
-      // ── Databricks ingest items ────────────────────────────────
-      addDatabricksIngestItem: (sessionId, item) =>
-        set(s => ({
-          databricksIngestItems: {
-            ...s.databricksIngestItems,
-            [sessionId]: [...(s.databricksIngestItems[sessionId] ?? []), item],
-          },
-        })),
-
-      updateDatabricksIngestItem: (sessionId, itemId, updates) =>
-        set(s => ({
-          databricksIngestItems: {
-            ...s.databricksIngestItems,
-            [sessionId]: (s.databricksIngestItems[sessionId] ?? []).map(item =>
-              item.id === itemId ? { ...item, ...updates } : item
-            ),
-          },
-        })),
-
-      removeDatabricksIngestItem: (sessionId, itemId) =>
-        set(s => ({
-          databricksIngestItems: {
-            ...s.databricksIngestItems,
-            [sessionId]: (s.databricksIngestItems[sessionId] ?? []).filter(item => item.id !== itemId),
-          },
-        })),
-
-      getSessionDatabricksItems: (sessionId) =>
-        get().databricksIngestItems[sessionId] ?? [],
-    }),
-    {
-      name: 'governgpt-store',
-      version: 3,   // bumped — new databricks fields
-      storage: createJSONStorage(() => {
-        if (typeof window === 'undefined') {
-          return { getItem: () => null, setItem: () => {}, removeItem: () => {} }
-        }
-        return localStorage
-      }),
-      partialize: (state) => ({
-        sessions              : state.sessions,
-        files                 : state.files,
-        chats                 : state.chats,
-        tokenUsage            : state.tokenUsage,
-        databricksIngestItems : state.databricksIngestItems,
-        // databricksConnections NOT persisted — loaded fresh from backend
-        // activeSessionId NOT persisted — prevents SSR hydration mismatch
-      }),
-      skipHydration: true,
+  // ── Load schemas ───────────────────────────────────────────────
+  const loadSchemas = useCallback(async (catalog: string) => {
+    if (schemas[catalog]) { toggle(catalog); return }
+    setLoad(catalog, true)
+    setErr(catalog, '')
+    try {
+      const res = await api.databricks.listSchemas(connection.connection_id, catalog)
+      setSchemas(p => ({ ...p, [catalog]: res.schemas }))
+      toggle(catalog)
+    } catch (e: unknown) {
+      setErr(catalog, e instanceof Error ? e.message : 'Failed')
+    } finally {
+      setLoad(catalog, false)
     }
-  )
-)
+  }, [connection.connection_id, schemas])
 
+  // ── Load tables ────────────────────────────────────────────────
+  const loadTables = useCallback(async (catalog: string, schema: string) => {
+    const key = `${catalog}.${schema}`
+    if (tables[key]) { toggle(key); return }
+    setLoad(key, true)
+    setErr(key, '')
+    try {
+      const res = await api.databricks.listTables(connection.connection_id, catalog, schema)
+      setTables(p => ({ ...p, [key]: res.tables }))
+      toggle(key)
+    } catch (e: unknown) {
+      setErr(key, e instanceof Error ? e.message : 'Failed')
+    } finally {
+      setLoad(key, false)
+    }
+  }, [connection.connection_id, tables])
+
+  // ── Ingest a table ─────────────────────────────────────────────
+  const handleIngest = useCallback(async (tbl: DatabricksTable) => {
+    const itemId = Math.random().toString(36).slice(2)
+    const newItem: DatabricksIngestItem = {
+      id           : itemId,
+      connection_id: connection.connection_id,
+      catalog      : tbl.catalog,
+      schema       : tbl.schema,
+      table        : tbl.table_name,
+      table_type   : tbl.table_type,
+      status       : 'profiling',
+      progress     : 0,
+    }
+    onIngestItem(newItem)
+
+    // Simulate progress tick
+    const tick = setInterval(() => {
+      onUpdateItem(itemId, { progress: Math.min((newItem.progress || 0) + 8, 85) })
+    }, 600)
+
+    try {
+      const result = await api.databricks.ingestTable(connection.connection_id, {
+        knowledge_set: knowledgeSetId,
+        catalog      : tbl.catalog,
+        schema       : tbl.schema,
+        table        : tbl.table_name,
+        sample_rows  : 500_000,
+      })
+      clearInterval(tick)
+      onUpdateItem(itemId, {
+        status          : 'ready',
+        progress        : 100,
+        chunk_count     : result.chunks,
+        row_count       : result.row_count,
+        duration_seconds: result.duration_seconds,
+        ingested_at     : result.profiled_at,
+      })
+    } catch (e: unknown) {
+      clearInterval(tick)
+      onUpdateItem(itemId, {
+        status: 'error',
+        error : e instanceof Error ? e.message : 'Ingestion failed',
+      })
+    }
+  }, [connection.connection_id, knowledgeSetId, onIngestItem, onUpdateItem])
+
+  const isIngested = (tbl: DatabricksTable) =>
+    ingestItems.some(
+      i => i.catalog === tbl.catalog && i.schema === tbl.schema &&
+           i.table === tbl.table_name && i.status === 'ready'
+    )
+
+  const isIngesting = (tbl: DatabricksTable) =>
+    ingestItems.some(
+      i => i.catalog === tbl.catalog && i.schema === tbl.schema &&
+           i.table === tbl.table_name && (i.status === 'profiling' || i.status === 'ingesting')
+    )
+
+  return (
+    <div className="text-xs">
+      {/* Connection header */}
+      <button
+        onClick={() => { loadCatalogs(); toggle('root') }}
+        className="w-full flex items-center gap-2 px-2 py-2 rounded-lg hover:bg-axa-50 text-ink-700 transition-colors group"
+      >
+        {loading['catalogs'] ? (
+          <Loader2 className="w-3.5 h-3.5 text-axa-800 animate-spin flex-shrink-0" />
+        ) : (
+          expanded['root']
+            ? <ChevronDown className="w-3.5 h-3.5 text-ink-400 flex-shrink-0" />
+            : <ChevronRight className="w-3.5 h-3.5 text-ink-400 flex-shrink-0" />
+        )}
+        <BookOpen className="w-3.5 h-3.5 text-axa-800 flex-shrink-0" />
+        <span className="font-semibold text-ink-800 truncate">{connection.connection_name}</span>
+        <button
+          onClick={e => { e.stopPropagation(); setCatalogsLoaded(false); loadCatalogs() }}
+          className="ml-auto opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-axa-100 text-ink-400"
+          title="Refresh"
+        >
+          <RefreshCw className="w-3 h-3" />
+        </button>
+      </button>
+
+      {errors['catalogs'] && (
+        <div className="flex items-center gap-1.5 px-3 py-1.5 text-axared-500 bg-axared-50 rounded-lg mt-1 mx-2">
+          <AlertCircle className="w-3 h-3 flex-shrink-0" />
+          <span>{errors['catalogs']}</span>
+        </div>
+      )}
+
+      {/* Catalog tree */}
+      <AnimatePresence>
+        {expanded['root'] && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden ml-2"
+          >
+            {catalogs.map(cat => (
+              <div key={cat.catalog}>
+                {/* Catalog row */}
+                <button
+                  onClick={() => loadSchemas(cat.catalog)}
+                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-ink-50 text-ink-600 transition-colors"
+                >
+                  {loading[cat.catalog] ? (
+                    <Loader2 className="w-3 h-3 animate-spin flex-shrink-0" />
+                  ) : expanded[cat.catalog] ? (
+                    <ChevronDown className="w-3 h-3 text-ink-300 flex-shrink-0" />
+                  ) : (
+                    <ChevronRight className="w-3 h-3 text-ink-300 flex-shrink-0" />
+                  )}
+                  <Layers className="w-3 h-3 text-axa-600 flex-shrink-0" />
+                  <span className="truncate font-medium">{cat.catalog}</span>
+                </button>
+
+                {errors[cat.catalog] && (
+                  <p className="text-[10px] text-axared-500 px-8 py-1">{errors[cat.catalog]}</p>
+                )}
+
+                {/* Schemas */}
+                <AnimatePresence>
+                  {expanded[cat.catalog] && (schemas[cat.catalog] ?? []).map(sch => {
+                    const schKey = `${cat.catalog}.${sch.schema}`
+                    return (
+                      <motion.div key={sch.schema}
+                        initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                        className="ml-4"
+                      >
+                        {/* Schema row */}
+                        <button
+                          onClick={() => loadTables(cat.catalog, sch.schema)}
+                          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-ink-50 text-ink-500 transition-colors"
+                        >
+                          {loading[schKey] ? (
+                            <Loader2 className="w-3 h-3 animate-spin flex-shrink-0" />
+                          ) : expanded[schKey] ? (
+                            <ChevronDown className="w-3 h-3 text-ink-300 flex-shrink-0" />
+                          ) : (
+                            <ChevronRight className="w-3 h-3 text-ink-300 flex-shrink-0" />
+                          )}
+                          <Database className="w-3 h-3 text-ink-400 flex-shrink-0" />
+                          <span className="truncate">{sch.schema}</span>
+                        </button>
+
+                        {/* Tables */}
+                        <AnimatePresence>
+                          {expanded[schKey] && (tables[schKey] ?? []).map(tbl => {
+                            const ingested  = isIngested(tbl)
+                            const ingesting = isIngesting(tbl)
+                            return (
+                              <motion.div
+                                key={tbl.table_name}
+                                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                                className="ml-4 flex items-center gap-1.5 px-2 py-1.5 rounded-lg hover:bg-axa-50 group transition-colors"
+                              >
+                                {tbl.table_type === 'VIEW'
+                                  ? <Eye className="w-3 h-3 text-ink-300 flex-shrink-0" />
+                                  : <Table className="w-3 h-3 text-ink-400 flex-shrink-0" />
+                                }
+                                <span className={cn(
+                                  'flex-1 truncate',
+                                  ingested ? 'text-emerald-700 font-medium' : 'text-ink-500'
+                                )}>
+                                  {tbl.table_name}
+                                </span>
+                                <span className="text-[9px] text-ink-300">{tbl.table_type}</span>
+
+                                {/* Ingest action */}
+                                {ingested ? (
+                                  <CheckCircle className="w-3 h-3 text-emerald-500 flex-shrink-0" />
+                                ) : ingesting ? (
+                                  <Loader2 className="w-3 h-3 text-axa-800 animate-spin flex-shrink-0" />
+                                ) : (
+                                  <button
+                                    onClick={() => handleIngest(tbl)}
+                                    className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-axa-100 text-axa-700 flex-shrink-0 transition-all"
+                                    title={`Ingest ${tbl.table_name} into knowledge set`}
+                                  >
+                                    <Download className="w-3 h-3" />
+                                  </button>
+                                )}
+                              </motion.div>
+                            )
+                          })}
+                        </AnimatePresence>
+                      </motion.div>
+                    )
+                  })}
+                </AnimatePresence>
+              </div>
+            ))}
+
+            {catalogsLoaded && catalogs.length === 0 && (
+              <p className="text-[10px] text-ink-400 px-6 py-2">No catalogs found.</p>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
