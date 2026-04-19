@@ -109,29 +109,50 @@ Respond with ONLY the intent type keyword, nothing else."""),
 ])
 
 SQL_GENERATION_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """You are a Databricks SQL expert generating read-only SQL queries.
+    ("system", """You are a Databricks SQL expert generating precise read-only SQL queries.
 
 APPROVED TABLES (you may ONLY reference these):
 {approved_sources_list}
 
-CRITICAL RULES — READ CAREFULLY:
-1. Generate EXACTLY ONE SQL statement per response. Never output two SELECT statements.
-2. If the user asks about multiple tables (e.g. "show first 10 rows from all tables"):
-   - Pick the FIRST table in the approved list and query only that one.
-   - The system will automatically run subsequent queries for other tables.
-3. Only use SELECT, aggregations, window functions, CTEs, JOINs, subqueries.
-4. Never use DROP, DELETE, INSERT, UPDATE, TRUNCATE, ALTER, GRANT, REVOKE.
-5. Always use fully qualified table names exactly as shown in the approved list.
-6. Use clear column aliases. For complex queries, use CTEs.
-7. Add LIMIT 200 unless the user explicitly wants all rows or asks for aggregates.
-8. Return ONLY the SQL statement — no markdown fences, no explanation, no preamble, no semicolons at the end.
-9. ONE STATEMENT ONLY. If you generate more than one SELECT, your output is wrong.
+DETECTED INTENT: {intent}
 
-Table schema context (from RAG knowledge base):
+CRITICAL RULES:
+1. Generate EXACTLY ONE SQL statement. Never output two SELECT statements.
+2. Always use fully qualified table names exactly as shown in the approved list.
+3. Match the SQL to what the user is actually asking — examples by intent:
+
+   SIMPLE_LOOKUP (show/display/get rows):
+     → SELECT * FROM catalog.schema.table LIMIT 10
+
+   AGGREGATION (count/sum/how many/group by):
+     → SELECT country, COUNT(*) AS customer_count
+        FROM catalog.schema.table
+        WHERE country = 'United Kingdom'
+        GROUP BY country
+     → SELECT COUNT(*) AS total FROM catalog.schema.table WHERE status = 'Active'
+     → SELECT DISTINCT status FROM catalog.schema.table
+
+   COMPARISON (compare/vs/by dimension):
+     → SELECT region, COUNT(*) AS claims, AVG(amount) AS avg_amount
+        FROM catalog.schema.table GROUP BY region ORDER BY claims DESC
+
+   JOIN_OPERATION:
+     → SELECT a.col1, b.col2 FROM catalog.schema.table1 a
+        JOIN catalog.schema.table2 b ON a.id = b.id LIMIT 200
+
+4. FILTERS: If the user specifies a WHERE condition (country = X, status = Y, date > Z),
+   YOU MUST include that exact filter. Never ignore filter conditions.
+5. AGGREGATIONS: If the user asks "how many", "count", "total", "sum", "average",
+   use COUNT(*), SUM(), AVG() etc. — NEVER return raw rows for aggregate questions.
+6. DISTINCT: If the user asks for "distinct values", "unique values", use SELECT DISTINCT.
+7. Do NOT add LIMIT to aggregate queries (COUNT, SUM, AVG, GROUP BY).
+8. Add LIMIT 200 only for row-fetch queries.
+9. Return ONLY the SQL — no markdown fences, no explanation, no semicolons at end.
+
+Table schema context:
 {schema_context}
 
 User request: {question}"""),
-    MessagesPlaceholder(variable_name="chat_history"),
 ])
 
 THINK_ALOUD_PROMPT = ChatPromptTemplate.from_messages([
@@ -482,13 +503,18 @@ def run_sql_agent(
             "approved_sources_list": approved_list_str,
             "schema_context"       : schema_context or rag_context,
             "question"             : question,
-            "chat_history"         : chat_history,
+            "intent"               : intent,   # tells LLM what SQL pattern to generate
+            # Note: chat_history intentionally NOT passed here.
+            # SQL generation must be stateless — the current question
+            # fully specifies what query to write. Passing history causes
+            # the LLM to pattern-match prior queries (e.g. always SELECT *)
+            # instead of correctly handling aggregations and filters.
         }).strip()
 
         # Strip any accidental markdown code fences
         generated_sql = re.sub(r"^```sql\s*", "", generated_sql, flags=re.IGNORECASE)
-        generated_sql = re.sub(r"^```\s*", "", generated_sql)
-        generated_sql = re.sub(r"\s*```$", "", generated_sql).strip()
+        generated_sql = re.sub(r"^```\s*",    "", generated_sql)
+        generated_sql = re.sub(r"\s*```$",    "", generated_sql).strip()
 
     except Exception as e:
         base_result["error"] = f"SQL generation failed: {str(e)}"
