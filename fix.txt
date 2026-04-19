@@ -5,13 +5,14 @@ Conversational RAG + SQL Agent hybrid engine.
 
 Routing logic:
   1. If enable_sql_agent=True and approved Databricks tables exist:
-     → Run intent detection
-     → If SQL intent found: execute agentic SQL loop, then optionally
-       augment with RAG context for governance overlay
-     → If NOT_SQL intent: fall through to standard RAG
+     → Keyword pre-classifier runs first (no LLM call, no ChromaDB lookup)
+     → If definite SQL intent: skip RAG retrieval, go straight to SQL agent
+     → If ambiguous: run RAG retrieval for context, then SQL agent
+     → If NOT_SQL: fall through to standard RAG
   2. Standard RAG: condense → retrieve → answer
   3. Direct (no retrieval): history-aware direct LLM call
 
+Compatible with LangChain >= 0.2.x — no deprecated chains used.
 """
 
 import time
@@ -19,10 +20,8 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-# from langchain_core.runnables import RunnablePassthrough, RunnableLambda
-
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
+from langchain_core.messages import BaseMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.documents import Document
 from langchain_community.vectorstores import Chroma
@@ -30,16 +29,11 @@ from langchain_community.vectorstores import Chroma
 from llm import get_llm
 from db import db_insert
 from config import CHAT_MODEL, RETRIEVAL_K
-from services.memory import (
-    save_turn,
-    load_history_as_messages,
-    DEFAULT_WINDOW_K,
-)
+from services.memory import save_turn, load_history_as_messages, DEFAULT_WINDOW_K
+
 
 # ── Prompts ──────────────────────────────────────────────────────
 
-# Step 2 — Condense follow-up question into a self-contained question.
-# Only runs when chat_history is non-empty.
 CONDENSE_PROMPT = ChatPromptTemplate.from_messages([
     (
         "system",
@@ -53,20 +47,30 @@ CONDENSE_PROMPT = ChatPromptTemplate.from_messages([
     ("human", "{question}"),
 ])
 
-# Step 4 — Final answer generation with context + history + question.
 QA_PROMPT = ChatPromptTemplate.from_messages([
     (
         "system",
-        """You are an expert Data & AI Advisor specialising in the insurance industry, with deep, cross-domain expertise spanning:
+        """You are an expert Data & AI Advisor specialising in the insurance industry, \
+with deep, cross-domain expertise spanning:
 
-- **Data Architecture** – enterprise data platforms, lakehouse/warehouse design, cloud-native patterns (Azure, AWS, GCP), data mesh, data fabric, integration patterns (ETL/ELT, CDC, event streaming)
-- **Data Engineering** – pipeline design, PySpark, Databricks, Delta Lake, dbt, orchestration (Airflow, ADF), data contracts, data quality frameworks, CI/CD for data
-- **Data Modelling** – dimensional modelling (Kimball, Inmon), entity-relationship design, insurance-specific schemas (policy, claims, reinsurance, premium), semantic layers
-- **Data Management & Governance** – GDPR, Solvency II, IFRS 17, data cataloguing, lineage, stewardship, metadata management, data contracts, DQ SLAs, BCBS 239
-- **AI & Advanced Analytics** – RAG architectures, LLM integration, MLOps, predictive modelling (churn, fraud, risk scoring), NLP on claims/policy documents, agentic AI
-- **Business Intelligence & Reporting** – Power BI, Tableau, KPI frameworks, self-service analytics, observability dashboards, actuarial and regulatory reporting
+- **Data Architecture** – enterprise data platforms, lakehouse/warehouse design, \
+cloud-native patterns (Azure, AWS, GCP), data mesh, data fabric, integration patterns \
+(ETL/ELT, CDC, event streaming)
+- **Data Engineering** – pipeline design, PySpark, Databricks, Delta Lake, dbt, \
+orchestration (Airflow, ADF), data contracts, data quality frameworks, CI/CD for data
+- **Data Modelling** – dimensional modelling (Kimball, Inmon), entity-relationship design, \
+insurance-specific schemas (policy, claims, reinsurance, premium), semantic layers
+- **Data Management & Governance** – GDPR, Solvency II, IFRS 17, data cataloguing, lineage, \
+stewardship, metadata management, data contracts, DQ SLAs, BCBS 239
+- **AI & Advanced Analytics** – RAG architectures, LLM integration, MLOps, predictive \
+modelling (churn, fraud, risk scoring), NLP on claims/policy documents, agentic AI
+- **Business Intelligence & Reporting** – Power BI, Tableau, KPI frameworks, self-service \
+analytics, observability dashboards, actuarial and regulatory reporting
 
-You operate exclusively within the context of the **insurance industry** — including Life, Non-Life (P&C), Health, Reinsurance, and Global Business Services functions. All responses should reflect the regulatory environment, data domains, and operational realities of insurance organisations.
+You operate exclusively within the context of the **insurance industry** — including Life, \
+Non-Life (P&C), Health, Reinsurance, and Global Business Services functions. All responses \
+should reflect the regulatory environment, data domains, and operational realities of \
+insurance organisations.
 
 {approved_sources_block}
 
@@ -82,7 +86,8 @@ You also have the full conversation history for this session. Use it to:
 - Build on previously identified entities, owners, issues, or recommendations
 - Avoid repeating analysis already covered unless asked to expand
 - Explicitly reference prior findings when relevant
-  (e.g. "Building on the schema gaps identified earlier...", "As noted in the pipeline review above...")
+  (e.g. "Building on the schema gaps identified earlier...", \
+"As noted in the pipeline review above...")
 
 Response structure (adapt based on question type):
 
@@ -98,7 +103,8 @@ Response structure (adapt based on question type):
 
 Always:
 - State which source file your insights are drawn from
-- Anchor responses in insurance industry context (e.g. policy lifecycle, claims processing, actuarial needs, regulatory reporting)
+- Anchor responses in insurance industry context \
+(e.g. policy lifecycle, claims processing, actuarial needs, regulatory reporting)
 - Flag any assumptions made when context is incomplete
 
 IMPORTANT — SQL on local files:
@@ -106,18 +112,20 @@ If the user asks to run SQL against a locally uploaded file (CSV, Excel, PDF), r
 "SQL query execution is only supported for approved Databricks tables, \
 not for locally uploaded files."
 
-If the answer is not in the context or conversation history, say so clearly. Do not hallucinate.""",
+If the answer is not in the context or conversation history, say so clearly. \
+Do not hallucinate.""",
     ),
     MessagesPlaceholder(variable_name="chat_history"),
     ("human", "{question}"),
 ])
 
-# ── Approved sources block builder ───────────────────────────────
+
+# ── Approved sources block ────────────────────────────────────────
 
 def _build_approved_sources_block(approved_tables: list[str]) -> str:
     """
-    Build the <approved_sources> XML block injected into the system prompt.
-    This tells the LLM exactly which Databricks tables are approved for SQL.
+    Injected into the RAG system prompt only when routing reaches the RAG path.
+    This only happens for genuine governance/doc questions (NOT_SQL intent).
     """
     if not approved_tables:
         return ""
@@ -129,27 +137,17 @@ APPROVED DATABRICKS TABLES (available for live SQL queries via the SQL Agent):
 </approved_sources>
 
 NOTE: You are answering a governance or documentation question — NOT a live data query.
-If the user is asking to retrieve actual rows or run analytics, politely tell them:
-"To query live data from your Databricks tables, please ask a specific data question like 'Show me the first 10 rows of claims_casualty_bronze' and the SQL Agent will execute it."
+If the user is asking to retrieve actual rows or run analytics, tell them:
+"To query live data, ask a specific data question like \
+'Show me the first 10 rows of claims_casualty_bronze' and the SQL Agent will execute it."
 Do NOT suggest users run SQL manually in their Databricks environment.
 """
 
-def _format_docs(docs: list[Document]) -> str:
-    """Format retrieved documents into a single context string."""
-    parts = []
-    for doc in docs:
-        src = doc.metadata.get("source_file", "unknown")
-        parts.append(f"[Source: {src}]\n{doc.page_content}")
-    return "\n\n---\n\n".join(parts)
 
-
-# ── Retriever ────────────────────────────────────────────────────
+# ── Retriever ─────────────────────────────────────────────────────
 
 def _build_retriever(vectordb: Chroma, k: int):
-    """
-    MMR retriever that guarantees representation from every source file.
-    Returns a plain Python callable — no LangChain wrapper needed for LCEL.
-    """
+    """MMR retriever with multi-source representation guarantee."""
     base = vectordb.as_retriever(
         search_type="mmr",
         search_kwargs={"k": k * 2, "fetch_k": k * 6},
@@ -157,22 +155,16 @@ def _build_retriever(vectordb: Chroma, k: int):
 
     def multi_source_retrieve(query: str) -> list[Document]:
         docs = base.invoke(query)
-
-        # Deduplicate by source, keeping first hit per file
         seen: dict[str, Document] = {}
         for doc in docs:
             src = doc.metadata.get("source_file", "unknown")
             if src not in seen:
                 seen[src] = doc
-
-        # If only one source represented, force-fetch from all other files
         if len(seen) < 2:
             try:
                 all_srcs = list({
                     d.metadata.get("source_file", "unknown")
-                    for d in vectordb.similarity_search(
-                        "data governance summary", k=50
-                    )
+                    for d in vectordb.similarity_search("data governance summary", k=50)
                 })
                 for src in all_srcs:
                     if src not in seen:
@@ -182,9 +174,7 @@ def _build_retriever(vectordb: Chroma, k: int):
                         if results:
                             seen[src] = results[0]
             except Exception:
-                pass  
-
-        # Truncate large chunks to prevent context window overflow
+                pass
         truncated: list[Document] = []
         for doc in seen.values():
             if len(doc.page_content) > 1500:
@@ -193,22 +183,24 @@ def _build_retriever(vectordb: Chroma, k: int):
                     metadata=doc.metadata,
                 )
             truncated.append(doc)
-
         return truncated
 
     return multi_source_retrieve
 
-# ── Token extraction ─────────────────────────────────────────────
+
+def _format_docs(docs: list[Document]) -> str:
+    parts = []
+    for doc in docs:
+        src = doc.metadata.get("source_file", "unknown")
+        parts.append(f"[Source: {src}]\n{doc.page_content}")
+    return "\n\n---\n\n".join(parts)
+
+
+# ── Token extraction ──────────────────────────────────────────────
 
 def _extract_tokens(llm_response) -> dict:
-    """
-    Safely extract token counts from an LLM AIMessage response.
-    AzureChatOpenAI stores usage in response_metadata and usage_metadata.
-    Returns zeros if not available (e.g. streaming or missing fields).
-    """
     try:
         usage = getattr(llm_response, "usage_metadata", None) or {}
-        meta = getattr(llm_response, "response_metadata", None) or {}
         return {
             "prompt_tokens"    : int(usage.get("input_tokens",  0)),
             "completion_tokens": int(usage.get("output_tokens", 0)),
@@ -236,18 +228,19 @@ def query_governance(
     Hybrid query engine: SQL Agent + RAG.
 
     Routing:
-      1. If enable_sql_agent=True and approved tables exist:
-         → Detect SQL intent
-         → If SQL needed: run sql_agent, optionally augment with RAG governance context
-         → If NOT_SQL: fall through to standard RAG
-      2. Standard LCEL RAG (condense → retrieve → answer)
-      3. Direct LLM (no retrieval, history-aware)
+      1. If enable_sql_agent=True and approved_tables exist:
+         a. Keyword pre-classifier runs instantly (no LLM, no ChromaDB)
+         b. Definite SQL intent → skip RAG retrieval, run SQL agent directly
+         c. Ambiguous → run RAG retrieval for context, then SQL agent
+         d. NOT_SQL → fall through to standard RAG
+      2. Standard LCEL RAG: condense → retrieve → answer
+      3. Direct LLM: history-aware, no retrieval
     """
-    start  = time.time()
-    run_id = str(uuid.uuid4())
-    answer = ""
-    llm    = get_llm()
-    parser = StrOutputParser()
+    start   = time.time()
+    run_id  = str(uuid.uuid4())
+    answer  = ""
+    llm     = get_llm()
+    parser  = StrOutputParser()
 
     if not session_id:
         session_id = knowledge_set
@@ -255,8 +248,6 @@ def query_governance(
     approved_tables = approved_tables or []
 
     # ── Sync approved sources to SQLite ──────────────────────────
-    # This keeps the backend registry in sync with the frontend's
-    # active source selection on every query.
     if approved_tables and connection_id:
         try:
             from services.databricks.approved_sources import sync_approved_sources
@@ -267,7 +258,7 @@ def query_governance(
                 tables=approved_tables,
             )
         except Exception:
-            pass  # Non-fatal — proceed without sync
+            pass
 
     # ── Load conversation history ─────────────────────────────────
     chat_history: list[BaseMessage] = load_history_as_messages(
@@ -279,19 +270,16 @@ def query_governance(
         try:
             from services.databricks.sql_agent import run_sql_agent, _keyword_intent
 
-            # Fast pre-check: if keyword classifier is already confident
-            # this is a SQL query, skip the RAG retrieval entirely and
-            # go straight to the agent. This avoids wasted ChromaDB lookups
-            # and the "Searched:" bubble appearing before SQL results.
-            quick_intent = _keyword_intent(question, approved_tables)
+            # Fast pre-check: keyword classifier decides without LLM or ChromaDB.
+            # Definite SQL → skip RAG retrieval entirely (no "Searched:" bubble).
+            # Ambiguous    → do RAG retrieval for governance/schema context.
+            quick_intent    = _keyword_intent(question, approved_tables)
             is_definite_sql = quick_intent is not None and quick_intent != "NOT_SQL"
 
-            # Pull RAG context only for non-obvious SQL queries
-            # (governance questions that happen to need SQL context)
             rag_context        = ""
             governance_context = ""
             schema_context     = ""
-            rag_sources        = []
+            rag_sources: list[str] = []
             rag_chunks         = 0
 
             if not is_definite_sql:
@@ -300,9 +288,10 @@ def query_governance(
                     source_docs  = retriever_fn(question)
                     rag_context  = _format_docs(source_docs)
                     rag_sources  = list({
-                        doc.metadata.get("source_file", "unknown") for doc in source_docs
+                        doc.metadata.get("source_file", "unknown")
+                        for doc in source_docs
                     })
-                    rag_chunks   = len(source_docs)
+                    rag_chunks = len(source_docs)
 
                     gov_docs = [
                         d for d in source_docs
@@ -312,13 +301,14 @@ def query_governance(
                     ]
                     governance_context = _format_docs(gov_docs)
 
-                    schema_docs    = [
+                    schema_docs = [
                         d for d in source_docs
-                        if d.metadata.get("file_type") in ("databricks_schema", "databricks_stats")
+                        if d.metadata.get("file_type") in
+                        ("databricks_schema", "databricks_stats")
                     ]
                     schema_context = _format_docs(schema_docs)
                 except Exception:
-                    pass  # RAG unavailable — SQL agent still works without it
+                    pass  # RAG unavailable — SQL agent works without it
 
             agent_result = run_sql_agent(
                 question                 = question,
@@ -328,22 +318,20 @@ def query_governance(
                 rag_context              = rag_context,
                 governance_context       = governance_context,
                 schema_context           = schema_context,
-                approved_tables_override = approved_tables,
+                approved_tables_override = approved_tables,   # bypass SQLite race
                 connection_id_override   = connection_id,
             )
 
             intent = agent_result.get("intent", "NOT_SQL")
 
-            # Route to SQL agent result for all SQL-related intents
-            # NOT_SQL = governance/doc question → fall through to RAG
-            # Everything else (including OUT_OF_SCOPE) = return agent response
+            # All SQL-related intents return agent result.
+            # Only NOT_SQL falls through to standard RAG below.
             SQL_INTENTS = {
                 "SIMPLE_LOOKUP", "AGGREGATION", "COMPARISON",
-                "JOIN_OPERATION", "MULTI_STEP", "CREATE_OBJECT", "OUT_OF_SCOPE"
+                "JOIN_OPERATION", "MULTI_STEP", "CREATE_OBJECT", "OUT_OF_SCOPE",
             }
 
             if intent in SQL_INTENTS:
-                # Build the full answer text combining think_aloud + interpretation + governance
                 answer_parts = []
                 if agent_result.get("think_aloud"):
                     answer_parts.append(f"_{agent_result['think_aloud']}_\n")
@@ -354,32 +342,33 @@ def query_governance(
                 answer = "\n".join(answer_parts) if answer_parts else "Query executed."
 
                 result = {
-                    "run_id"             : run_id,
-                    "session_id"         : session_id,
-                    "knowledge_set"      : knowledge_set,
-                    "question"           : question,
-                    "rephrased_question" : question,
-                    "answer"             : answer,
-                    "mode"               : agent_result.get("mode", "sql_agent"),
-                    "sources_used"       : rag_sources,
-                    "chunks_retrieved"   : rag_chunks,
-                    "model"              : CHAT_MODEL,
-                    "prompt_tokens"      : 0,
-                    "completion_tokens"  : 0,
-                    "total_tokens"       : 0,
-                    "created_at"         : datetime.now().isoformat(),
-                    "duration_seconds"   : round(time.time() - start, 2),
-                    # SQL agent extensions
-                    "sql_intent"         : intent,
-                    "sql_executed"       : agent_result.get("sql", ""),
-                    "sql_row_count"      : agent_result.get("row_count", 0),
-                    "sql_results"        : agent_result.get("results", []),
-                    "sql_think_aloud"    : agent_result.get("think_aloud", ""),
-                    "governance_note"    : agent_result.get("governance_note", ""),
+                    "run_id"           : run_id,
+                    "session_id"       : session_id,
+                    "knowledge_set"    : knowledge_set,
+                    "question"         : question,
+                    "rephrased_question": question,
+                    "answer"           : answer,
+                    "mode"             : agent_result.get("mode", "sql_agent"),
+                    "sources_used"     : rag_sources,
+                    "chunks_retrieved" : rag_chunks,
+                    "model"            : CHAT_MODEL,
+                    "prompt_tokens"    : 0,
+                    "completion_tokens": 0,
+                    "total_tokens"     : 0,
+                    "created_at"       : datetime.now().isoformat(),
+                    "duration_seconds" : round(time.time() - start, 2),
+                    "sql_intent"       : intent,
+                    "sql_executed"     : agent_result.get("sql", ""),
+                    "sql_row_count"    : agent_result.get("row_count", 0),
+                    "sql_results"      : agent_result.get("results", []),
+                    "sql_think_aloud"  : agent_result.get("think_aloud", ""),
+                    "governance_note"  : agent_result.get("governance_note", ""),
                 }
 
-                db_insert("llm_responses", {k: v for k, v in result.items()
-                                            if not isinstance(v, (list, dict)) or k == "sources_used"})
+                db_insert("llm_responses", {
+                    k2: v for k2, v in result.items()
+                    if not isinstance(v, (list, dict)) or k2 == "sources_used"
+                })
                 save_turn(
                     session_id=session_id, knowledge_set=knowledge_set,
                     human_message=question, ai_message=answer,
@@ -388,12 +377,13 @@ def query_governance(
                 return result
 
         except Exception:
-            pass  # If SQL agent fails, fall through to standard RAG
+            pass  # SQL agent failed — fall through to standard RAG
 
     # ── Standard RAG ─────────────────────────────────────────────
     approved_sources_block = _build_approved_sources_block(approved_tables)
 
     if use_rag:
+        # Condense follow-up questions into standalone questions
         if chat_history:
             condense_chain = CONDENSE_PROMPT | llm | parser
             rephrased      = condense_chain.invoke({
@@ -411,45 +401,45 @@ def query_governance(
         })
 
         qa_messages = QA_PROMPT.format_messages(
-            approved_sources_block = approved_sources_block,
-            context                = context,
-            chat_history           = chat_history,
-            question               = question,
+            approved_sources_block=approved_sources_block,
+            context=context,
+            chat_history=chat_history,
+            question=question,
         )
         llm_response = llm.invoke(qa_messages)
         answer       = llm_response.content
         token_usage  = _extract_tokens(llm_response)
 
         result = {
-            "run_id"             : run_id,
-            "session_id"         : session_id,
-            "knowledge_set"      : knowledge_set,
-            "question"           : question,
-            "rephrased_question" : rephrased,
-            "answer"             : answer,
-            "mode"               : "conversational_rag",
-            "sources_used"       : sources,
-            "chunks_retrieved"   : len(source_docs),
-            "model"              : CHAT_MODEL,
-            "prompt_tokens"      : token_usage["prompt_tokens"],
-            "completion_tokens"  : token_usage["completion_tokens"],
-            "total_tokens"       : token_usage["total_tokens"],
-            "created_at"         : datetime.now().isoformat(),
-            "duration_seconds"   : round(time.time() - start, 2),
-            "sql_intent"         : None,
-            "sql_executed"       : None,
-            "sql_row_count"      : None,
-            "sql_results"        : None,
-            "sql_think_aloud"    : None,
-            "governance_note"    : None,
+            "run_id"           : run_id,
+            "session_id"       : session_id,
+            "knowledge_set"    : knowledge_set,
+            "question"         : question,
+            "rephrased_question": rephrased,
+            "answer"           : answer,
+            "mode"             : "conversational_rag",
+            "sources_used"     : sources,
+            "chunks_retrieved" : len(source_docs),
+            "model"            : CHAT_MODEL,
+            "prompt_tokens"    : token_usage["prompt_tokens"],
+            "completion_tokens": token_usage["completion_tokens"],
+            "total_tokens"     : token_usage["total_tokens"],
+            "created_at"       : datetime.now().isoformat(),
+            "duration_seconds" : round(time.time() - start, 2),
+            "sql_intent"       : None,
+            "sql_executed"     : None,
+            "sql_row_count"    : None,
+            "sql_results"      : None,
+            "sql_think_aloud"  : None,
+            "governance_note"  : None,
         }
 
     else:
-        # ── Direct mode ──────────────────────────────────────────
+        # ── Direct LLM (no retrieval) ─────────────────────────────
         direct_prompt = ChatPromptTemplate.from_messages([
             (
                 "system",
-                "You are a Data Governance Expert for the insurance industry. "
+                "You are a Data & AI Expert for the insurance industry. "
                 "You have full memory of this conversation. "
                 "Build on previous answers when relevant.\n\n"
                 f"{approved_sources_block}",
@@ -466,32 +456,34 @@ def query_governance(
         token_usage  = _extract_tokens(llm_response)
 
         result = {
-            "run_id"             : run_id,
-            "session_id"         : session_id,
-            "knowledge_set"      : knowledge_set,
-            "question"           : question,
-            "rephrased_question" : question,
-            "answer"             : answer,
-            "mode"               : "direct",
-            "sources_used"       : [],
-            "chunks_retrieved"   : 0,
-            "model"              : CHAT_MODEL,
-            "prompt_tokens"      : token_usage["prompt_tokens"],
-            "completion_tokens"  : token_usage["completion_tokens"],
-            "total_tokens"       : token_usage["total_tokens"],
-            "created_at"         : datetime.now().isoformat(),
-            "duration_seconds"   : round(time.time() - start, 2),
-            "sql_intent"         : None,
-            "sql_executed"       : None,
-            "sql_row_count"      : None,
-            "sql_results"        : None,
-            "sql_think_aloud"    : None,
-            "governance_note"    : None,
+            "run_id"           : run_id,
+            "session_id"       : session_id,
+            "knowledge_set"    : knowledge_set,
+            "question"         : question,
+            "rephrased_question": question,
+            "answer"           : answer,
+            "mode"             : "direct",
+            "sources_used"     : [],
+            "chunks_retrieved" : 0,
+            "model"            : CHAT_MODEL,
+            "prompt_tokens"    : token_usage["prompt_tokens"],
+            "completion_tokens": token_usage["completion_tokens"],
+            "total_tokens"     : token_usage["total_tokens"],
+            "created_at"       : datetime.now().isoformat(),
+            "duration_seconds" : round(time.time() - start, 2),
+            "sql_intent"       : None,
+            "sql_executed"     : None,
+            "sql_row_count"    : None,
+            "sql_results"      : None,
+            "sql_think_aloud"  : None,
+            "governance_note"  : None,
         }
 
     # ── Persist ───────────────────────────────────────────────────
-    db_insert("llm_responses", {k: v for k, v in result.items()
-                                if not isinstance(v, (list, dict)) or k == "sources_used"})
+    db_insert("llm_responses", {
+        k2: v for k2, v in result.items()
+        if not isinstance(v, (list, dict)) or k2 == "sources_used"
+    })
     save_turn(
         session_id=session_id, knowledge_set=knowledge_set,
         human_message=question, ai_message=answer,
