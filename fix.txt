@@ -1,276 +1,229 @@
-'use client'
-import { useState } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import { User, Bot, Clock, FileText, Copy, Check, Brain, Zap, SquareCode, AlertTriangle, Download, FileDown } from 'lucide-react'
-import type { ChatMessage } from '@/types'
-import { formatTime, cn } from '@/lib/utils'
+import type {
+  QueryResponse,
+  ConversationHistoryResponse,
+  ConversationStatsResponse,
+  DatabricksConnection,
+  DatabricksConnectResponse,
+  DatabricksCatalog,
+  DatabricksSchema,
+  DatabricksTable,
+  DatabricksTableDetail,
+  DatabricksIngestResult,
+  ApprovedSourcesResponse,
+  DocumentGenerateRequest,
+  DocumentGenerateResponse,
+} from '@/types'
 
-const INTENT_META: Record<string, { label: string; color: string }> = {
-  SIMPLE_LOOKUP : { label: 'Lookup',     color: 'bg-blue-50 border-blue-200 text-blue-700' },
-  AGGREGATION   : { label: 'Aggregation',color: 'bg-purple-50 border-purple-200 text-purple-700' },
-  COMPARISON    : { label: 'Comparison', color: 'bg-orange-50 border-orange-200 text-orange-700' },
-  JOIN_OPERATION: { label: 'Join',       color: 'bg-pink-50 border-pink-200 text-pink-700' },
-  MULTI_STEP    : { label: 'Multi-step', color: 'bg-indigo-50 border-indigo-200 text-indigo-700' },
-  CREATE_OBJECT : { label: 'Create',     color: 'bg-yellow-50 border-yellow-200 text-yellow-700' },
-  OUT_OF_SCOPE  : { label: 'Restricted', color: 'bg-red-50 border-red-200 text-red-600' },
-}
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
-interface MessageBubbleProps {
-  message: ChatMessage
-  index: number
-}
-
-export function MessageBubble({ message, index }: MessageBubbleProps) {
-  const [copied, setCopied]               = useState(false)
-  const [showMeta, setShowMeta]           = useState(false)
-  const [showSql, setShowSql]             = useState(false)
-  const [showResults, setShowResults]     = useState(false)
-  const isUser    = message.role === 'user'
-  const isSql     = message.mode === 'sql_agent' || message.mode === 'hybrid'
-  const intentMeta = message.sql_intent ? INTENT_META[message.sql_intent] : null
-
-  const handleCopy = async () => {
-    await navigator.clipboard.writeText(message.content)
-    setCopied(true); setTimeout(() => setCopied(false), 2000)
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_URL}${path}`, {
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    ...options,
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }))
+    throw new Error(err.detail || `Request failed: ${res.status}`)
   }
-
-  const showRephrased = !isUser && !isSql && message.rephrased_question &&
-    message.rephrased_question !== message.content
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: Math.min(index * 0.04, 0.25), duration: 0.3 }}
-      className={cn('flex gap-3 group', isUser ? 'flex-row-reverse' : 'flex-row')}
-    >
-      {/* Avatar */}
-      <div className={cn('w-8 h-8 rounded-lg flex-shrink-0 flex items-center justify-center mt-0.5',
-        isUser ? 'bg-axa-800' : 'bg-white border border-ink-200 shadow-sm')}>
-        {isUser ? <User className="w-4 h-4 text-white" /> : <Bot className="w-4 h-4 text-axa-800" />}
-      </div>
-
-      {/* Content */}
-      <div className={cn('flex-1 min-w-0 max-w-[85%] flex flex-col gap-1', isUser ? 'items-end' : 'items-start')}>
-
-        {/* SQL think-aloud */}
-        {!isUser && message.sql_think_aloud && (
-          <div className="flex items-start gap-1.5 mb-0.5 w-full">
-            <SquareCode className="w-3 h-3 text-emerald-600 flex-shrink-0 mt-0.5" />
-            <span className="text-[10px] text-emerald-700 bg-emerald-50 border border-emerald-100 px-2 py-1 rounded-lg italic leading-relaxed">
-              {message.sql_think_aloud}
-            </span>
-          </div>
-        )}
-
-        {/* RAG rephrased question */}
-        {showRephrased && (
-          <div className="flex items-center gap-1.5 mb-0.5">
-            <Brain className="w-3 h-3 text-axa-600 flex-shrink-0" />
-            <span className="text-[10px] text-axa-700 bg-axa-50 border border-axa-100 px-2 py-0.5 rounded-full italic">
-              Searched: "{message.rephrased_question}"
-            </span>
-          </div>
-        )}
-
-        {/* Bubble */}
-        <div className={cn('relative rounded-2xl px-4 py-3 text-sm w-full',
-          isUser ? 'bg-axa-800 text-white rounded-tr-sm ml-auto' : 'bg-white border border-ink-200 shadow-sm rounded-tl-sm')}>
-          {isUser ? (
-            <p className="text-white leading-relaxed">{message.content}</p>
-          ) : (
-            <div className="prose-governance">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-            </div>
-          )}
-          {!isUser && message.content && (
-            <button onClick={handleCopy}
-              className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1 rounded-lg bg-ink-50 hover:bg-ink-100 text-ink-400 hover:text-ink-700 transition-all border border-ink-200">
-              {copied ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
-            </button>
-          )}
-        </div>
-
-        {/* ── Document download card ── */}
-        {!isUser && message.doc_download_url && (
-          <motion.div
-            initial={{ opacity: 0, y: 6 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="w-full mt-2 flex items-center gap-3 px-4 py-3 bg-axa-50 border border-axa-200 rounded-xl"
-          >
-            <div className="w-9 h-9 rounded-lg bg-axa-800 flex items-center justify-center flex-shrink-0">
-              <FileDown className="w-4 h-4 text-white" />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-semibold text-ink-800 truncate">
-                {message.doc_title ?? 'Generated Document'}
-              </p>
-              <p className="text-[10px] text-ink-400">
-                Word document · {message.doc_section_count ?? 0} sections
-              </p>
-            </div>
-            <a
-              href={message.doc_download_url}
-              download
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-axa-800 text-white text-xs font-semibold hover:bg-axa-700 transition-colors shadow-sm flex-shrink-0"
-            >
-              <Download className="w-3.5 h-3.5" />
-              Download .docx
-            </a>
-          </motion.div>
-        )}
-        {!isUser && message.sql_results && message.sql_results.length > 0 && (
-          <div className="w-full mt-1">
-            <button onClick={() => setShowResults(v => !v)}
-              className="flex items-center gap-1.5 text-[10px] text-emerald-700 bg-emerald-50 border border-emerald-100 px-2.5 py-1 rounded-lg hover:bg-emerald-100 transition-colors">
-              <SquareCode className="w-3 h-3" />
-              <span className="font-semibold">{message.sql_row_count ?? message.sql_results.length} rows returned</span>
-              <span className="text-emerald-400">{showResults ? '▲ hide' : '▼ show'}</span>
-            </button>
-            <AnimatePresence>
-              {showResults && (
-                <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
-                  <SqlResultsTable results={message.sql_results} />
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-        )}
-
-        {/* SQL view toggle */}
-        {!isUser && message.sql_executed && (
-          <div className="w-full mt-0.5">
-            <button onClick={() => setShowSql(v => !v)} className="text-[10px] text-ink-400 hover:text-ink-600 transition-colors">
-              {showSql ? '▲ hide SQL' : '▼ view SQL'}
-            </button>
-            <AnimatePresence>
-              {showSql && (
-                <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden mt-1">
-                  <pre className="text-[10px] font-mono bg-ink-900 text-emerald-300 rounded-xl px-4 py-3 overflow-x-auto whitespace-pre-wrap leading-relaxed">
-                    {message.sql_executed}
-                  </pre>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-        )}
-
-        {/* Governance note */}
-        {!isUser && message.governance_note && (
-          <div className="w-full mt-1 flex items-start gap-2 px-3 py-2 bg-amber-50 border border-amber-100 rounded-xl">
-            <AlertTriangle className="w-3 h-3 text-amber-500 flex-shrink-0 mt-0.5" />
-            <div className="text-[10px] text-amber-700 leading-relaxed prose-governance">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.governance_note}</ReactMarkdown>
-            </div>
-          </div>
-        )}
-
-        {/* Meta row */}
-        <div className={cn('flex items-center gap-3 px-1 flex-wrap', isUser ? 'flex-row-reverse' : 'flex-row')}>
-          <span className="text-[10px] text-ink-400 flex items-center gap-1 flex-shrink-0">
-            <Clock className="w-2.5 h-2.5" />{formatTime(message.timestamp)}
-          </span>
-
-          {/* Intent badge */}
-          {!isUser && intentMeta && (
-            <span className={cn('flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded-full border flex-shrink-0', intentMeta.color)}>
-              <SquareCode className="w-2.5 h-2.5" />{intentMeta.label}
-            </span>
-          )}
-
-          {/* Sources — show for all assistant messages with sources */}
-          {!isUser && message.sources_used && message.sources_used.length > 0 && (
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <FileText className="w-2.5 h-2.5 text-ink-400 flex-shrink-0" />
-              {message.sources_used.map(src => (
-                <span key={src} className="text-[10px] font-mono text-axa-800 bg-axa-50 px-1.5 py-0.5 rounded border border-axa-100">{src}</span>
-              ))}
-            </div>
-          )}
-
-          {!isUser && message.duration_seconds && (
-            <span className="text-[10px] text-ink-300 flex-shrink-0">{message.duration_seconds}s</span>
-          )}
-
-          {!isUser && message.total_tokens && message.total_tokens > 0 && (
-            <button onClick={() => setShowMeta(v => !v)} className="flex items-center gap-1 text-[10px] text-ink-400 hover:text-axa-700 transition-colors flex-shrink-0">
-              <Zap className="w-2.5 h-2.5" /><span className="font-mono">{message.total_tokens.toLocaleString()}</span>
-            </button>
-          )}
-        </div>
-
-        {/* Token breakdown */}
-        {!isUser && showMeta && message.total_tokens && message.total_tokens > 0 && (
-          <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="px-1 overflow-hidden">
-            <div className="flex items-center gap-3 text-[10px] font-mono text-ink-400 bg-ink-50 border border-ink-100 rounded-lg px-3 py-2 mt-1">
-              <span>↑ {(message.prompt_tokens ?? 0).toLocaleString()} prompt</span>
-              <span className="text-ink-200">·</span>
-              <span>↓ {(message.completion_tokens ?? 0).toLocaleString()} completion</span>
-              <span className="text-ink-200">·</span>
-              <span className="font-semibold text-axa-700">= {(message.total_tokens ?? 0).toLocaleString()} total</span>
-              {message.mode && <><span className="text-ink-200">·</span><span className="text-ink-500">{message.mode}</span></>}
-            </div>
-          </motion.div>
-        )}
-      </div>
-    </motion.div>
-  )
+  return res.json()
 }
 
-function SqlResultsTable({ results }: { results: Record<string, unknown>[] }) {
-  if (!results.length) return null
-  const cols    = Object.keys(results[0])
-  const display = results.slice(0, 50)
+export const api = {
 
-  return (
-    <div className="mt-1.5 overflow-x-auto rounded-xl border border-emerald-100 bg-white shadow-sm">
-      <table className="min-w-full text-[10px]">
-        <thead>
-          <tr className="bg-emerald-50 border-b border-emerald-100">
-            {cols.map(col => (
-              <th key={col} className="px-3 py-1.5 text-left font-semibold text-emerald-700 whitespace-nowrap font-mono">{col}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {display.map((row, ri) => (
-            <tr key={ri} className={cn('border-b border-ink-50', ri % 2 === 0 ? 'bg-white' : 'bg-ink-50/50')}>
-              {cols.map(col => {
-                const v   = row[col]
-                const str = v === null || v === undefined ? '—' : String(v)
-                return (
-                  <td key={col} className="px-3 py-1.5 text-ink-700 font-mono whitespace-nowrap max-w-[180px] truncate" title={str}>
-                    {str === '—' ? <span className="text-ink-300">—</span> : str}
-                  </td>
-                )
-              })}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {results.length > 50 && (
-        <div className="px-3 py-1.5 text-[10px] text-ink-400 bg-ink-50 border-t border-ink-100">
-          Showing first 50 of {results.length} rows
-        </div>
-      )}
-    </div>
-  )
-}
+  // ── Knowledge Sets ──────────────────────────────────────────────
+  listKnowledgeSets: () =>
+    request<{ total: number; knowledge_sets: { knowledge_set: string; collection_name: string; vector_count: number }[] }>('/api/knowledge-sets/'),
 
-export function TypingIndicator() {
-  return (
-    <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 8 }} className="flex gap-3">
-      <div className="w-8 h-8 rounded-lg bg-white border border-ink-200 shadow-sm flex items-center justify-center flex-shrink-0">
-        <Bot className="w-4 h-4 text-axa-800" />
-      </div>
-      <div className="bg-white border border-ink-200 shadow-sm rounded-2xl rounded-tl-sm px-4 py-3 flex items-center gap-1.5">
-        {[0, 0.2, 0.4].map((delay, i) => (
-          <motion.div key={i} className="w-1.5 h-1.5 rounded-full bg-axa-800"
-            animate={{ scale: [1, 1.4, 1], opacity: [0.3, 1, 0.3] }}
-            transition={{ duration: 0.8, delay, repeat: Infinity }} />
-        ))}
-      </div>
-    </motion.div>
-  )
+  deleteKnowledgeSet: (ks: string) =>
+    request(`/api/knowledge-sets/${encodeURIComponent(ks)}`, { method: 'DELETE' }),
+
+  // ── Ingest (files) ──────────────────────────────────────────────
+  ingestLoadingZone: (knowledge_set: string, rebuild = false) =>
+    request('/api/ingest/', {
+      method: 'POST',
+      body: JSON.stringify({ knowledge_set, rebuild }),
+    }),
+
+  uploadFiles: async (knowledge_set: string, files: File[]) => {
+    const form = new FormData()
+    form.append('knowledge_set', knowledge_set)
+    files.forEach(f => form.append('files', f))
+    const res = await fetch(`${API_URL}/api/ingest/upload`, {
+      method: 'POST',
+      body: form,
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }))
+      throw new Error(err.detail || `Upload failed: ${res.status}`)
+    }
+    return res.json()
+  },
+
+  // ── Query (RAG + SQL Agent hybrid) ──────────────────────────────
+  // The backend auto-detects SQL intent when enable_sql_agent=true
+  // and approved_tables are present, routing to the SQL agent or
+  // falling back to conversational RAG.
+  query: (payload: {
+    knowledge_set: string
+    session_id: string
+    question: string
+    use_rag: boolean
+    k: number
+    window_k?: number
+    enable_sql_agent?: boolean
+    approved_tables?: string[]   // catalog.schema.table list
+    connection_id?: string       // Databricks connection for SQL execution
+    excluded_tables?: string[]   // tables removed from ingest — excluded from RAG
+  }): Promise<QueryResponse> =>
+    request('/api/query/', {
+      method: 'POST',
+      body: JSON.stringify({
+        window_k        : 6,
+        enable_sql_agent: true,
+        approved_tables : [],
+        ...payload,
+      }),
+    }),
+
+  // ── Conversation History ─────────────────────────────────────────
+  getConversationHistory: (session_id: string, knowledge_set: string): Promise<ConversationHistoryResponse> =>
+    request(`/api/query/history?session_id=${encodeURIComponent(session_id)}&knowledge_set=${encodeURIComponent(knowledge_set)}`),
+
+  getConversationStats: (session_id: string, knowledge_set: string): Promise<ConversationStatsResponse> =>
+    request(`/api/query/history/stats?session_id=${encodeURIComponent(session_id)}&knowledge_set=${encodeURIComponent(knowledge_set)}`),
+
+  clearConversationHistory: (session_id: string, knowledge_set: string) =>
+    request(`/api/query/history?session_id=${encodeURIComponent(session_id)}&knowledge_set=${encodeURIComponent(knowledge_set)}`, { method: 'DELETE' }),
+
+  // ── Sources / Stats / Profile ───────────────────────────────────
+  getSources: (knowledge_set: string) =>
+    request(`/api/sources/?knowledge_set=${encodeURIComponent(knowledge_set)}`),
+
+  getStats: (knowledge_set: string) =>
+    request(`/api/logs/stats?knowledge_set=${encodeURIComponent(knowledge_set)}`),
+
+  profileFile: (filename: string) =>
+    request(`/api/profile/${encodeURIComponent(filename)}`),
+
+  health: () => request('/health'),
+
+  // ── SQL Agent ───────────────────────────────────────────────────
+  sqlAgent: {
+    /** Standalone SQL agent query (bypasses RAG entirely) */
+    query: (payload: {
+      knowledge_set: string
+      session_id: string
+      question: string
+      connection_id: string
+      approved_tables: string[]
+      window_k?: number
+    }) =>
+      request('/api/sql-agent/query', {
+        method: 'POST',
+        body: JSON.stringify({ window_k: 6, ...payload }),
+      }),
+
+    /** List approved tables for a session */
+    getApprovedSources: (session_id: string, knowledge_set: string): Promise<ApprovedSourcesResponse> =>
+      request(`/api/sql-agent/approved-sources?session_id=${encodeURIComponent(session_id)}&knowledge_set=${encodeURIComponent(knowledge_set)}`),
+
+    /** Sync the approved table list (replaces current list) */
+    syncApprovedSources: (payload: {
+      session_id: string
+      knowledge_set: string
+      connection_id: string
+      tables: string[]
+    }) =>
+      request('/api/sql-agent/approved-sources/sync', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+
+    /** Remove all approved sources for a session */
+    clearApprovedSources: (session_id: string, knowledge_set: string) =>
+      request(`/api/sql-agent/approved-sources?session_id=${encodeURIComponent(session_id)}&knowledge_set=${encodeURIComponent(knowledge_set)}`, { method: 'DELETE' }),
+
+    /** SQL execution history for a session */
+    getLog: (session_id: string, knowledge_set: string, limit = 50) =>
+      request(`/api/sql-agent/log?session_id=${encodeURIComponent(session_id)}&knowledge_set=${encodeURIComponent(knowledge_set)}&limit=${limit}`),
+  },
+
+  // ── Databricks: Connection Management ───────────────────────────
+  databricks: {
+    connect: (payload: {
+      connection_name: string
+      workspace_url: string
+      pat: string
+      http_path: string
+      catalog?: string
+      description?: string
+      knowledge_set?: string
+    }): Promise<DatabricksConnectResponse> =>
+      request('/api/databricks/connect', { method: 'POST', body: JSON.stringify(payload) }),
+
+    listConnections: (knowledge_set?: string): Promise<DatabricksConnection[]> =>
+      request(`/api/databricks/connections${knowledge_set ? `?knowledge_set=${encodeURIComponent(knowledge_set)}` : ''}`),
+
+    deleteConnection: (connection_id: string) =>
+      request(`/api/databricks/connections/${encodeURIComponent(connection_id)}`, { method: 'DELETE' }),
+
+    testConnection: (connection_id: string) =>
+      request(`/api/databricks/connections/${encodeURIComponent(connection_id)}/test`, { method: 'POST' }),
+
+    listCatalogs: (connection_id: string): Promise<{ catalogs: DatabricksCatalog[] }> =>
+      request(`/api/databricks/${encodeURIComponent(connection_id)}/catalogs`),
+
+    listSchemas: (connection_id: string, catalog: string): Promise<{ catalog: string; schemas: DatabricksSchema[] }> =>
+      request(`/api/databricks/${encodeURIComponent(connection_id)}/schemas?catalog=${encodeURIComponent(catalog)}`),
+
+    listTables: (connection_id: string, catalog: string, schema: string, include_views = true): Promise<{ tables: DatabricksTable[]; count: number }> =>
+      request(`/api/databricks/${encodeURIComponent(connection_id)}/tables?catalog=${encodeURIComponent(catalog)}&schema=${encodeURIComponent(schema)}&include_views=${include_views}`),
+
+    getTableDetail: (connection_id: string, catalog: string, schema: string, table: string): Promise<DatabricksTableDetail> =>
+      request(`/api/databricks/${encodeURIComponent(connection_id)}/table-detail?catalog=${encodeURIComponent(catalog)}&schema=${encodeURIComponent(schema)}&table=${encodeURIComponent(table)}`),
+
+    profileTable: (connection_id: string, catalog: string, schema: string, table: string, sample_rows = 500000) =>
+      request(`/api/databricks/${encodeURIComponent(connection_id)}/profile?catalog=${encodeURIComponent(catalog)}&schema=${encodeURIComponent(schema)}&table=${encodeURIComponent(table)}&sample_rows=${sample_rows}`),
+
+    ingestTable: (connection_id: string, payload: {
+      knowledge_set: string; catalog: string; db_schema: string; table: string
+      sample_rows?: number; rebuild?: boolean
+    }): Promise<DatabricksIngestResult> =>
+      request(`/api/databricks/${encodeURIComponent(connection_id)}/ingest`, {
+        method: 'POST', body: JSON.stringify(payload),
+      }),
+
+    ingestMultiple: (connection_id: string, payload: {
+      knowledge_set: string
+      tables: { catalog: string; db_schema: string; table: string }[]
+      sample_rows?: number; rebuild_first?: boolean
+    }) =>
+      request(`/api/databricks/${encodeURIComponent(connection_id)}/ingest-multiple`, {
+        method: 'POST', body: JSON.stringify(payload),
+      }),
+
+    getIngestStatus: (job_id: string) =>
+      request(`/api/databricks/ingest-status/${encodeURIComponent(job_id)}`),
+
+    getIngestionLog: (connection_id: string, knowledge_set?: string) =>
+      request(`/api/databricks/${encodeURIComponent(connection_id)}/ingestion-log${knowledge_set ? `?knowledge_set=${encodeURIComponent(knowledge_set)}` : ''}`),
+  },
+
+  // ── Document Generation ─────────────────────────────────────────
+  document: {
+    /** Generate a professional .docx from the user's request + RAG context */
+    generate: (payload: DocumentGenerateRequest): Promise<DocumentGenerateResponse> =>
+      request('/api/document/generate', {
+        method: 'POST',
+        body: JSON.stringify({ window_k: 6, k: 5, ...payload }),
+      }),
+
+    /** Download URL helper — returns full URL for the file */
+    downloadUrl: (filename: string): string =>
+      `${API_URL}/api/document/download/${encodeURIComponent(filename)}`,
+
+    /** List previously generated documents */
+    list: () =>
+      request<{ count: number; documents: { file_name: string; download_url: string; size_kb: number; created_at: number }[] }>('/api/document/list'),
+  },
 }
