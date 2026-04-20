@@ -1,351 +1,228 @@
-// ── Knowledge Set / Session ─────────────────────────────────────
-export interface KnowledgeSet {
-  id: string
-  project_name: string
-  summary: string
-  created_at: string
-  file_count: number
-  vector_count: number
-  collection_name: string
+import type {
+  QueryResponse,
+  ConversationHistoryResponse,
+  ConversationStatsResponse,
+  DatabricksConnection,
+  DatabricksConnectResponse,
+  DatabricksCatalog,
+  DatabricksSchema,
+  DatabricksTable,
+  DatabricksTableDetail,
+  DatabricksIngestResult,
+  ApprovedSourcesResponse,
+  DocumentGenerateRequest,
+  DocumentGenerateResponse,
+} from '@/types'
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_URL}${path}`, {
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    ...options,
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }))
+    throw new Error(err.detail || `Request failed: ${res.status}`)
+  }
+  return res.json()
 }
 
-export interface CreateKnowledgeSetPayload {
-  project_name: string
-  summary: string
-}
+export const api = {
 
-// ── Files / Sources ─────────────────────────────────────────────
-export interface SourceFile {
-  id: string
-  name: string
-  size: number
-  type: string
-  extension: string
-  status: 'uploading' | 'processing' | 'ready' | 'error'
-  progress: number
-  error?: string
-  ingested_at?: string
-  chunk_count?: number
-  department?: string
-  sensitivity?: string
-  pii_chunks?: number
-}
+  // ── Knowledge Sets ──────────────────────────────────────────────
+  listKnowledgeSets: () =>
+    request<{ total: number; knowledge_sets: { knowledge_set: string; collection_name: string; vector_count: number }[] }>('/api/knowledge-sets/'),
 
-export interface IngestResponse {
-  status: string
-  knowledge_set: string
-  collection_name: string
-  files_processed: number
-  files_failed: number
-  total_chunks: number
-  total_vectors: number
-  file_details: FileDetail[]
-  duration_seconds: number
-  ingested_at: string
-}
+  deleteKnowledgeSet: (ks: string) =>
+    request(`/api/knowledge-sets/${encodeURIComponent(ks)}`, { method: 'DELETE' }),
 
-export interface FileDetail {
-  file: string
-  type: string
-  status: string
-  docs: number
-  error?: string
-}
+  // ── Ingest (files) ──────────────────────────────────────────────
+  ingestLoadingZone: (knowledge_set: string, rebuild = false) =>
+    request('/api/ingest/', {
+      method: 'POST',
+      body: JSON.stringify({ knowledge_set, rebuild }),
+    }),
 
-// ── Chat ─────────────────────────────────────────────────────────
-export interface ChatMessage {
-  id: string
-  role: 'user' | 'assistant'
-  content: string
-  timestamp: string
-  // RAG metadata
-  sources_used?: string[]
-  chunks_retrieved?: number
-  duration_seconds?: number
-  run_id?: string
-  rephrased_question?: string
-  prompt_tokens?: number
-  completion_tokens?: number
-  total_tokens?: number
-  mode?: string
-  // SQL Agent metadata
-  sql_intent?: string
-  sql_executed?: string
-  sql_row_count?: number
-  sql_results?: Record<string, unknown>[]
-  sql_think_aloud?: string
-  governance_note?: string
-  // Document generation
-  doc_download_url?: string
-  doc_title?: string
-  doc_section_count?: number
-}
+  uploadFiles: async (knowledge_set: string, files: File[]) => {
+    const form = new FormData()
+    form.append('knowledge_set', knowledge_set)
+    files.forEach(f => form.append('files', f))
+    const res = await fetch(`${API_URL}/api/ingest/upload`, {
+      method: 'POST',
+      body: form,
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }))
+      throw new Error(err.detail || `Upload failed: ${res.status}`)
+    }
+    return res.json()
+  },
 
-export interface QueryRequest {
-  knowledge_set: string
-  session_id: string
-  question: string
-  use_rag: boolean
-  k: number
-  window_k?: number
-  enable_sql_agent?: boolean
-  approved_tables?: string[]
-  connection_id?: string
-}
+  // ── Query (RAG + SQL Agent hybrid) ──────────────────────────────
+  // The backend auto-detects SQL intent when enable_sql_agent=true
+  // and approved_tables are present, routing to the SQL agent or
+  // falling back to conversational RAG.
+  query: (payload: {
+    knowledge_set: string
+    session_id: string
+    question: string
+    use_rag: boolean
+    k: number
+    window_k?: number
+    enable_sql_agent?: boolean
+    approved_tables?: string[]   // catalog.schema.table list
+    connection_id?: string       // Databricks connection for SQL execution
+  }): Promise<QueryResponse> =>
+    request('/api/query/', {
+      method: 'POST',
+      body: JSON.stringify({
+        window_k        : 6,
+        enable_sql_agent: true,
+        approved_tables : [],
+        ...payload,
+      }),
+    }),
 
-export interface QueryResponse {
-  run_id: string
-  session_id: string
-  knowledge_set: string
-  question: string
-  rephrased_question: string
-  answer: string
-  mode: string
-  sources_used: string[]
-  chunks_retrieved: number
-  model: string
-  prompt_tokens: number
-  completion_tokens: number
-  total_tokens: number
-  created_at: string
-  duration_seconds: number
-  // SQL Agent extensions
-  sql_intent?: string | null
-  sql_executed?: string | null
-  sql_row_count?: number | null
-  sql_results?: Record<string, unknown>[] | null
-  sql_think_aloud?: string | null
-  governance_note?: string | null
-}
+  // ── Conversation History ─────────────────────────────────────────
+  getConversationHistory: (session_id: string, knowledge_set: string): Promise<ConversationHistoryResponse> =>
+    request(`/api/query/history?session_id=${encodeURIComponent(session_id)}&knowledge_set=${encodeURIComponent(knowledge_set)}`),
 
-// ── Conversation History ─────────────────────────────────────────
-export interface ConversationMessage {
-  id: number
-  session_id: string
-  knowledge_set: string
-  role: 'human' | 'ai'
-  content: string
-  run_id?: string
-  token_count?: number
-  created_at: string
-}
+  getConversationStats: (session_id: string, knowledge_set: string): Promise<ConversationStatsResponse> =>
+    request(`/api/query/history/stats?session_id=${encodeURIComponent(session_id)}&knowledge_set=${encodeURIComponent(knowledge_set)}`),
 
-export interface ConversationHistoryResponse {
-  session_id: string
-  knowledge_set: string
-  total_messages: number
-  turns: number
-  messages: ConversationMessage[]
-}
+  clearConversationHistory: (session_id: string, knowledge_set: string) =>
+    request(`/api/query/history?session_id=${encodeURIComponent(session_id)}&knowledge_set=${encodeURIComponent(knowledge_set)}`, { method: 'DELETE' }),
 
-export interface ConversationStatsResponse {
-  session_id: string
-  knowledge_set: string
-  total_messages: number
-  human_turns: number
-  ai_turns: number
-  first_message_at?: string
-  last_message_at?: string
-}
+  // ── Sources / Stats / Profile ───────────────────────────────────
+  getSources: (knowledge_set: string) =>
+    request(`/api/sources/?knowledge_set=${encodeURIComponent(knowledge_set)}`),
 
-// ── Stats ────────────────────────────────────────────────────────
-export interface GovernanceStats {
-  knowledge_set: string
-  total_chunks: number
-  total_llm_responses: number
-  pii_chunks: number
-  pii_percentage: number
-  sensitivity_distribution: { sensitivity: string; count: number }[]
-  department_distribution: { department: string; count: number }[]
-}
+  getStats: (knowledge_set: string) =>
+    request(`/api/logs/stats?knowledge_set=${encodeURIComponent(knowledge_set)}`),
 
-export interface KnowledgeSetInfo {
-  knowledge_set: string
-  collection_name: string
-  vector_count: number
-}
+  profileFile: (filename: string) =>
+    request(`/api/profile/${encodeURIComponent(filename)}`),
 
-export interface KnowledgeSetListResponse {
-  total: number
-  knowledge_sets: KnowledgeSetInfo[]
-}
+  health: () => request('/health'),
 
-// ── Databricks ───────────────────────────────────────────────────
+  // ── SQL Agent ───────────────────────────────────────────────────
+  sqlAgent: {
+    /** Standalone SQL agent query (bypasses RAG entirely) */
+    query: (payload: {
+      knowledge_set: string
+      session_id: string
+      question: string
+      connection_id: string
+      approved_tables: string[]
+      window_k?: number
+    }) =>
+      request('/api/sql-agent/query', {
+        method: 'POST',
+        body: JSON.stringify({ window_k: 6, ...payload }),
+      }),
 
-export interface DatabricksConnection {
-  connection_id: string
-  connection_name: string
-  workspace_url: string
-  http_path: string
-  catalog: string
-  description: string
-  knowledge_set: string
-  status: 'active' | 'deleted'
-  last_tested_at: string | null
-  created_at: string
-}
+    /** List approved tables for a session */
+    getApprovedSources: (session_id: string, knowledge_set: string): Promise<ApprovedSourcesResponse> =>
+      request(`/api/sql-agent/approved-sources?session_id=${encodeURIComponent(session_id)}&knowledge_set=${encodeURIComponent(knowledge_set)}`),
 
-export interface DatabricksConnectRequest {
-  connection_name: string
-  workspace_url: string
-  pat: string
-  http_path: string
-  catalog?: string
-  description?: string
-  knowledge_set?: string
-}
+    /** Sync the approved table list (replaces current list) */
+    syncApprovedSources: (payload: {
+      session_id: string
+      knowledge_set: string
+      connection_id: string
+      tables: string[]
+    }) =>
+      request('/api/sql-agent/approved-sources/sync', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
 
-export interface DatabricksConnectResponse {
-  connection_id: string
-  connection_name: string
-  workspace_url: string
-  catalog: string
-  status: string
-  current_user: string | null
-  message: string
-}
+    /** Remove all approved sources for a session */
+    clearApprovedSources: (session_id: string, knowledge_set: string) =>
+      request(`/api/sql-agent/approved-sources?session_id=${encodeURIComponent(session_id)}&knowledge_set=${encodeURIComponent(knowledge_set)}`, { method: 'DELETE' }),
 
-export interface DatabricksCatalog {
-  catalog: string
-}
+    /** SQL execution history for a session */
+    getLog: (session_id: string, knowledge_set: string, limit = 50) =>
+      request(`/api/sql-agent/log?session_id=${encodeURIComponent(session_id)}&knowledge_set=${encodeURIComponent(knowledge_set)}&limit=${limit}`),
+  },
 
-export interface DatabricksSchema {
-  schema: string
-  catalog: string
-}
+  // ── Databricks: Connection Management ───────────────────────────
+  databricks: {
+    connect: (payload: {
+      connection_name: string
+      workspace_url: string
+      pat: string
+      http_path: string
+      catalog?: string
+      description?: string
+      knowledge_set?: string
+    }): Promise<DatabricksConnectResponse> =>
+      request('/api/databricks/connect', { method: 'POST', body: JSON.stringify(payload) }),
 
-export interface DatabricksTable {
-  table_name: string
-  table_type: 'TABLE' | 'VIEW'
-  catalog: string
-  schema: string
-  full_name: string
-}
+    listConnections: (knowledge_set?: string): Promise<DatabricksConnection[]> =>
+      request(`/api/databricks/connections${knowledge_set ? `?knowledge_set=${encodeURIComponent(knowledge_set)}` : ''}`),
 
-export interface DatabricksColumn {
-  column_name: string
-  data_type: string
-  comment: string
-  is_complex: boolean
-  parsed_type: Record<string, unknown>
-}
+    deleteConnection: (connection_id: string) =>
+      request(`/api/databricks/connections/${encodeURIComponent(connection_id)}`, { method: 'DELETE' }),
 
-export interface DatabricksTableDetail {
-  catalog: string
-  schema: string
-  table: string
-  full_name: string
-  columns: DatabricksColumn[]
-  column_count: number
-  table_type: string
-  provider: string
-  location: string
-  comment: string
-  partition_cols: string[]
-}
+    testConnection: (connection_id: string) =>
+      request(`/api/databricks/connections/${encodeURIComponent(connection_id)}/test`, { method: 'POST' }),
 
-export interface DatabricksIngestRequest {
-  knowledge_set: string
-  catalog: string
-  db_schema: string    // renamed from 'schema' to match backend field
-  table: string
-  sample_rows?: number
-  rebuild?: boolean
-}
+    listCatalogs: (connection_id: string): Promise<{ catalogs: DatabricksCatalog[] }> =>
+      request(`/api/databricks/${encodeURIComponent(connection_id)}/catalogs`),
 
-export interface DatabricksIngestResult {
-  status: string
-  source: string
-  knowledge_set: string
-  row_count: number
-  column_count: number
-  documents: number
-  chunks: number
-  sampled: boolean
-  duration_seconds: number
-  profiled_at: string
-}
+    listSchemas: (connection_id: string, catalog: string): Promise<{ catalog: string; schemas: DatabricksSchema[] }> =>
+      request(`/api/databricks/${encodeURIComponent(connection_id)}/schemas?catalog=${encodeURIComponent(catalog)}`),
 
-// ── Databricks table ingest item (UI state) ──────────────────────
-export interface DatabricksIngestItem {
-  id: string
-  connection_id: string
-  catalog: string
-  schema: string
-  table: string
-  table_type: 'TABLE' | 'VIEW'
-  status: 'idle' | 'profiling' | 'ingesting' | 'ready' | 'error'
-  progress: number
-  chunk_count?: number
-  row_count?: number
-  duration_seconds?: number
-  error?: string
-  ingested_at?: string
-}
+    listTables: (connection_id: string, catalog: string, schema: string, include_views = true): Promise<{ tables: DatabricksTable[]; count: number }> =>
+      request(`/api/databricks/${encodeURIComponent(connection_id)}/tables?catalog=${encodeURIComponent(catalog)}&schema=${encodeURIComponent(schema)}&include_views=${include_views}`),
 
-// ── SQL Agent ────────────────────────────────────────────────────
+    getTableDetail: (connection_id: string, catalog: string, schema: string, table: string): Promise<DatabricksTableDetail> =>
+      request(`/api/databricks/${encodeURIComponent(connection_id)}/table-detail?catalog=${encodeURIComponent(catalog)}&schema=${encodeURIComponent(schema)}&table=${encodeURIComponent(table)}`),
 
-export type SqlIntentType =
-  | 'SIMPLE_LOOKUP'
-  | 'AGGREGATION'
-  | 'COMPARISON'
-  | 'JOIN_OPERATION'
-  | 'MULTI_STEP'
-  | 'CREATE_OBJECT'
-  | 'OUT_OF_SCOPE'
-  | 'NOT_SQL'
+    profileTable: (connection_id: string, catalog: string, schema: string, table: string, sample_rows = 500000) =>
+      request(`/api/databricks/${encodeURIComponent(connection_id)}/profile?catalog=${encodeURIComponent(catalog)}&schema=${encodeURIComponent(schema)}&table=${encodeURIComponent(table)}&sample_rows=${sample_rows}`),
 
-export interface ApprovedSourceEntry {
-  full_table: string
-  catalog: string
-  schema: string
-  table_name: string
-  connection_id: string
-  added_at: string
-}
+    ingestTable: (connection_id: string, payload: {
+      knowledge_set: string; catalog: string; db_schema: string; table: string
+      sample_rows?: number; rebuild?: boolean
+    }): Promise<DatabricksIngestResult> =>
+      request(`/api/databricks/${encodeURIComponent(connection_id)}/ingest`, {
+        method: 'POST', body: JSON.stringify(payload),
+      }),
 
-export interface ApprovedSourcesResponse {
-  session_id: string
-  knowledge_set: string
-  total: number
-  sources: ApprovedSourceEntry[]
-}
+    ingestMultiple: (connection_id: string, payload: {
+      knowledge_set: string
+      tables: { catalog: string; db_schema: string; table: string }[]
+      sample_rows?: number; rebuild_first?: boolean
+    }) =>
+      request(`/api/databricks/${encodeURIComponent(connection_id)}/ingest-multiple`, {
+        method: 'POST', body: JSON.stringify(payload),
+      }),
 
-export interface SyncApprovedSourcesRequest {
-  session_id: string
-  knowledge_set: string
-  connection_id: string
-  tables: string[]
-}
+    getIngestStatus: (job_id: string) =>
+      request(`/api/databricks/ingest-status/${encodeURIComponent(job_id)}`),
 
-export interface SqlAgentLogEntry {
-  run_id: string
-  question: string
-  intent: string
-  sql: string
-  row_count: number
-  duration_seconds: number
-  has_error: string
-  created_at: string
-}
+    getIngestionLog: (connection_id: string, knowledge_set?: string) =>
+      request(`/api/databricks/${encodeURIComponent(connection_id)}/ingestion-log${knowledge_set ? `?knowledge_set=${encodeURIComponent(knowledge_set)}` : ''}`),
+  },
 
+  // ── Document Generation ─────────────────────────────────────────
+  document: {
+    /** Generate a professional .docx from the user's request + RAG context */
+    generate: (payload: DocumentGenerateRequest): Promise<DocumentGenerateResponse> =>
+      request('/api/document/generate', {
+        method: 'POST',
+        body: JSON.stringify({ window_k: 6, k: 5, ...payload }),
+      }),
 
-// ── Document Generation ───────────────────────────────────────────
+    /** Download URL helper — returns full URL for the file */
+    downloadUrl: (filename: string): string =>
+      `${API_URL}/api/document/download/${encodeURIComponent(filename)}`,
 
-export interface DocumentGenerateRequest {
-  question     : string
-  knowledge_set: string
-  session_id   : string
-  window_k?    : number
-  k?           : number
-}
-
-export interface DocumentGenerateResponse {
-  success      : boolean
-  file_name    : string
-  download_url : string
-  title        : string
-  section_count: number
-  message      : string
-  error?       : string
+    /** List previously generated documents */
+    list: () =>
+      request<{ count: number; documents: { file_name: string; download_url: string; size_kb: number; created_at: number }[] }>('/api/document/list'),
+  },
 }
