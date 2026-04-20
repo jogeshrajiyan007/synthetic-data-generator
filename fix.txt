@@ -1,136 +1,434 @@
-import urllib3
-from contextlib import asynccontextmanager
+"""
+services/document_generator.py
+
+AI-powered .docx generation for GovernGPT.
+
+Flow:
+  1. LLM receives the user's documentation request + RAG context
+  2. LLM returns structured JSON (title, sections with headings/paragraphs/tables/bullets)
+  3. A Node.js script uses the docx library to build a professional .docx file
+  4. The file path is returned to the router for download
+
+Trigger detection:
+  Keywords: "create documentation", "generate report", "write a document",
+  "create a data catalog", "produce a report", "document this", "write up"
+"""
+
+from __future__ import annotations
+import os
+import re
+import json
+import uuid
+import subprocess
+import textwrap
+from pathlib import Path
 from datetime import datetime
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
-from routers.all_routers import (
-    sources_router, logs_router,
-    profile_router, reset_router, ks_router
-)
-from routers.ingest     import router as ingest_router
-from routers.query      import router as query_router
-from routers.databricks import router as databricks_router
-from routers.sql_agent  import router as sql_agent_router
-from routers.document   import router as document_router
-from services.vectorstore import load_vector_store, get_vector_count
-from services.memory import _ensure_history_table
-from services.databricks.client import _ensure_connections_table
-from services.databricks.approved_sources import _ensure_approved_sources_table
-from db import db_count, db_table_exists
-from models.schemas import HealthResponse
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import BaseMessage
+from langchain_core.output_parsers import StrOutputParser
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from llm import get_llm
+from config import CHAT_MODEL
+
+# Directory where generated .docx files are stored
+DOCS_DIR = Path(__file__).parent.parent / "generated_docs"
+DOCS_DIR.mkdir(exist_ok=True)
 
 
-# ── Startup ───────────────────────────────────────────────────────
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    print("🏛️  AXA GovernGPT API starting...")
+# ── Documentation trigger detection ──────────────────────────────
 
-    from llm import get_embeddings_singleton
-    get_embeddings_singleton()
-    print("✅ Embeddings model loaded.")
-
-    _ensure_history_table()
-    print("✅ Conversation history table ready.")
-
-    _ensure_connections_table()
-    print("✅ Databricks connections table ready.")
-
-    _ensure_approved_sources_table()
-    print("✅ Approved sources table ready.")
-
-    yield
-    print("👋 Shutting down.")
-
-
-# ── App ───────────────────────────────────────────────────────────
-app = FastAPI(
-    title="AXA GovernGPT — Data Governance RAG + SQL Agent API",
-    description=(
-        "AI-powered Data Governance platform for AXA Insurance. "
-        "Combines conversational RAG over documents with an agentic SQL engine "
-        "for live Databricks queries against approved source tables. "
-        "Powered by GPT-4o via AXA SecureGPT Hub."
-    ),
-    version="4.0.0",
-    lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc"
+_DOC_TRIGGER = re.compile(
+    r'\b(create|generate|write|produce|build|make|prepare|draft|design)\b.{0,30}'
+    r'\b(documentation|document|report|data catalog|catalog|summary report|'
+    r'write.?up|briefing|specification|spec|data dictionary|runbook|playbook)\b'
+    r'|\b(document this|document the|write this up|put this in a doc|'
+    r'create a doc|generate a doc|export (this|as|to) (a )?(doc|word|docx))\b',
+    re.IGNORECASE,
 )
 
-# ── CORS ──────────────────────────────────────────────────────────
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000", "http://localhost:5173",
-        "http://127.0.0.1:3000", "http://127.0.0.1:5173",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
-# ── Routers ───────────────────────────────────────────────────────
-app.include_router(ingest_router)
-app.include_router(query_router)
-app.include_router(sources_router)
-app.include_router(logs_router)
-app.include_router(profile_router)
-app.include_router(reset_router)
-app.include_router(ks_router)
-app.include_router(databricks_router)
-app.include_router(sql_agent_router)
-app.include_router(document_router)     # ← Document generation
+def is_doc_request(question: str) -> bool:
+    """Return True if the user is asking GovernGPT to produce a .docx document."""
+    return bool(_DOC_TRIGGER.search(question))
 
 
-# ── Health ────────────────────────────────────────────────────────
-@app.get("/health", response_model=HealthResponse, tags=["Health"])
-async def health():
-    chroma_count  = 0
-    sources_count = 0
+# ── LLM prompt for structured document content ───────────────────
+
+DOC_CONTENT_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are an expert Data & AI Advisor for the insurance industry.
+The user has asked you to generate a professional Word document (.docx).
+
+Using the context below, produce a COMPLETE, structured document in JSON format.
+The JSON must follow this exact schema — no markdown fences, no preamble, pure JSON:
+
+{{
+  "title": "Document title",
+  "subtitle": "Optional subtitle or date",
+  "author": "GovernGPT — AXA Data Governance",
+  "sections": [
+    {{
+      "heading": "Section heading",
+      "level": 1,
+      "content": [
+        {{"type": "paragraph", "text": "Body text paragraph."}},
+        {{"type": "bullets", "items": ["Bullet 1", "Bullet 2", "Bullet 3"]}},
+        {{"type": "table",
+          "headers": ["Column 1", "Column 2"],
+          "rows": [["Value A", "Value B"], ["Value C", "Value D"]]
+        }}
+      ]
+    }},
+    {{
+      "heading": "Subsection",
+      "level": 2,
+      "content": [
+        {{"type": "paragraph", "text": "More detail here."}}
+      ]
+    }}
+  ]
+}}
+
+Rules:
+- Use professional, insurance-industry language
+- Include a minimum of 4 sections with substantive content
+- Use tables where comparison/structured data exists
+- Use bullets for lists of 3+ items
+- Always include an Executive Summary as the first section
+- Always include a Recommendations section near the end
+- Draw insights from the provided context — be specific, not generic
+- Return ONLY valid JSON. No markdown, no explanation.
+
+Context from knowledge base:
+{context}
+
+Conversation history (for follow-up doc requests):
+{history_summary}"""),
+    ("human", "{question}"),
+])
+
+
+# ── Node.js docx generator script ────────────────────────────────
+
+_DOCX_SCRIPT_TEMPLATE = r"""
+const fs = require('fs');
+const {{
+  Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
+  Header, Footer, AlignmentType, HeadingLevel, BorderStyle,
+  WidthType, ShadingType, VerticalAlign, LevelFormat, PageNumber,
+  NumberFormat
+}} = require('docx');
+
+const data = {doc_json};
+
+// ── Colour palette (AXA brand) ────────────────────────────────
+const AXA_BLUE    = "00008F";
+const AXA_LIGHT   = "D0D5FF";
+const BORDER_GREY = "CCCCCC";
+const TEXT_DARK   = "1A1A2E";
+const ROW_ALT     = "F4F4F9";
+
+const border = {{ style: BorderStyle.SINGLE, size: 1, color: BORDER_GREY }};
+const allBorders = {{ top: border, bottom: border, left: border, right: border }};
+
+// ── Helpers ───────────────────────────────────────────────────
+function makeHeaderCell(text) {{
+  return new TableCell({{
+    borders: allBorders,
+    shading: {{ fill: AXA_BLUE, type: ShadingType.CLEAR }},
+    width: {{ size: Math.floor(9360 / 2), type: WidthType.DXA }},
+    margins: {{ top: 100, bottom: 100, left: 120, right: 120 }},
+    verticalAlign: VerticalAlign.CENTER,
+    children: [new Paragraph({{
+      alignment: AlignmentType.LEFT,
+      children: [new TextRun({{ text: String(text), bold: true, color: "FFFFFF", font: "Arial", size: 20 }})]
+    }})]
+  }});
+}}
+
+function makeDataCell(text, shade) {{
+  return new TableCell({{
+    borders: allBorders,
+    shading: {{ fill: shade, type: ShadingType.CLEAR }},
+    width: {{ size: Math.floor(9360 / 2), type: WidthType.DXA }},
+    margins: {{ top: 80, bottom: 80, left: 120, right: 120 }},
+    children: [new Paragraph({{
+      children: [new TextRun({{ text: String(text), font: "Arial", size: 20, color: TEXT_DARK }})]
+    }})]
+  }});
+}}
+
+function makeTable(headers, rows) {{
+  const colCount = headers.length;
+  const colWidth = Math.floor(9360 / colCount);
+  const colWidths = Array(colCount).fill(colWidth);
+
+  const headerRow = new TableRow({{
+    tableHeader: true,
+    children: headers.map(h => {{
+      return new TableCell({{
+        borders: allBorders,
+        shading: {{ fill: AXA_BLUE, type: ShadingType.CLEAR }},
+        width: {{ size: colWidth, type: WidthType.DXA }},
+        margins: {{ top: 100, bottom: 100, left: 120, right: 120 }},
+        verticalAlign: VerticalAlign.CENTER,
+        children: [new Paragraph({{
+          children: [new TextRun({{ text: String(h), bold: true, color: "FFFFFF", font: "Arial", size: 20 }})]
+        }})]
+      }});
+    }})
+  }});
+
+  const dataRows = rows.map((row, ri) => new TableRow({{
+    children: row.map(cell => new TableCell({{
+      borders: allBorders,
+      shading: {{ fill: ri % 2 === 0 ? "FFFFFF" : ROW_ALT, type: ShadingType.CLEAR }},
+      width: {{ size: colWidth, type: WidthType.DXA }},
+      margins: {{ top: 80, bottom: 80, left: 120, right: 120 }},
+      children: [new Paragraph({{
+        children: [new TextRun({{ text: String(cell), font: "Arial", size: 20, color: TEXT_DARK }})]
+      }})]
+    }}))
+  }}));
+
+  return new Table({{
+    width: {{ size: 9360, type: WidthType.DXA }},
+    columnWidths: colWidths,
+    rows: [headerRow, ...dataRows]
+  }});
+}}
+
+function contentToBlocks(items) {{
+  const blocks = [];
+  for (const item of items) {{
+    if (item.type === 'paragraph') {{
+      blocks.push(new Paragraph({{
+        spacing: {{ after: 160 }},
+        children: [new TextRun({{ text: item.text || '', font: "Arial", size: 22, color: TEXT_DARK }})]
+      }}));
+    }} else if (item.type === 'bullets') {{
+      for (const bullet of (item.items || [])) {{
+        blocks.push(new Paragraph({{
+          numbering: {{ reference: "bullets", level: 0 }},
+          spacing: {{ after: 80 }},
+          children: [new TextRun({{ text: String(bullet), font: "Arial", size: 22, color: TEXT_DARK }})]
+        }}));
+      }}
+    }} else if (item.type === 'table') {{
+      blocks.push(makeTable(item.headers || [], item.rows || []));
+      blocks.push(new Paragraph({{ spacing: {{ after: 160 }}, children: [] }}));
+    }}
+  }}
+  return blocks;
+}}
+
+// ── Build document children ───────────────────────────────────
+const children = [];
+
+// Cover title
+children.push(new Paragraph({{
+  heading: HeadingLevel.TITLE,
+  spacing: {{ before: 480, after: 240 }},
+  children: [new TextRun({{ text: data.title || 'Document', bold: true, font: "Arial", size: 56, color: AXA_BLUE }})]
+}}));
+
+if (data.subtitle) {{
+  children.push(new Paragraph({{
+    spacing: {{ after: 120 }},
+    alignment: AlignmentType.LEFT,
+    children: [new TextRun({{ text: data.subtitle, font: "Arial", size: 24, color: "666666", italics: true }})]
+  }}));
+}}
+
+children.push(new Paragraph({{
+  spacing: {{ after: 480 }},
+  children: [new TextRun({{ text: data.author || 'GovernGPT', font: "Arial", size: 22, color: "888888" }})]
+}}));
+
+// Horizontal rule
+children.push(new Paragraph({{
+  border: {{ bottom: {{ style: BorderStyle.SINGLE, size: 6, color: AXA_BLUE, space: 1 }} }},
+  children: []
+}}));
+children.push(new Paragraph({{ spacing: {{ after: 360 }}, children: [] }}));
+
+// Sections
+for (const section of (data.sections || [])) {{
+  const level = section.level === 2 ? HeadingLevel.HEADING_2 : HeadingLevel.HEADING_1;
+  const fontSize = section.level === 2 ? 26 : 32;
+  children.push(new Paragraph({{
+    heading: level,
+    spacing: {{ before: section.level === 1 ? 360 : 240, after: 160 }},
+    children: [new TextRun({{ text: section.heading || '', bold: true, font: "Arial", size: fontSize, color: AXA_BLUE }})]
+  }}));
+  children.push(...contentToBlocks(section.content || []));
+}}
+
+// ── Document ──────────────────────────────────────────────────
+const doc = new Document({{
+  numbering: {{
+    config: [{{
+      reference: "bullets",
+      levels: [{{
+        level: 0, format: LevelFormat.BULLET, text: "\u2022",
+        alignment: AlignmentType.LEFT,
+        style: {{ paragraph: {{ indent: {{ left: 720, hanging: 360 }} }} }}
+      }}]
+    }}]
+  }},
+  styles: {{
+    default: {{ document: {{ run: {{ font: "Arial", size: 22, color: TEXT_DARK }} }} }},
+    paragraphStyles: [
+      {{ id: "Heading1", name: "Heading 1", basedOn: "Normal", next: "Normal", quickFormat: true,
+         run: {{ size: 32, bold: true, font: "Arial", color: AXA_BLUE }},
+         paragraph: {{ spacing: {{ before: 360, after: 160 }}, outlineLevel: 0 }} }},
+      {{ id: "Heading2", name: "Heading 2", basedOn: "Normal", next: "Normal", quickFormat: true,
+         run: {{ size: 26, bold: true, font: "Arial", color: AXA_BLUE }},
+         paragraph: {{ spacing: {{ before: 240, after: 120 }}, outlineLevel: 1 }} }},
+    ]
+  }},
+  sections: [{{
+    properties: {{
+      page: {{
+        size: {{ width: 12240, height: 15840 }},
+        margin: {{ top: 1440, right: 1440, bottom: 1440, left: 1440 }}
+      }}
+    }},
+    headers: {{
+      default: new Header({{
+        children: [new Paragraph({{
+          border: {{ bottom: {{ style: BorderStyle.SINGLE, size: 4, color: AXA_BLUE, space: 1 }} }},
+          children: [
+            new TextRun({{ text: data.title || 'GovernGPT Document', font: "Arial", size: 18, color: "888888" }}),
+            new TextRun({{ text: "   |   AXA GovernGPT", font: "Arial", size: 18, color: AXA_BLUE }})
+          ]
+        }})]
+      }})
+    }},
+    footers: {{
+      default: new Footer({{
+        children: [new Paragraph({{
+          border: {{ top: {{ style: BorderStyle.SINGLE, size: 4, color: AXA_BLUE, space: 1 }} }},
+          children: [
+            new TextRun({{ text: "Generated by GovernGPT  |  Confidential  |  ", font: "Arial", size: 16, color: "888888" }}),
+            new TextRun({{ children: [new PageNumber()], font: "Arial", size: 16, color: "888888" }})
+          ]
+        }})]
+      }})
+    }},
+    children
+  }}]
+}});
+
+Packer.toBuffer(doc).then(buffer => {{
+  fs.writeFileSync("{output_path}", buffer);
+  console.log("OK:" + "{output_path}");
+}}).catch(err => {{
+  console.error("ERR:" + err.message);
+  process.exit(1);
+}});
+"""
+
+
+# ── Main generator function ───────────────────────────────────────
+
+def generate_document(
+    question: str,
+    rag_context: str = "",
+    chat_history: list[BaseMessage] | None = None,
+    knowledge_set: str = "default",
+) -> dict:
+    """
+    Generate a .docx document from the user's request + RAG context.
+
+    Returns:
+        {
+          "success": bool,
+          "file_name": str,
+          "file_path": str,
+          "title": str,
+          "section_count": int,
+          "error": str | None
+        }
+    """
+    llm    = get_llm()
+    parser = StrOutputParser()
+
+    # ── Step 1: Generate structured document content via LLM ─────
+    history_summary = ""
+    if chat_history:
+        # Summarise last 3 turns for context without full history
+        recent = chat_history[-6:]
+        history_summary = "\n".join([
+            f"{'User' if m.type == 'human' else 'Assistant'}: {m.content[:300]}"
+            for m in recent
+        ])
+
     try:
-        vdb = load_vector_store()
-        chroma_count = get_vector_count(vdb)
-        if db_table_exists("document_chunks"):
-            from db import db_query
-            sources_count = len(db_query(
-                "SELECT DISTINCT source_file FROM document_chunks"
-            ))
-    except Exception:
-        pass
+        doc_chain  = DOC_CONTENT_PROMPT | llm | parser
+        raw_json   = doc_chain.invoke({
+            "question"       : question,
+            "context"        : rag_context[:6000] if rag_context else "No additional context provided.",
+            "history_summary": history_summary or "No prior conversation.",
+        })
 
-    return HealthResponse(
-        status="healthy",
-        version="4.0.0",
-        chroma_vectors=chroma_count,
-        sqlite_chunks=db_count("document_chunks"),
-        sqlite_responses=db_count("llm_responses"),
-        sqlite_conversation_messages=db_count("conversation_history"),
-        sources_loaded=sources_count,
-        timestamp=datetime.now().isoformat()
+        # Strip accidental markdown fences
+        raw_json = re.sub(r"^```json\s*", "", raw_json, flags=re.IGNORECASE)
+        raw_json = re.sub(r"^```\s*",     "", raw_json)
+        raw_json = re.sub(r"\s*```$",     "", raw_json).strip()
+
+        doc_data = json.loads(raw_json)
+
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"LLM returned invalid JSON: {str(e)}", "file_name": "", "file_path": "", "title": "", "section_count": 0}
+    except Exception as e:
+        return {"success": False, "error": f"Content generation failed: {str(e)}", "file_name": "", "file_path": "", "title": "", "section_count": 0}
+
+    # ── Step 2: Write Node.js script and execute ──────────────────
+    file_id   = uuid.uuid4().hex[:10]
+    safe_title = re.sub(r'[^\w\s-]', '', doc_data.get("title", "document"))[:40].strip().replace(" ", "_")
+    file_name = f"{safe_title}_{file_id}.docx"
+    file_path = str(DOCS_DIR / file_name)
+
+    # Serialise doc_data to JSON safely for embedding in JS
+    doc_json_str = json.dumps(doc_data, ensure_ascii=False)
+
+    # Build the Node.js script
+    script_content = _DOCX_SCRIPT_TEMPLATE.format(
+        doc_json    = doc_json_str,
+        output_path = file_path.replace("\\", "/"),
     )
 
+    script_path = str(DOCS_DIR / f"gen_{file_id}.js")
+    try:
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write(script_content)
 
-@app.get("/", tags=["Health"])
-async def root():
+        result = subprocess.run(
+            ["node", script_path],
+            capture_output=True, text=True, timeout=60
+        )
+
+        if result.returncode != 0 or not Path(file_path).exists():
+            error_msg = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+            return {"success": False, "error": f"docx generation failed: {error_msg}", "file_name": "", "file_path": "", "title": doc_data.get("title", ""), "section_count": 0}
+
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "Document generation timed out.", "file_name": "", "file_path": "", "title": "", "section_count": 0}
+    except Exception as e:
+        return {"success": False, "error": str(e), "file_name": "", "file_path": "", "title": "", "section_count": 0}
+    finally:
+        # Clean up the temp script
+        try:
+            os.remove(script_path)
+        except Exception:
+            pass
+
     return {
-        "service" : "AXA GovernGPT — Data Governance RAG + SQL Agent API",
-        "version" : "4.0.0",
-        "docs"    : "/docs",
-        "health"  : "/health",
-        "features": [
-            "Conversational RAG with SQLite-persisted memory",
-            "Agentic SQL engine with intent detection and source enforcement",
-            "Approved source whitelist — only query explicitly approved tables",
-            "Prohibited operation enforcement (DDL/DML blocked)",
-            "Governance overlay — PII, sensitivity, ownership surfaced on results",
-            "Multi-knowledge-set isolation (ChromaDB)",
-            "File ingestion: PDF, DOCX, CSV, XLSX, JSON, XML, MD, Images",
-            "Databricks Hive Metastore + Unity Catalog integration",
-            "STRUCT / ARRAY / MAP type schema parsing and profiling",
-        ]
+        "success"      : True,
+        "file_name"    : file_name,
+        "file_path"    : file_path,
+        "title"        : doc_data.get("title", "Document"),
+        "section_count": len(doc_data.get("sections", [])),
+        "error"        : None,
     }
-
-
