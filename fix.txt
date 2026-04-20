@@ -1,97 +1,93 @@
 'use client'
-import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Plug, Eye, EyeOff, AlertCircle, CheckCircle, Loader2 } from 'lucide-react'
-import { api } from '@/lib/api'
-import { cn } from '@/lib/utils'
-import type { DatabricksConnection } from '@/types'
+import { X, Database, SquareCode, FileText, AlertTriangle, CheckCircle, ArrowRight, Lightbulb } from 'lucide-react'
 
-interface ConnectModalProps {
+interface PromptGuidePanelProps {
   isOpen: boolean
   onClose: () => void
-  knowledgeSetId: string
-  onConnected: (conn: DatabricksConnection) => void
 }
 
-// ── Field wrapper — defined OUTSIDE ConnectModal to prevent remount on every keystroke.
-// If defined inside the component, React treats it as a new component type on each render
-// and unmounts/remounts the children (inputs), causing focus loss after every character typed.
-function Field({ label, required, hint, children }: {
-  label: string
-  required?: boolean
-  hint?: string
-  children: React.ReactNode
-}) {
-  return (
-    <div>
-      <label className="block text-[10px] font-semibold text-ink-500 uppercase tracking-wider mb-1.5">
-        {label}{required && <span className="text-axared-500 ml-0.5">*</span>}
-      </label>
-      {children}
-      {hint && <p className="text-[10px] text-ink-400 mt-1">{hint}</p>}
-    </div>
-  )
-}
+const STEPS = [
+  {
+    number  : '01',
+    phase   : 'Dataset Exploration',
+    icon    : Database,
+    color   : 'text-axa-800',
+    bg      : 'bg-axa-50',
+    border  : 'border-axa-100',
+    numColor: 'text-axa-800',
+    sqlState: { label: 'USE SQL OFF', cls: 'bg-ink-100 text-ink-500' },
+    prompts : [
+      'What are these documents about? Provide a high-level summary.',
+      'What key fields and columns are in this dataset?',
+      'What are the data quality issues in the claims table?',
+      'Who owns this dataset and what is its sensitivity classification?',
+      'What governance frameworks apply to this data (GDPR, Solvency II)?',
+    ],
+    guidance: 'Start here. Ask broad governance, schema, and metadata questions using the RAG knowledge base. SQL is not needed — answers come from ingested documentation and profiling data.',
+    tip     : 'Keep USE SQL toggled OFF during this phase.',
+  },
+  {
+    number  : '02',
+    phase   : 'SQL Data Analysis',
+    icon    : SquareCode,
+    color   : 'text-emerald-700',
+    bg      : 'bg-emerald-50',
+    border  : 'border-emerald-100',
+    numColor: 'text-emerald-700',
+    sqlState: { label: 'USE SQL ON', cls: 'bg-emerald-100 text-emerald-700' },
+    prompts : [
+      'Show me the first 10 rows from claims_casualty_bronze.',
+      'How many claims are filed each month?',
+      'What is the distribution of claim status (approved, rejected, pending)?',
+      'Show distinct values from the claim_status column.',
+      'What is the average claim resolution time?',
+    ],
+    guidance: 'Switch to SQL mode once you understand the dataset structure. Toggle USE SQL ON for your approved tables, then ask specific data questions. The SQL Agent generates and executes queries live against Databricks.',
+    tip     : 'Toggle USE SQL ON for approved tables before asking data queries.',
+  },
+  {
+    number  : '03',
+    phase   : 'Documentation',
+    icon    : FileText,
+    color   : 'text-purple-700',
+    bg      : 'bg-purple-50',
+    border  : 'border-purple-100',
+    numColor: 'text-purple-700',
+    sqlState: { label: 'EITHER STATE', cls: 'bg-purple-100 text-purple-700' },
+    prompts : [
+      'Create documentation for the claims dataset covering schema, DQ issues, and GDPR compliance.',
+      'Generate a data governance report including the claim status distribution findings.',
+      'Write a data dictionary for the policy and claims tables with field descriptions.',
+      'Produce a summary report of all SQL findings from this session.',
+    ],
+    guidance: 'End your session with a documentation request. Be specific about what to include — list the exact tables, findings, and analysis sections you want covered. This avoids the LLM having to process the full chat history blindly.',
+    tip     : 'Specify exactly what to include: "document the DQ findings, SQL results for claim status, and GDPR gaps."',
+  },
+]
 
-const inputCls = "w-full bg-white border border-ink-200 rounded-lg px-3 py-2 text-sm text-ink-800 placeholder-ink-300 focus:outline-none focus:border-axa-400 focus:ring-2 focus:ring-axa-50 transition-all font-mono"
+const WARNINGS = [
+  {
+    icon : AlertTriangle,
+    color: 'text-amber-600',
+    bg   : 'bg-amber-50 border-amber-100',
+    text : 'Avoid mixing phases — asking SQL queries with USE SQL OFF causes the agent to fall back to RAG and return documentation-style answers instead of live data.',
+  },
+  {
+    icon : AlertTriangle,
+    color: 'text-amber-600',
+    bg   : 'bg-amber-50 border-amber-100',
+    text : 'Do not ask broad governance questions with USE SQL ON — the SQL agent may attempt to classify them as data queries, wasting tokens and producing off-context responses.',
+  },
+  {
+    icon : CheckCircle,
+    color: 'text-emerald-600',
+    bg   : 'bg-emerald-50 border-emerald-100',
+    text : 'Follow phases 01 → 02 → 03 in order for the cleanest, most accurate results with minimal hallucination risk.',
+  },
+]
 
-export function ConnectModal({ isOpen, onClose, knowledgeSetId, onConnected }: ConnectModalProps) {
-  const [form, setForm] = useState({
-    connection_name: '',
-    workspace_url  : '',
-    pat            : '',
-    http_path      : '',
-    catalog        : 'hive_metastore',
-    description    : '',
-  })
-  const [showPat, setShowPat] = useState(false)
-  const [loading, setLoading] = useState(false)
-  const [error, setError]     = useState('')
-  const [success, setSuccess] = useState('')
-
-  const set = (k: keyof typeof form, v: string) =>
-    setForm(prev => ({ ...prev, [k]: v }))
-
-  const handleConnect = async () => {
-    if (!form.connection_name || !form.workspace_url || !form.pat || !form.http_path) {
-      setError('Connection name, workspace URL, PAT, and HTTP path are required.')
-      return
-    }
-    setLoading(true); setError(''); setSuccess('')
-    try {
-      const result = await api.databricks.connect({
-        ...form,
-        knowledge_set: knowledgeSetId,
-      })
-      setSuccess(`Connected as ${result.current_user ?? 'authenticated user'}`)
-      setTimeout(() => {
-        onConnected({
-          connection_id  : result.connection_id,
-          connection_name: result.connection_name,
-          workspace_url  : result.workspace_url,
-          http_path      : form.http_path,
-          catalog        : result.catalog,
-          description    : form.description,
-          knowledge_set  : knowledgeSetId,
-          status         : 'active',
-          last_tested_at : new Date().toISOString(),
-          created_at     : new Date().toISOString(),
-        })
-        handleClose()
-      }, 1200)
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Connection failed')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const handleClose = () => {
-    setForm({ connection_name: '', workspace_url: '', pat: '', http_path: '', catalog: 'hive_metastore', description: '' })
-    setError(''); setSuccess('')
-    onClose()
-  }
-
+export function PromptGuidePanel({ isOpen, onClose }: PromptGuidePanelProps) {
   return (
     <AnimatePresence>
       {isOpen && (
@@ -99,166 +95,161 @@ export function ConnectModal({ isOpen, onClose, knowledgeSetId, onConnected }: C
           {/* Backdrop */}
           <motion.div
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            onClick={handleClose}
-            className="fixed inset-0 z-40 bg-ink-900/40 backdrop-blur-sm"
+            onClick={onClose}
+            className="fixed inset-0 z-40 bg-ink-900/30 backdrop-blur-sm"
           />
 
-          {/* Modal */}
+          {/* Side panel */}
           <motion.div
-            initial={{ opacity: 0, scale: 0.97, y: 14 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.97, y: 14 }}
-            transition={{ type: 'spring', damping: 28, stiffness: 360 }}
-            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+            initial={{ opacity: 0, x: 40 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 40 }}
+            transition={{ type: 'spring', damping: 30, stiffness: 350 }}
+            className="fixed right-0 top-0 bottom-0 z-50 w-full max-w-md bg-white border-l border-ink-200 shadow-2xl flex flex-col"
           >
-            <div className="w-full max-w-lg bg-white rounded-2xl shadow-axa-lg overflow-hidden border border-ink-100">
-              {/* AXA colour strip */}
-              <div className="h-1.5 bg-gradient-to-r from-axa-800 via-axa-600 to-axa-800" />
-
-              <div className="p-6">
-                {/* Header */}
-                <div className="flex items-start justify-between mb-5">
+            {/* Header */}
+            <div className="flex-shrink-0 border-b border-ink-100">
+              <div className="h-1 bg-gradient-to-r from-axa-800 via-axa-500 to-purple-600" />
+              <div className="flex items-center justify-between px-5 py-4">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-7 h-7 rounded-lg bg-axa-800 flex items-center justify-center">
+                    <Lightbulb className="w-3.5 h-3.5 text-white" />
+                  </div>
                   <div>
-                    <div className="flex items-center gap-2 mb-1">
-                      <div className="w-6 h-6 rounded-md bg-axa-50 border border-axa-100 flex items-center justify-center">
-                        <Plug className="w-3.5 h-3.5 text-axa-800" />
-                      </div>
-                      <span className="text-[10px] font-semibold text-axa-800 uppercase tracking-widest">
-                        New Databricks Connection
-                      </span>
-                    </div>
-                    <h2 className="font-display text-xl text-ink-900">Connect to Databricks</h2>
-                    <p className="text-ink-400 text-xs mt-0.5">
-                      PAT is encrypted before storage — never stored in plaintext.
-                    </p>
-                  </div>
-                  <button onClick={handleClose} className="p-1.5 rounded-lg hover:bg-ink-50 text-ink-400">
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-
-                {/* Form fields */}
-                <div className="space-y-3">
-                  <Field label="Connection Name" required>
-                    <input
-                      value={form.connection_name}
-                      onChange={e => set('connection_name', e.target.value)}
-                      placeholder="e.g. AXA Prod Databricks"
-                      className={inputCls}
-                      autoComplete="off"
-                    />
-                  </Field>
-
-                  <Field label="Workspace URL" required>
-                    <input
-                      value={form.workspace_url}
-                      onChange={e => set('workspace_url', e.target.value)}
-                      placeholder="https://adb-1234567890.azuredatabricks.net"
-                      className={inputCls}
-                      autoComplete="off"
-                    />
-                  </Field>
-
-                  <Field
-                    label="HTTP Path (SQL Warehouse)"
-                    required
-                    hint="Found in: SQL Warehouses → your warehouse → Connection details"
-                  >
-                    <input
-                      value={form.http_path}
-                      onChange={e => set('http_path', e.target.value)}
-                      placeholder="/sql/1.0/warehouses/abc123def456"
-                      className={inputCls}
-                      autoComplete="off"
-                    />
-                  </Field>
-
-                  <Field label="Personal Access Token (PAT)" required>
-                    <div className="relative">
-                      <input
-                        type={showPat ? 'text' : 'password'}
-                        value={form.pat}
-                        onChange={e => set('pat', e.target.value)}
-                        placeholder="dapi••••••••••••••••••••••••••••••••"
-                        className={cn(inputCls, 'pr-10')}
-                        autoComplete="new-password"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowPat(v => !v)}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-ink-400 hover:text-ink-600"
-                      >
-                        {showPat ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                      </button>
-                    </div>
-                  </Field>
-
-                  <div className="grid grid-cols-2 gap-3">
-                    <Field label="Default Catalog">
-                      <input
-                        value={form.catalog}
-                        onChange={e => set('catalog', e.target.value)}
-                        placeholder="hive_metastore"
-                        className={inputCls}
-                        autoComplete="off"
-                      />
-                    </Field>
-                    <Field label="Description">
-                      <input
-                        value={form.description}
-                        onChange={e => set('description', e.target.value)}
-                        placeholder="Optional"
-                        className={inputCls}
-                        autoComplete="off"
-                      />
-                    </Field>
+                    <h2 className="text-sm font-semibold text-ink-900">Sequential Prompting Guide</h2>
+                    <p className="text-[10px] text-ink-400">Follow this flow for best results</p>
                   </div>
                 </div>
+                <button
+                  onClick={onClose}
+                  className="p-1.5 rounded-lg hover:bg-ink-50 text-ink-400 hover:text-ink-700 transition-colors"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
 
-                {/* Error / success feedback */}
-                {error && (
-                  <motion.div
-                    initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }}
-                    className="flex items-start gap-2 mt-3 p-3 bg-axared-50 border border-axared-100 rounded-xl text-xs text-axared-600"
-                  >
-                    <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-                    <span>{error}</span>
-                  </motion.div>
-                )}
-                {success && (
-                  <motion.div
-                    initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }}
-                    className="flex items-center gap-2 mt-3 p-3 bg-emerald-50 border border-emerald-100 rounded-xl text-xs text-emerald-700"
-                  >
-                    <CheckCircle className="w-4 h-4 flex-shrink-0" />
-                    <span>{success}</span>
-                  </motion.div>
-                )}
+            {/* Scrollable content */}
+            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
 
-                {/* Actions */}
-                <div className="flex items-center justify-end gap-3 mt-5 pt-4 border-t border-ink-100">
-                  <button
-                    type="button"
-                    onClick={handleClose}
-                    className="px-4 py-2 rounded-lg text-sm text-ink-500 hover:text-ink-700 hover:bg-ink-50 transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleConnect}
-                    disabled={loading || !!success}
-                    className={cn(
-                      'flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-semibold transition-all',
-                      'bg-axa-800 text-white hover:bg-axa-700 shadow-axa',
-                      'disabled:opacity-50 disabled:cursor-not-allowed'
+              {/* Flow overview pills */}
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {STEPS.map((step, i) => (
+                  <div key={step.number} className="flex items-center gap-1.5">
+                    <span className={`text-[10px] font-bold px-2.5 py-1 rounded-full border ${step.bg} ${step.border} ${step.numColor}`}>
+                      {step.number} {step.phase}
+                    </span>
+                    {i < STEPS.length - 1 && (
+                      <ArrowRight className="w-3 h-3 text-ink-300 flex-shrink-0" />
                     )}
+                  </div>
+                ))}
+              </div>
+
+              {/* Steps */}
+              {STEPS.map((step, i) => {
+                const Icon = step.icon
+                return (
+                  <motion.div
+                    key={step.number}
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: i * 0.07 }}
+                    className={`rounded-xl border ${step.border} overflow-hidden`}
                   >
-                    {loading && <Loader2 className="w-4 h-4 animate-spin" />}
-                    {loading ? 'Testing connection…' : 'Connect & Save'}
-                  </button>
+                    {/* Step header */}
+                    <div className={`flex items-center gap-3 px-4 py-3 ${step.bg}`}>
+                      <div className={`w-8 h-8 rounded-lg bg-white border ${step.border} flex items-center justify-center flex-shrink-0`}>
+                        <Icon className={`w-4 h-4 ${step.color}`} />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className={`text-[10px] font-black ${step.numColor} tracking-widest`}>
+                            PHASE {step.number}
+                          </span>
+                          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${step.sqlState.cls}`}>
+                            {step.sqlState.label}
+                          </span>
+                        </div>
+                        <p className={`text-xs font-semibold ${step.color}`}>{step.phase}</p>
+                      </div>
+                    </div>
+
+                    {/* Step body */}
+                    <div className="px-4 py-3 bg-white space-y-3">
+                      <p className="text-[11px] text-ink-600 leading-relaxed">{step.guidance}</p>
+
+                      {/* Sample prompts */}
+                      <div>
+                        <p className="text-[9px] font-semibold text-ink-400 uppercase tracking-wider mb-1.5">
+                          Example prompts
+                        </p>
+                        <div className="space-y-1.5">
+                          {step.prompts.map((prompt, pi) => (
+                            <div key={pi} className="flex items-start gap-2">
+                              <span className={`text-[9px] font-bold ${step.numColor} mt-0.5 flex-shrink-0`}>›</span>
+                              <p className="text-[11px] text-ink-600 italic leading-snug">{prompt}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Tip */}
+                      <div className={`flex items-start gap-2 px-3 py-2 rounded-lg ${step.bg} border ${step.border}`}>
+                        <Lightbulb className={`w-3 h-3 flex-shrink-0 mt-0.5 ${step.color}`} />
+                        <p className={`text-[10px] font-medium ${step.color}`}>{step.tip}</p>
+                      </div>
+                    </div>
+                  </motion.div>
+                )
+              })}
+
+              {/* Warnings / best practices */}
+              <div>
+                <p className="text-[9px] font-semibold text-ink-400 uppercase tracking-wider mb-2">
+                  Best Practices
+                </p>
+                <div className="space-y-2">
+                  {WARNINGS.map((w, i) => {
+                    const WIcon = w.icon
+                    return (
+                      <div key={i} className={`flex items-start gap-2.5 px-3 py-2.5 rounded-xl border ${w.bg}`}>
+                        <WIcon className={`w-3.5 h-3.5 flex-shrink-0 mt-0.5 ${w.color}`} />
+                        <p className="text-[10px] text-ink-700 leading-relaxed">{w.text}</p>
+                      </div>
+                    )
+                  })}
                 </div>
               </div>
+
+              {/* Documentation tip box */}
+              <div className="rounded-xl border border-purple-100 bg-purple-50 p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <FileText className="w-3.5 h-3.5 text-purple-700" />
+                  <p className="text-[10px] font-bold text-purple-700 uppercase tracking-wider">
+                    Documentation Pro Tip
+                  </p>
+                </div>
+                <p className="text-[11px] text-purple-900 leading-relaxed mb-2">
+                  Instead of asking <em>"document everything we discussed"</em>, be specific:
+                </p>
+                <div className="bg-white rounded-lg border border-purple-100 px-3 py-2.5">
+                  <p className="text-[11px] text-ink-700 italic leading-relaxed">
+                    "Create a data governance report for claims_casualty_bronze covering: (1) schema summary from Phase 1, (2) claim status distribution from SQL analysis, (3) monthly filing trends, (4) GDPR compliance gaps, and (5) recommended next steps."
+                  </p>
+                </div>
+                <p className="text-[10px] text-purple-700 mt-2 leading-relaxed">
+                  Specific instructions reduce hallucination and prevent the LLM from over-processing the full session history.
+                </p>
+              </div>
+
+            </div>
+
+            {/* Footer */}
+            <div className="flex-shrink-0 border-t border-ink-100 px-5 py-3">
+              <p className="text-[10px] text-ink-400 text-center">
+                GovernGPT · Sequential Prompting Framework · AXA Data Governance
+              </p>
             </div>
           </motion.div>
         </>
