@@ -1,624 +1,246 @@
-"""
-services/document_generator.py
-
-AI-powered .docx generation for GovernGPT.
-
-Flow:
-  1. LLM receives the user's documentation request + RAG context
-  2. LLM returns structured JSON (title, sections with headings/paragraphs/tables/bullets)
-  3. A Node.js script uses the docx library to build a professional .docx file
-  4. The file path is returned to the router for download
-
-Trigger detection:
-  Keywords: "create documentation", "generate report", "write a document",
-  "create a data catalog", "produce a report", "document this", "write up"
-
-Fixes applied (v2):
-  - subprocess cwd set to backend root so Node resolves node_modules correctly
-  - JSON written to a separate .json file to avoid template injection issues
-  - PageNumber.CURRENT used correctly inside TextRun children
-  - Redundant makeHeaderCell/makeDataCell helpers removed
-  - Dynamic column widths in makeTable (not hardcoded for 2 columns)
-  - Improved markdown fence stripping regex
-  - json file cleaned up in finally block alongside js script
-"""
-
-from __future__ import annotations
-import os
-import re
-import json
-import uuid
-import subprocess
-from pathlib import Path
-
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.messages import BaseMessage
-from langchain_core.output_parsers import StrOutputParser
-
-from llm import get_llm
-
-# ── Directory setup ───────────────────────────────────────────────
-# DOCS_DIR lives inside the backend folder
-BACKEND_DIR = Path(__file__).parent.parent.resolve()
-DOCS_DIR    = BACKEND_DIR / "generated_docs"
-DOCS_DIR.mkdir(exist_ok=True)
-
-
-# ── Documentation trigger detection ──────────────────────────────
-
-_DOC_TRIGGER = re.compile(
-    r'\b(create|generate|write|produce|build|make|prepare|draft|design)\b.{0,30}'
-    r'\b(documentation|document|report|data catalog|catalog|summary report|'
-    r'write.?up|briefing|specification|spec|data dictionary|runbook|playbook)\b'
-    r'|\b(document this|document the|write this up|put this in a doc|'
-    r'create a doc|generate a doc|export (this|as|to) (a )?(doc|word|docx))\b',
-    re.IGNORECASE,
-)
-
-
-def is_doc_request(question: str) -> bool:
-    """Return True if the user is asking GovernGPT to produce a .docx document."""
-    return bool(_DOC_TRIGGER.search(question))
-
-
-# ── LLM prompt for structured document content ───────────────────
-
-DOC_CONTENT_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """You are an expert Data & AI Advisor for the insurance industry.
-The user has asked you to generate a professional Word document (.docx).
-
-Using the context below, produce a COMPLETE, structured document in JSON format.
-The JSON must follow this exact schema.
-CRITICAL: Return ONLY raw JSON. No markdown fences, no backticks, no preamble, no explanation.
-
-{{
-  "title": "Document title",
-  "subtitle": "Optional subtitle or date",
-  "author": "GovernGPT — AXA Data Governance",
-  "sections": [
-    {{
-      "heading": "Section heading",
-      "level": 1,
-      "content": [
-        {{"type": "paragraph", "text": "Body text paragraph."}},
-        {{"type": "bullets", "items": ["Bullet 1", "Bullet 2", "Bullet 3"]}},
-        {{
-          "type": "table",
-          "headers": ["Column 1", "Column 2", "Column 3"],
-          "rows": [
-            ["Row 1 Val 1", "Row 1 Val 2", "Row 1 Val 3"],
-            ["Row 2 Val 1", "Row 2 Val 2", "Row 2 Val 3"]
-          ]
-        }}
-      ]
-    }},
-    {{
-      "heading": "Subsection heading",
-      "level": 2,
-      "content": [
-        {{"type": "paragraph", "text": "Subsection detail."}}
-      ]
-    }}
-  ]
-}}
-
-Rules:
-- Use professional, insurance-industry language
-- Include a minimum of 4 sections with substantive content
-- Use tables for comparisons, structured data, mappings
-- Use bullets for lists of 3 or more items
-- Always include an Executive Summary as the first section
-- Always include a Recommendations section near the end
-- Draw specific insights from the provided context — never be generic
-- Return ONLY valid JSON. Absolutely no markdown, no code fences, no explanation.
-
-Context from knowledge base:
-{context}
-
-Conversation history (for follow-up doc requests):
-{history_summary}"""),
-    ("human", "{question}"),
-])
-
-
-# ── Node.js docx generator script template ───────────────────────
-# JSON is read from a separate file (json_path) to avoid
-# template injection issues with special characters.
-
-_DOCX_SCRIPT_TEMPLATE = r"""
-'use strict';
-const fs = require('fs');
-const path = require('path');
-
-const {{
-  Document, Packer, Paragraph, TextRun,
-  Table, TableRow, TableCell,
-  Header, Footer,
-  AlignmentType, HeadingLevel, BorderStyle,
-  WidthType, ShadingType, VerticalAlign,
-  LevelFormat, PageNumber, PageBreak
-}} = require('docx');
-
-// ── Load document data from JSON file ────────────────────────────
-const data = JSON.parse(fs.readFileSync('{json_path}', 'utf8'));
-
-// ── Colour palette (AXA brand) ────────────────────────────────────
-const AXA_BLUE  = "00008F";
-const ROW_ALT   = "F4F4F9";
-const TEXT_DARK = "1A1A2E";
-const GREY      = "888888";
-const BORDER_C  = "CCCCCC";
-
-const cellBorder = {{ style: BorderStyle.SINGLE, size: 1, color: BORDER_C }};
-const allBorders = {{
-  top: cellBorder, bottom: cellBorder,
-  left: cellBorder, right: cellBorder
-}};
-
-// ── Table builder ─────────────────────────────────────────────────
-// Dynamically sizes columns based on number of headers.
-function makeTable(headers, rows) {{
-  const colCount  = headers.length || 1;
-  const tableW    = 9360; // US Letter content width in DXA
-  const colWidth  = Math.floor(tableW / colCount);
-  // Distribute any rounding remainder to the last column
-  const colWidths = Array(colCount).fill(colWidth);
-  colWidths[colCount - 1] += tableW - colWidth * colCount;
-
-  const headerRow = new TableRow({{
-    tableHeader: true,
-    children: headers.map((h, i) => new TableCell({{
-      borders: allBorders,
-      shading: {{ fill: AXA_BLUE, type: ShadingType.CLEAR }},
-      width: {{ size: colWidths[i], type: WidthType.DXA }},
-      margins: {{ top: 100, bottom: 100, left: 140, right: 140 }},
-      verticalAlign: VerticalAlign.CENTER,
-      children: [new Paragraph({{
-        children: [new TextRun({{
-          text: String(h),
-          bold: true,
-          color: "FFFFFF",
-          font: "Arial",
-          size: 20
-        }})]
-      }})]
-    }}))
-  }});
-
-  const dataRows = (rows || []).map((row, ri) =>
-    new TableRow({{
-      children: (row || []).map((cell, ci) => new TableCell({{
-        borders: allBorders,
-        shading: {{
-          fill: ri % 2 === 0 ? "FFFFFF" : ROW_ALT,
-          type: ShadingType.CLEAR
-        }},
-        width: {{ size: colWidths[ci] || colWidth, type: WidthType.DXA }},
-        margins: {{ top: 80, bottom: 80, left: 140, right: 140 }},
-        children: [new Paragraph({{
-          children: [new TextRun({{
-            text: String(cell != null ? cell : ''),
-            font: "Arial",
-            size: 20,
-            color: TEXT_DARK
-          }})]
-        }})]
-      }}))
-    }})
-  );
-
-  return new Table({{
-    width: {{ size: tableW, type: WidthType.DXA }},
-    columnWidths: colWidths,
-    rows: [headerRow, ...dataRows]
-  }});
-}}
-
-// ── Content block renderer ────────────────────────────────────────
-function renderContent(items) {{
-  const blocks = [];
-  for (const item of (items || [])) {{
-    if (!item || !item.type) continue;
-
-    if (item.type === 'paragraph') {{
-      blocks.push(new Paragraph({{
-        spacing: {{ after: 160 }},
-        children: [new TextRun({{
-          text: item.text || '',
-          font: "Arial",
-          size: 22,
-          color: TEXT_DARK
-        }})]
-      }}));
-
-    }} else if (item.type === 'bullets') {{
-      for (const bullet of (item.items || [])) {{
-        blocks.push(new Paragraph({{
-          numbering: {{ reference: "myBullets", level: 0 }},
-          spacing: {{ after: 80 }},
-          children: [new TextRun({{
-            text: String(bullet),
-            font: "Arial",
-            size: 22,
-            color: TEXT_DARK
-          }})]
-        }}));
-      }}
-      // Add spacing after the last bullet
-      blocks.push(new Paragraph({{ spacing: {{ after: 120 }}, children: [] }}));
-
-    }} else if (item.type === 'table') {{
-      blocks.push(makeTable(item.headers || [], item.rows || []));
-      // Spacer after table
-      blocks.push(new Paragraph({{ spacing: {{ after: 200 }}, children: [] }}));
-    }}
-  }}
-  return blocks;
-}}
-
-// ── Build document body ───────────────────────────────────────────
-const bodyChildren = [];
-
-// ── Cover: Title ─────────────────────────────────────────────────
-bodyChildren.push(new Paragraph({{
-  spacing: {{ before: 480, after: 200 }},
-  children: [new TextRun({{
-    text: data.title || 'GovernGPT Document',
-    bold: true,
-    font: "Arial",
-    size: 56,
-    color: AXA_BLUE
-  }})]
-}}));
-
-if (data.subtitle) {{
-  bodyChildren.push(new Paragraph({{
-    spacing: {{ after: 120 }},
-    children: [new TextRun({{
-      text: data.subtitle,
-      font: "Arial",
-      size: 24,
-      color: GREY,
-      italics: true
-    }})]
-  }}));
-}}
-
-bodyChildren.push(new Paragraph({{
-  spacing: {{ after: 480 }},
-  children: [new TextRun({{
-    text: data.author || 'GovernGPT — AXA Data Governance',
-    font: "Arial",
-    size: 22,
-    color: GREY
-  }})]
-}}));
-
-// Horizontal rule under cover block
-bodyChildren.push(new Paragraph({{
-  border: {{ bottom: {{ style: BorderStyle.SINGLE, size: 6, color: AXA_BLUE, space: 1 }} }},
-  spacing: {{ after: 360 }},
-  children: []
-}}));
-
-// ── Sections ──────────────────────────────────────────────────────
-for (const section of (data.sections || [])) {{
-  const isH2      = section.level === 2;
-  const hLevel    = isH2 ? HeadingLevel.HEADING_2 : HeadingLevel.HEADING_1;
-  const hSize     = isH2 ? 26 : 32;
-  const hBefore   = isH2 ? 240 : 400;
-
-  bodyChildren.push(new Paragraph({{
-    heading: hLevel,
-    spacing: {{ before: hBefore, after: 160 }},
-    children: [new TextRun({{
-      text: section.heading || '',
-      bold: true,
-      font: "Arial",
-      size: hSize,
-      color: AXA_BLUE
-    }})]
-  }}));
-
-  bodyChildren.push(...renderContent(section.content || []));
-}}
-
-// ── Assemble Document ─────────────────────────────────────────────
-const doc = new Document({{
-  numbering: {{
-    config: [{{
-      reference: "myBullets",
-      levels: [{{
-        level: 0,
-        format: LevelFormat.BULLET,
-        text: "\u2022",
-        alignment: AlignmentType.LEFT,
-        style: {{
-          paragraph: {{
-            indent: {{ left: 720, hanging: 360 }}
-          }}
-        }}
-      }}]
-    }}]
-  }},
-  styles: {{
-    default: {{
-      document: {{ run: {{ font: "Arial", size: 22, color: TEXT_DARK }} }}
-    }},
-    paragraphStyles: [
-      {{
-        id: "Heading1",
-        name: "Heading 1",
-        basedOn: "Normal",
-        next: "Normal",
-        quickFormat: true,
-        run: {{ size: 32, bold: true, font: "Arial", color: AXA_BLUE }},
-        paragraph: {{
-          spacing: {{ before: 400, after: 160 }},
-          outlineLevel: 0
-        }}
-      }},
-      {{
-        id: "Heading2",
-        name: "Heading 2",
-        basedOn: "Normal",
-        next: "Normal",
-        quickFormat: true,
-        run: {{ size: 26, bold: true, font: "Arial", color: AXA_BLUE }},
-        paragraph: {{
-          spacing: {{ before: 240, after: 120 }},
-          outlineLevel: 1
-        }}
-      }}
-    ]
-  }},
-  sections: [{{
-    properties: {{
-      page: {{
-        size: {{ width: 12240, height: 15840 }},
-        margin: {{ top: 1440, right: 1440, bottom: 1440, left: 1440 }}
-      }}
-    }},
-    headers: {{
-      default: new Header({{
-        children: [
-          new Paragraph({{
-            border: {{
-              bottom: {{ style: BorderStyle.SINGLE, size: 4, color: AXA_BLUE, space: 1 }}
-            }},
-            children: [
-              new TextRun({{
-                text: (data.title || 'GovernGPT Document') + '   |   AXA GovernGPT',
-                font: "Arial",
-                size: 18,
-                color: GREY
-              }})
-            ]
-          }})
-        ]
-      }})
-    }},
-    footers: {{
-      default: new Footer({{
-        children: [
-          new Paragraph({{
-            border: {{
-              top: {{ style: BorderStyle.SINGLE, size: 4, color: AXA_BLUE, space: 1 }}
-            }},
-            children: [
-              new TextRun({{
-                text: "Generated by GovernGPT  |  Confidential  |  Page ",
-                font: "Arial",
-                size: 16,
-                color: GREY
-              }}),
-              new TextRun({{
-                children: [PageNumber.CURRENT],
-                font: "Arial",
-                size: 16,
-                color: GREY
-              }}),
-              new TextRun({{
-                text: " of ",
-                font: "Arial",
-                size: 16,
-                color: GREY
-              }}),
-              new TextRun({{
-                children: [PageNumber.TOTAL_PAGES],
-                font: "Arial",
-                size: 16,
-                color: GREY
-              }})
-            ]
-          }})
-        ]
-      }})
-    }},
-    children: bodyChildren
-  }}]
-}});
-
-// ── Write output ──────────────────────────────────────────────────
-Packer.toBuffer(doc)
-  .then(buffer => {{
-    fs.writeFileSync('{output_path}', buffer);
-    console.log('OK:{output_path}');
-  }})
-  .catch(err => {{
-    console.error('ERR:' + err.message);
-    process.exit(1);
-  }});
-"""
-
-
-# ── Main generator function ───────────────────────────────────────
-
-def generate_document(
-    question: str,
-    rag_context: str = "",
-    chat_history: list[BaseMessage] | None = None,
-    knowledge_set: str = "default",
-) -> dict:
-    """
-    Generate a .docx document from the user's request + RAG context.
-
-    Returns:
-        {
-          "success"      : bool,
-          "file_name"    : str,
-          "file_path"    : str,
-          "title"        : str,
-          "section_count": int,
-          "error"        : str | None
-        }
-    """
-    llm    = get_llm()
-    parser = StrOutputParser()
-
-    # ── Step 1: Build conversation history summary ────────────────
-    history_summary = "No prior conversation."
-    if chat_history:
-        recent = chat_history[-6:]
-        history_summary = "\n".join([
-            f"{'User' if m.type == 'human' else 'Assistant'}: {str(m.content)[:300]}"
-            for m in recent
-        ])
-
-    # ── Step 2: Call LLM to generate structured document JSON ─────
-    try:
-        doc_chain = DOC_CONTENT_PROMPT | llm | parser
-        raw_json  = doc_chain.invoke({
-            "question"       : question,
-            "context"        : rag_context[:6000] if rag_context else "No additional context provided.",
-            "history_summary": history_summary,
-        })
-
-        # Strip any accidental markdown fences the LLM may add
-        raw_json = re.sub(r"```(?:json)?\s*|\s*```", "", raw_json).strip()
-
-        doc_data = json.loads(raw_json)
-
-    except json.JSONDecodeError as e:
-        return {
-            "success"      : False,
-            "error"        : f"LLM returned invalid JSON: {str(e)}",
-            "file_name"    : "",
-            "file_path"    : "",
-            "title"        : "",
-            "section_count": 0,
-        }
-    except Exception as e:
-        return {
-            "success"      : False,
-            "error"        : f"Content generation failed: {str(e)}",
-            "file_name"    : "",
-            "file_path"    : "",
-            "title"        : "",
-            "section_count": 0,
-        }
-
-    # ── Step 3: Prepare file paths ────────────────────────────────
-    file_id    = uuid.uuid4().hex[:10]
-    safe_title = re.sub(r"[^\w\s-]", "", doc_data.get("title", "document"))[:40].strip().replace(" ", "_")
-    file_name  = f"{safe_title}_{file_id}.docx"
-    file_path  = str(DOCS_DIR / file_name)
-    json_path  = str(DOCS_DIR / f"data_{file_id}.json")
-    script_path = str(DOCS_DIR / f"gen_{file_id}.js")
-
-    # ── Step 4: Write JSON data to a separate file ────────────────
-    # This avoids template injection issues when doc_data contains
-    # special characters, backticks, or ${...} expressions.
-    try:
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(doc_data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        return {
-            "success"      : False,
-            "error"        : f"Failed to write data file: {str(e)}",
-            "file_name"    : "",
-            "file_path"    : "",
-            "title"        : doc_data.get("title", ""),
-            "section_count": 0,
-        }
-
-    # ── Step 5: Write Node.js generator script ────────────────────
-    # Paths use forward slashes for cross-platform Node compatibility
-    script_content = _DOCX_SCRIPT_TEMPLATE.format(
-        json_path   = json_path.replace("\\", "/"),
-        output_path = file_path.replace("\\", "/"),
-    )
-
-    try:
-        with open(script_path, "w", encoding="utf-8") as f:
-            f.write(script_content)
-
-        # ── Step 6: Execute Node.js script ────────────────────────
-        # CRITICAL: cwd=BACKEND_DIR ensures Node resolves node_modules
-        # from the backend root, not from the generated_docs subfolder.
-        result = subprocess.run(
-            ["node", script_path],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            cwd=str(BACKEND_DIR),          # <-- key fix
-        )
-
-        stdout = result.stdout.strip()
-        stderr = result.stderr.strip()
-
-        if result.returncode != 0 or not Path(file_path).exists():
-            error_msg = stderr or stdout or "Unknown Node.js error"
-            return {
-                "success"      : False,
-                "error"        : f"docx generation failed: {error_msg}",
-                "file_name"    : "",
-                "file_path"    : "",
-                "title"        : doc_data.get("title", ""),
-                "section_count": 0,
-            }
-
-    except subprocess.TimeoutExpired:
-        return {
-            "success"      : False,
-            "error"        : "Document generation timed out (>60s).",
-            "file_name"    : "",
-            "file_path"    : "",
-            "title"        : "",
-            "section_count": 0,
-        }
-    except FileNotFoundError:
-        return {
-            "success"      : False,
-            "error"        : "Node.js not found. Ensure Node.js is installed and on PATH.",
-            "file_name"    : "",
-            "file_path"    : "",
-            "title"        : "",
-            "section_count": 0,
-        }
-    except Exception as e:
-        return {
-            "success"      : False,
-            "error"        : str(e),
-            "file_name"    : "",
-            "file_path"    : "",
-            "title"        : "",
-            "section_count": 0,
-        }
-    finally:
-        # Clean up temporary script and data files
-        for temp_file in [script_path, json_path]:
-            try:
-                os.remove(temp_file)
-            except Exception:
-                pass
-
-    # ── Step 7: Return success result ────────────────────────────
-    return {
-        "success"      : True,
-        "file_name"    : file_name,
-        "file_path"    : file_path,
-        "title"        : doc_data.get("title", "Document"),
-        "section_count": len(doc_data.get("sections", [])),
-        "error"        : None,
+'use client'
+import { useState, useEffect } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+import { Plus, Plug, Trash2, CheckCircle, RefreshCw, Loader2, ServerCrash } from 'lucide-react'
+import { ConnectModal } from './ConnectModal'
+import { CatalogBrowser } from './CatalogBrowser'
+import { TableIngestCard } from './TableIngestCard'
+import { api } from '@/lib/api'
+import { useStore } from '@/store'
+import { cn } from '@/lib/utils'
+import type { KnowledgeSet, DatabricksConnection, DatabricksIngestItem } from '@/types'
+
+interface DatabricksPanelProps {
+  session: KnowledgeSet
+}
+
+export function DatabricksPanel({ session }: DatabricksPanelProps) {
+  const {
+    getDatabricksConnections,
+    setDatabricksConnections,
+    addDatabricksConnection,
+    removeDatabricksConnection,
+    getSessionDatabricksItems,
+    addDatabricksIngestItem,
+    updateDatabricksIngestItem,
+    removeDatabricksIngestItem,
+  } = useStore()
+
+  const connections  = getDatabricksConnections()
+  const ingestItems  = getSessionDatabricksItems(session.id)
+
+  const [showModal, setShowModal]     = useState(false)
+  const [activeConn, setActiveConn]   = useState<string | null>(null)
+  const [loadingConns, setLoadingConns] = useState(false)
+  const [testing, setTesting]         = useState<string | null>(null)
+
+  // Load saved connections from backend on mount
+  useEffect(() => {
+    loadConnections()
+  }, [session.id])
+
+  const loadConnections = async () => {
+    setLoadingConns(true)
+    try {
+      const list = await api.databricks.listConnections(session.id)
+      setDatabricksConnections(list)
+      // Auto-expand first connection if available
+      if (list.length > 0 && !activeConn) {
+        setActiveConn(list[0].connection_id)
+      }
+    } catch (_) {
+      // Non-fatal
+    } finally {
+      setLoadingConns(false)
     }
+  }
+
+  const handleConnected = (conn: DatabricksConnection) => {
+    addDatabricksConnection(conn)
+    setActiveConn(conn.connection_id)
+  }
+
+  const handleDelete = async (connection_id: string) => {
+    try {
+      await api.databricks.deleteConnection(connection_id)
+      removeDatabricksConnection(connection_id)
+      if (activeConn === connection_id) setActiveConn(null)
+    } catch (_) {}
+  }
+
+  const handleTest = async (connection_id: string) => {
+    setTesting(connection_id)
+    try {
+      await api.databricks.testConnection(connection_id)
+    } catch (_) {}
+    finally { setTesting(null) }
+  }
+
+  const readyCount = ingestItems.filter(i => i.status === 'ready').length
+
+  return (
+    <div className="flex flex-col h-full">
+
+      {/* Header row */}
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-ink-100">
+        <div className="flex items-center gap-1.5">
+          <Plug className="w-3.5 h-3.5 text-axa-800" />
+          <span className="text-[10px] font-semibold text-axa-800 uppercase tracking-widest">Databricks</span>
+          {readyCount > 0 && (
+            <span className="text-[9px] font-bold text-emerald-600 bg-emerald-50 border border-emerald-100 px-1.5 py-0.5 rounded-full">
+              {readyCount} indexed
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={loadConnections}
+            disabled={loadingConns}
+            className="p-1 rounded-md hover:bg-ink-100 text-ink-400 transition-colors"
+            title="Refresh connections"
+          >
+            <RefreshCw className={cn('w-3 h-3', loadingConns && 'animate-spin')} />
+          </button>
+          <button
+            onClick={() => setShowModal(true)}
+            className="flex items-center gap-1 px-2 py-1 rounded-md bg-axa-50 border border-axa-100 text-axa-800 text-[10px] font-semibold hover:bg-axa-100 transition-colors"
+          >
+            <Plus className="w-3 h-3" />
+            Connect
+          </button>
+        </div>
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto">
+        {loadingConns && connections.length === 0 ? (
+          <div className="flex items-center justify-center py-8">
+            <Loader2 className="w-5 h-5 text-axa-800 animate-spin" />
+          </div>
+        ) : connections.length === 0 ? (
+          <EmptyState onConnect={() => setShowModal(true)} />
+        ) : (
+          <div className="py-2 space-y-1">
+            {connections.map(conn => (
+              <div key={conn.connection_id}>
+                {/* Connection row */}
+                <div
+                  className={cn(
+                    'flex items-center gap-2 px-3 py-2 rounded-lg mx-2 cursor-pointer transition-colors',
+                    activeConn === conn.connection_id ? 'bg-axa-50 border border-axa-100' : 'hover:bg-ink-50'
+                  )}
+                  onClick={() => setActiveConn(
+                    activeConn === conn.connection_id ? null : conn.connection_id
+                  )}
+                >
+                  <div className="w-5 h-5 rounded-md bg-axa-800 flex items-center justify-center flex-shrink-0">
+                    <Plug className="w-3 h-3 text-white" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-semibold text-ink-800 truncate">{conn.connection_name}</p>
+                    <p className="text-[9px] text-ink-400 truncate font-mono">
+                      {conn.workspace_url.replace('https://', '')}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    {conn.last_tested_at && (
+                      <CheckCircle className="w-3 h-3 text-emerald-500" title="Recently tested" />
+                    )}
+                    <button
+                      onClick={e => { e.stopPropagation(); handleTest(conn.connection_id) }}
+                      disabled={testing === conn.connection_id}
+                      className="p-1 rounded hover:bg-axa-100 text-ink-400 hover:text-axa-700 transition-colors"
+                      title="Test connection"
+                    >
+                      {testing === conn.connection_id
+                        ? <Loader2 className="w-3 h-3 animate-spin" />
+                        : <RefreshCw className="w-3 h-3" />
+                      }
+                    </button>
+                    <button
+                      onClick={e => { e.stopPropagation(); handleDelete(conn.connection_id) }}
+                      className="p-1 rounded hover:bg-axared-50 text-ink-300 hover:text-axared-500 transition-colors"
+                      title="Remove connection"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Catalog browser (expanded when active) */}
+                <AnimatePresence>
+                  {activeConn === conn.connection_id && (
+                    <motion.div
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: 'auto' }}
+                      exit={{ opacity: 0, height: 0 }}
+                      className="overflow-hidden ml-4 mr-2 mt-1 mb-2 bg-white border border-ink-100 rounded-xl p-2"
+                    >
+                      <CatalogBrowser
+                        connection={conn}
+                        sessionId={session.id}
+                        knowledgeSetId={session.id}
+                        ingestItems={ingestItems}
+                        onIngestItem={(item) => addDatabricksIngestItem(session.id, item)}
+                        onUpdateItem={(itemId, updates) =>
+                          updateDatabricksIngestItem(session.id, itemId, updates)
+                        }
+                      />
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Ingested tables list */}
+        {ingestItems.length > 0 && (
+          <div className="border-t border-ink-100 pt-2 mt-1">
+            <p className="text-[10px] font-semibold text-ink-400 uppercase tracking-wider px-4 mb-1.5">
+              Ingested Tables
+            </p>
+            <AnimatePresence initial={false}>
+              {ingestItems.map((item, i) => (
+                <TableIngestCard
+                  key={item.id}
+                  item={item}
+                  index={i}
+                  onRemove={(id) => removeDatabricksIngestItem(session.id, id)}
+                />
+              ))}
+            </AnimatePresence>
+          </div>
+        )}
+      </div>
+
+      <ConnectModal
+        isOpen={showModal}
+        onClose={() => setShowModal(false)}
+        knowledgeSetId={session.id}
+        onConnected={handleConnected}
+      />
+    </div>
+  )
+}
+
+function EmptyState({ onConnect }: { onConnect: () => void }) {
+  return (
+    <div className="flex flex-col items-center justify-center py-10 text-center px-4">
+      <div className="w-10 h-10 rounded-xl bg-axa-50 border border-axa-100 flex items-center justify-center mb-3">
+        <ServerCrash className="w-5 h-5 text-axa-300" />
+      </div>
+      <p className="text-xs font-semibold text-ink-600 mb-1">No connections yet</p>
+      <p className="text-[10px] text-ink-400 leading-relaxed mb-3">
+        Connect to a Databricks workspace to browse Hive Metastore tables and ingest them into your knowledge set.
+      </p>
+      <button
+        onClick={onConnect}
+        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-axa-800 text-white text-xs font-semibold hover:bg-axa-700 transition-colors shadow-axa"
+      >
+        <Plus className="w-3.5 h-3.5" />
+        Add Connection
+      </button>
+    </div>
+  )
+}
