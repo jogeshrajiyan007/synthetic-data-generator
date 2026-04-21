@@ -1,392 +1,617 @@
-'use client'
-import { useState, useRef, useEffect, useCallback } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
-import { Send, Shield, Sparkles, RotateCcw, Sliders, Brain, Zap, SquareCode, FileText, Info } from 'lucide-react'
-import { MessageBubble, TypingIndicator } from './MessageBubble'
-import { PromptGuidePanel } from './PromptGuidePanel'
-import type { KnowledgeSet, ChatMessage } from '@/types'
-import { api } from '@/lib/api'
-import { useStore } from '@/store'
-import { cn } from '@/lib/utils'
+"""
+services/rag.py
 
-// ── Document request keyword detector ────────────────────────────
-const DOC_TRIGGER = /\b(create|generate|write|produce|build|make|prepare|draft|design)\b.{0,30}\b(documentation|document|report|data catalog|catalog|summary report|write.?up|briefing|specification|spec|data dictionary|runbook|playbook)\b|\b(document this|document the|write this up|put this in a doc|create a doc|generate a doc|export (this|as|to) (a )?(doc|word|docx))\b/i
+Conversational RAG + SQL Agent hybrid engine.
 
-const isDocRequest = (q: string) => DOC_TRIGGER.test(q)
+Routing logic:
+  1. If enable_sql_agent=True and approved Databricks tables exist:
+     → Keyword pre-classifier runs first (no LLM call, no ChromaDB lookup)
+     → If definite SQL intent: skip RAG retrieval, go straight to SQL agent
+     → If ambiguous: LLM classifies intent, gate blocks non-SQL → standard RAG
+     → If SQL intent confirmed: run SQL agent
+     → If NOT_SQL: fall through to standard RAG
+  2. Standard RAG: condense → retrieve → answer
+  3. Direct (no retrieval): history-aware direct LLM call
 
-const SUGGESTED_RAG = [
-  'What are these documents about? Provide a high-level summary.',
-  'What PII data is present and how should it be governed?',
-  'What regulatory frameworks apply (GDPR, Solvency II, IFRS 17)?',
-  'Propose a star schema based on the uploaded datasets.',
-  'What data quality issues can you identify?',
-]
+Compatible with LangChain >= 0.2.x — no deprecated chains used.
+"""
 
-const SUGGESTED_SQL = [
-  'Show me the first 10 rows from my approved tables.',
-  'How many records are in each approved table?',
-  'What are the distinct values in the most important categorical column?',
-  'What is the date range covered by this dataset?',
-  'Show total count grouped by the key dimension column.',
-]
+import time
+import uuid
+from datetime import datetime
+from typing import Optional
 
-interface ChatWindowProps {
-  session: KnowledgeSet
-  messages: ChatMessage[]
-  onAddMessage: (msg: ChatMessage) => void
-  onUpdateMessage: (id: string, updates: Partial<ChatMessage>) => void
-  onClearChat: () => void
-}
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import BaseMessage
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.documents import Document
+from langchain_community.vectorstores import Chroma
 
-export function ChatWindow({ session, messages, onAddMessage, onUpdateMessage, onClearChat }: ChatWindowProps) {
-  const [input, setInput]                       = useState('')
-  const [isLoading, setIsLoading]               = useState(false)
-  const [useRag, setUseRag]                     = useState(true)
-  const [enableSqlAgent, setEnableSqlAgent]     = useState(true)
-  const [k, setK]                               = useState(5)
-  const [windowK, setWindowK]                   = useState(6)
-  const [showSettings, setShowSettings]         = useState(false)
-  const [showGuide, setShowGuide]               = useState(false)
-  const [isClearingMemory, setIsClearingMemory] = useState(false)
-  const bottomRef = useRef<HTMLDivElement>(null)
-  const inputRef  = useRef<HTMLTextAreaElement>(null)
+from llm import get_llm
+from db import db_insert
+from config import CHAT_MODEL, RETRIEVAL_K
+from services.memory import save_turn, load_history_as_messages, DEFAULT_WINDOW_K
 
-  const {
-    addTokenUsage, getSessionTokenUsage, resetTokenUsage,
-    getApprovedTables, getApprovedConnectionId, getSessionDatabricksItems,
-  } = useStore()
 
-  const tokenUsage     = getSessionTokenUsage(session.id)
-  const approvedTables = getApprovedTables(session.id)
-  const connectionId   = getApprovedConnectionId(session.id)
-  // hasSqlSources is true only when user has explicitly approved tables via "Use SQL"
-  const hasSqlSources  = approvedTables.length > 0
+# ── Prompts ──────────────────────────────────────────────────────
 
-  // Build excluded_tables: ingested-but-not-approved Databricks tables
-  // These are passed to the backend to exclude their chunks from RAG retrieval
-  const ingestItems    = getSessionDatabricksItems(session.id)
-  const ingestedFullTables = ingestItems
-    .filter(i => i.status === 'ready')
-    .map(i => `${i.catalog}.${i.schema}.${i.table}`)
-  const excludedTables = ingestedFullTables.filter(t => !approvedTables.includes(t))
+CONDENSE_PROMPT = ChatPromptTemplate.from_messages([
+    (
+        "system",
+        "You are a question rewriter. "
+        "Given the conversation history below and a follow-up question, "
+        "rewrite the follow-up question into a fully self-contained standalone question "
+        "that captures all relevant context from the history. "
+        "Return ONLY the rewritten question — no explanation, no preamble.",
+    ),
+    MessagesPlaceholder(variable_name="chat_history"),
+    ("human", "{question}"),
+])
 
-  const assistantTurns = messages.filter(m => m.role === 'assistant' && m.content).length
+QA_PROMPT = ChatPromptTemplate.from_messages([
+    (
+        "system",
+        """You are an expert Data & AI Advisor specialising in the insurance industry, \
+with deep, cross-domain expertise spanning:
 
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages, isLoading])
+- **Data Architecture** – enterprise data platforms, lakehouse/warehouse design, \
+cloud-native patterns (Azure, AWS, GCP), data mesh, data fabric, integration patterns \
+(ETL/ELT, CDC, event streaming)
+- **Data Engineering** – pipeline design, PySpark, Databricks, Delta Lake, dbt, \
+orchestration (Airflow, ADF), data contracts, data quality frameworks, CI/CD for data
+- **Data Modelling** – dimensional modelling (Kimball, Inmon), entity-relationship design, \
+insurance-specific schemas (policy, claims, reinsurance, premium), semantic layers
+- **Data Management & Governance** – GDPR, Solvency II, IFRS 17, data cataloguing, lineage, \
+stewardship, metadata management, data contracts, DQ SLAs, BCBS 239
+- **AI & Advanced Analytics** – RAG architectures, LLM integration, MLOps, predictive \
+modelling (churn, fraud, risk scoring), NLP on claims/policy documents, agentic AI
+- **Business Intelligence & Reporting** – Power BI, Tableau, KPI frameworks, self-service \
+analytics, observability dashboards, actuarial and regulatory reporting
 
-  const sendMessage = useCallback(async (question: string) => {
-    if (!question.trim() || isLoading) return
-    setInput(''); setShowSettings(false)
+You operate exclusively within the context of the **insurance industry** — including Life, \
+Non-Life (P&C), Health, Reinsurance, and Global Business Services functions. All responses \
+should reflect the regulatory environment, data domains, and operational realities of \
+insurance organisations.
 
-    const userMsg: ChatMessage = {
-      id: Math.random().toString(36).slice(2), role: 'user',
-      content: question.trim(), timestamp: new Date().toISOString(),
-    }
-    onAddMessage(userMsg)
-    setIsLoading(true)
+{approved_sources_block}
 
-    const assistantId = Math.random().toString(36).slice(2)
-    onAddMessage({ id: assistantId, role: 'assistant', content: '', timestamp: new Date().toISOString() })
+You have been provided with retrieved document context below.
+Use it as your primary source of evidence.
 
-    // ── Document generation path ──────────────────────────────────
-    if (isDocRequest(question.trim())) {
-      try {
-        onUpdateMessage(assistantId, {
-          content: '_Generating your document — this may take 15–30 seconds…_',
+--- RETRIEVED CONTEXT ---
+{context}
+--- END CONTEXT ---
+
+You also have the full conversation history for this session. Use it to:
+- Refer back to findings from earlier in the conversation
+- Build on previously identified entities, owners, issues, or recommendations
+- Avoid repeating analysis already covered unless asked to expand
+- Explicitly reference prior findings when relevant
+  (e.g. "Building on the schema gaps identified earlier...", \
+"As noted in the pipeline review above...")
+
+Response structure (adapt based on question type):
+
+| Question Type         | Structure |
+|-----------------------|-----------|
+| Architecture          | Context → Design Options → Trade-offs → Recommended Pattern |
+| Engineering           | Problem → Pipeline/Code Design → Edge Cases → Implementation Notes |
+| Modelling             | Propose tables, columns, data types, relationships, transformation logic |
+| Governance/Compliance | Cite regulation + article number → Gap → Remediation steps |
+| AI/Analytics          | Use Case → Approach → Data Requirements → Risks & Guardrails |
+| BI/Reporting          | Metric Definition → Data Source → Visualisation Guidance → Caveats |
+| Follow-up             | Reference prior findings, build on them, avoid redundancy |
+
+Always:
+- State which source file your insights are drawn from
+- Anchor responses in insurance industry context \
+(e.g. policy lifecycle, claims processing, actuarial needs, regulatory reporting)
+- Flag any assumptions made when context is incomplete
+
+IMPORTANT — SQL on local files:
+If the user asks to run SQL against a locally uploaded file (CSV, Excel, PDF), respond:
+"SQL query execution is only supported for approved Databricks tables, \
+not for locally uploaded files."
+
+If the answer is not in the context or conversation history, say so clearly. \
+Do not hallucinate.""",
+    ),
+    MessagesPlaceholder(variable_name="chat_history"),
+    ("human", "{question}"),
+])
+
+
+# ── Approved sources block ────────────────────────────────────────
+
+def _build_approved_sources_block(approved_tables: list[str]) -> str:
+    """
+    Injected into the RAG system prompt only when routing reaches the RAG path.
+    This only happens for genuine governance/doc questions (NOT_SQL intent).
+    """
+    if not approved_tables:
+        return ""
+    lines = "\n".join(f"  - {t}" for t in approved_tables)
+    return f"""
+APPROVED DATABRICKS TABLES (available for live SQL queries via the SQL Agent):
+<approved_sources>
+{lines}
+</approved_sources>
+
+NOTE: You are answering a governance or documentation question — NOT a live data query.
+If the user is asking to retrieve actual rows or run analytics, tell them:
+"To query live data, ask a specific data question like \
+'Show me the first 10 rows of claims_casualty_bronze' and the SQL Agent will execute it."
+Do NOT suggest users run SQL manually in their Databricks environment.
+"""
+
+
+# ── Retriever ─────────────────────────────────────────────────────
+
+def _build_retriever(vectordb: Chroma, k: int, excluded_tables: list[str] | None = None):
+    """
+    MMR retriever with multi-source representation guarantee.
+    excluded_tables: list of full table names to exclude from results.
+    """
+    base = vectordb.as_retriever(
+        search_type="mmr",
+        search_kwargs={"k": k * 2, "fetch_k": k * 6},
+    )
+    # Build set of short table names to exclude
+    excluded_short = {t.split(".")[-1].lower() for t in (excluded_tables or [])}
+
+    def multi_source_retrieve(query: str) -> list[Document]:
+        docs = base.invoke(query)
+
+        # Filter out chunks from excluded (removed) tables
+        if excluded_short:
+            docs = [
+                d for d in docs
+                if not (
+                    d.metadata.get("source_type") == "databricks"
+                    and d.metadata.get("source_file", "").lower() in excluded_short
+                )
+            ]
+
+        seen: dict[str, Document] = {}
+        for doc in docs:
+            src = doc.metadata.get("source_file", "unknown")
+            if src not in seen:
+                seen[src] = doc
+        if len(seen) < 2:
+            try:
+                all_srcs = list({
+                    d.metadata.get("source_file", "unknown")
+                    for d in vectordb.similarity_search("data governance summary", k=50)
+                })
+                for src in all_srcs:
+                    # Skip excluded tables
+                    if src.lower() in excluded_short:
+                        continue
+                    if src not in seen:
+                        results = vectordb.similarity_search(
+                            query, k=2, filter={"source_file": src}
+                        )
+                        if results:
+                            seen[src] = results[0]
+            except Exception:
+                pass
+        truncated: list[Document] = []
+        for doc in seen.values():
+            if len(doc.page_content) > 1500:
+                doc = Document(
+                    page_content=doc.page_content[:1500] + "\n[...truncated]",
+                    metadata=doc.metadata,
+                )
+            truncated.append(doc)
+        return truncated
+
+    return multi_source_retrieve
+
+
+def _format_docs(docs: list[Document]) -> str:
+    parts = []
+    for doc in docs:
+        src = doc.metadata.get("source_file", "unknown")
+        parts.append(f"[Source: {src}]\n{doc.page_content}")
+    return "\n\n---\n\n".join(parts)
+
+
+# ── Token extraction ──────────────────────────────────────────────
+
+def _extract_tokens(llm_response) -> dict:
+    try:
+        usage = getattr(llm_response, "usage_metadata", None) or {}
+        return {
+            "prompt_tokens"    : int(usage.get("input_tokens",  0)),
+            "completion_tokens": int(usage.get("output_tokens", 0)),
+            "total_tokens"     : int(usage.get("total_tokens",  0)),
+        }
+    except Exception:
+        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+
+# ── Main query function ───────────────────────────────────────────
+
+def query_governance(
+    question: str,
+    vectordb: Chroma,
+    knowledge_set: str = "default",
+    session_id: str = "",
+    use_rag: bool = True,
+    k: int = RETRIEVAL_K,
+    window_k: int = DEFAULT_WINDOW_K,
+    enable_sql_agent: bool = True,
+    approved_tables: Optional[list[str]] = None,
+    connection_id: Optional[str] = None,
+    excluded_tables: Optional[list[str]] = None,
+) -> dict:
+    """
+    Hybrid query engine: SQL Agent + RAG.
+
+    Routing:
+      1. If enable_sql_agent=True and approved_tables exist:
+         a. Keyword pre-classifier runs instantly (no LLM, no ChromaDB)
+         b. Definite SQL intent → skip RAG retrieval, run SQL agent directly
+         c. Ambiguous → LLM classifies; gate blocks NOT_SQL → fall to RAG
+         d. SQL intent confirmed → run SQL agent
+      2. Standard LCEL RAG: condense → retrieve → answer
+      3. Direct LLM: history-aware, no retrieval
+    """
+    start   = time.time()
+    run_id  = str(uuid.uuid4())
+    answer  = ""
+    llm     = get_llm()
+    parser  = StrOutputParser()
+
+    if not session_id:
+        session_id = knowledge_set
+
+    approved_tables = approved_tables or []
+
+    # ── Sync approved sources to SQLite ──────────────────────────
+    if approved_tables and connection_id:
+        try:
+            from services.databricks.approved_sources import sync_approved_sources
+            sync_approved_sources(
+                session_id=session_id,
+                knowledge_set=knowledge_set,
+                connection_id=connection_id,
+                tables=approved_tables,
+            )
+        except Exception:
+            pass
+
+    # ── Load conversation history ─────────────────────────────────
+    chat_history: list[BaseMessage] = load_history_as_messages(
+        session_id, knowledge_set, window_k
+    )
+
+    # ── SQL Agent routing ─────────────────────────────────────────
+    # Requires BOTH:
+    #   1. enable_sql_agent=True (frontend toggle must be ON)
+    #   2. approved_tables non-empty (user must have approved at least one table)
+    if enable_sql_agent and approved_tables:
+        sql_agent_error = None
+        try:
+            from services.databricks.sql_agent import run_sql_agent, _keyword_intent, INTENT_PROMPT
+            from langchain_core.output_parsers import StrOutputParser as _StrParser
+
+            approved_list_str = "\n".join(f"  - {t}" for t in approved_tables)
+
+            # ── Stage 1: Keyword pre-classifier ──────────────────────
+            # Returns SQL intent instantly if confident, None if ambiguous.
+            quick_intent    = _keyword_intent(question, approved_tables)
+            is_definite_sql = quick_intent is not None and quick_intent != "NOT_SQL"
+
+            # ── Stage 2: Resolve ambiguous questions via LLM ─────────
+            # Only call the LLM if the keyword classifier was uncertain.
+            if quick_intent is None:
+                try:
+                    _parser = _StrParser()
+                    _intent_chain = INTENT_PROMPT | llm | _parser
+                    _llm_intent = _intent_chain.invoke({
+                        "approved_sources_list": approved_list_str,
+                        "question": question,
+                    }).strip().upper()
+                    resolved_intent = _llm_intent if _llm_intent in {
+                        "SIMPLE_LOOKUP", "AGGREGATION", "COMPARISON",
+                        "JOIN_OPERATION", "MULTI_STEP", "CREATE_OBJECT",
+                        "OUT_OF_SCOPE", "NOT_SQL"
+                    } else "NOT_SQL"
+                except Exception:
+                    resolved_intent = "NOT_SQL"
+            else:
+                resolved_intent = quick_intent
+
+            # ── Stage 3: Gate — only proceed to agent for SQL intents ─
+            # NOT_SQL falls through to standard RAG via StopIteration.
+            # OUT_OF_SCOPE is a SQL intent — agent returns "not in approved sources".
+            SQL_GATE_INTENTS = {
+                "SIMPLE_LOOKUP", "AGGREGATION", "COMPARISON",
+                "JOIN_OPERATION", "MULTI_STEP", "CREATE_OBJECT",
+            }
+
+            if resolved_intent not in SQL_GATE_INTENTS:
+                # NOT_SQL or OUT_OF_SCOPE_DOC → fall through to standard RAG
+                raise StopIteration  # clean non-exception exit to RAG path
+
+            # ── Fetch RAG context for schema/governance overlay ───────
+            rag_context        = ""
+            governance_context = ""
+            schema_context     = ""
+            rag_sources: list[str] = []
+            rag_chunks         = 0
+
+            if not is_definite_sql:
+                # Ambiguous questions: fetch RAG context for SQL agent to use
+                try:
+                    retriever_fn = _build_retriever(vectordb, k, excluded_tables)
+                    source_docs  = retriever_fn(question)
+                    rag_context  = _format_docs(source_docs)
+                    rag_sources  = list({
+                        doc.metadata.get("source_file", "unknown")
+                        for doc in source_docs
+                    })
+                    rag_chunks = len(source_docs)
+
+                    gov_docs = [
+                        d for d in source_docs
+                        if d.metadata.get("source_type") == "databricks"
+                        or any(t in d.page_content.lower() for t in
+                               ["pii", "sensitivity", "owner", "gdpr", "solvency"])
+                    ]
+                    governance_context = _format_docs(gov_docs)
+
+                    schema_docs = [
+                        d for d in source_docs
+                        if d.metadata.get("file_type") in
+                        ("databricks_schema", "databricks_stats")
+                    ]
+                    schema_context = _format_docs(schema_docs)
+                except Exception:
+                    pass  # RAG unavailable — SQL agent works without it
+
+            agent_result = run_sql_agent(
+                question                 = question,
+                session_id               = session_id,
+                knowledge_set            = knowledge_set,
+                chat_history             = chat_history,
+                rag_context              = rag_context,
+                governance_context       = governance_context,
+                schema_context           = schema_context,
+                approved_tables_override = approved_tables,
+                connection_id_override   = connection_id,
+                intent_override          = resolved_intent,
+            )
+
+            intent = agent_result.get("intent", "NOT_SQL")
+
+            # All SQL-related intents return agent result.
+            # Only NOT_SQL falls through to standard RAG below.
+            SQL_INTENTS = {
+                "SIMPLE_LOOKUP", "AGGREGATION", "COMPARISON",
+                "JOIN_OPERATION", "MULTI_STEP", "CREATE_OBJECT", "OUT_OF_SCOPE",
+            }
+
+            if intent in SQL_INTENTS:
+                answer_parts = []
+                if agent_result.get("think_aloud"):
+                    answer_parts.append(f"_{agent_result['think_aloud']}_\n")
+                if agent_result.get("interpretation"):
+                    answer_parts.append(agent_result["interpretation"])
+                if agent_result.get("governance_note"):
+                    answer_parts.append(f"\n\n{agent_result['governance_note']}")
+                answer = "\n".join(answer_parts) if answer_parts else "Query executed."
+
+                # Build a rich memory record that includes the actual SQL and result data.
+                # This is what gets saved to conversation_history and read by the document
+                # generator — it must contain the real findings, not just the interpretation.
+                import json as _json
+                results_list = agent_result.get("results", [])
+                row_count    = agent_result.get("row_count", 0)
+                sql_executed = agent_result.get("sql", "")
+
+                memory_parts = []
+                if agent_result.get("think_aloud"):
+                    memory_parts.append(f"[SQL Analysis] {agent_result['think_aloud']}")
+                if sql_executed:
+                    memory_parts.append(f"[SQL Executed]\n{sql_executed}")
+                if row_count is not None:
+                    memory_parts.append(f"[Rows Returned] {row_count}")
+                if results_list:
+                    # Store up to 50 rows as compact JSON for document context
+                    sample = results_list[:50]
+                    try:
+                        memory_parts.append(f"[Result Data]\n{_json.dumps(sample, default=str, indent=2)}")
+                    except Exception:
+                        pass
+                if agent_result.get("interpretation"):
+                    memory_parts.append(f"[Interpretation]\n{agent_result['interpretation']}")
+                if agent_result.get("governance_note"):
+                    memory_parts.append(f"[Governance Note]\n{agent_result['governance_note']}")
+
+                rich_ai_message = "\n\n".join(memory_parts) if memory_parts else answer
+
+                result = {
+                    "run_id"            : run_id,
+                    "session_id"        : session_id,
+                    "knowledge_set"     : knowledge_set,
+                    "question"          : question,
+                    "rephrased_question": question,
+                    "answer"            : answer,
+                    "mode"              : agent_result.get("mode", "sql_agent"),
+                    "sources_used"      : rag_sources,
+                    "chunks_retrieved"  : rag_chunks,
+                    "model"             : CHAT_MODEL,
+                    "prompt_tokens"     : 0,
+                    "completion_tokens" : 0,
+                    "total_tokens"      : 0,
+                    "created_at"        : datetime.now().isoformat(),
+                    "duration_seconds"  : round(time.time() - start, 2),
+                    "sql_intent"        : intent,
+                    "sql_executed"      : agent_result.get("sql", ""),
+                    "sql_row_count"     : agent_result.get("row_count", 0),
+                    "sql_results"       : agent_result.get("results", []),
+                    "sql_think_aloud"   : agent_result.get("think_aloud", ""),
+                    "governance_note"   : agent_result.get("governance_note", ""),
+                }
+
+                db_insert("llm_responses", {
+                    k2: v for k2, v in result.items()
+                    if not isinstance(v, (list, dict)) or k2 == "sources_used"
+                })
+                save_turn(
+                    session_id=session_id, knowledge_set=knowledge_set,
+                    human_message=question,
+                    ai_message=rich_ai_message,  # contains SQL + result data + interpretation
+                    run_id=run_id, token_count=0,
+                )
+                return result
+
+            # NOT_SQL from agent — fall through to standard RAG
+
+        except StopIteration:
+            pass  # Intentional: resolved_intent was NOT_SQL → fall to standard RAG
+
+        except Exception as e:
+            import traceback
+            print(f"[SQL AGENT ERROR] {type(e).__name__}: {e}")
+            traceback.print_exc()
+            sql_agent_error = str(e)
+            # Fall through to standard RAG
+
+    # ── Standard RAG ─────────────────────────────────────────────
+    approved_sources_block = _build_approved_sources_block(approved_tables)
+
+    if use_rag:
+        # Condense follow-up questions into standalone questions
+        if chat_history:
+            condense_chain = CONDENSE_PROMPT | llm | parser
+            rephrased      = condense_chain.invoke({
+                "chat_history": chat_history,
+                "question"    : question,
+            })
+        else:
+            rephrased = question
+
+        retriever_fn = _build_retriever(vectordb, k, excluded_tables)
+        source_docs  = retriever_fn(rephrased)
+        context      = _format_docs(source_docs)
+
+        # Build sources_used list.
+        # Rule: always show uploaded-file sources.
+        # For Databricks chunks: only show if the table is currently approved.
+        # This prevents removed tables from appearing in sources.
+        all_sources = list({
+            doc.metadata.get("source_file", "unknown") for doc in source_docs
         })
-        const docResult = await api.document.generate({
-          question     : question.trim(),
-          knowledge_set: session.id,
-          session_id   : session.id,
-        })
-        onUpdateMessage(assistantId, {
-          content          : docResult.message,
-          doc_download_url : api.document.downloadUrl(docResult.file_name),
-          doc_title        : docResult.title,
-          doc_section_count: docResult.section_count,
-          mode             : 'document',
-        })
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : 'Document generation failed'
-        onUpdateMessage(assistantId, {
-          content: `**Error generating document:** ${msg}\n\nPlease try again or rephrase your request.`,
-        })
-      } finally {
-        setIsLoading(false)
-        setTimeout(() => inputRef.current?.focus(), 100)
-      }
-      return
-    }
+        if approved_tables:
+            approved_short = {t.split(".")[-1].lower() for t in approved_tables}
+            sources = []
+            for s in all_sources:
+                # Identify if this source is a Databricks chunk
+                is_databricks = any(
+                    doc.metadata.get("source_type") == "databricks"
+                    for doc in source_docs
+                    if doc.metadata.get("source_file") == s
+                )
+                if is_databricks:
+                    # Only include if the table is currently approved
+                    if s.lower() in approved_short:
+                        sources.append(s)
+                else:
+                    # Always include uploaded file sources
+                    sources.append(s)
+        else:
+            sources = all_sources
 
-    // ── Standard RAG + SQL Agent path ────────────────────────────
-    try {
-      const result = await api.query({
-        knowledge_set   : session.id,
-        session_id      : session.id,
-        question        : question.trim(),
-        use_rag         : useRag,
-        k,
-        window_k        : windowK,
-        enable_sql_agent: enableSqlAgent && hasSqlSources,
-        approved_tables : approvedTables,
-        connection_id   : connectionId ?? undefined,
-        excluded_tables : excludedTables,
-      })
+        qa_messages = QA_PROMPT.format_messages(
+            approved_sources_block=approved_sources_block,
+            context=context,
+            chat_history=chat_history,
+            question=question,
+        )
+        llm_response = llm.invoke(qa_messages)
+        answer       = llm_response.content
+        token_usage  = _extract_tokens(llm_response)
 
-      onUpdateMessage(assistantId, {
-        content           : result.answer,
-        sources_used      : result.sources_used,
-        chunks_retrieved  : result.chunks_retrieved,
-        duration_seconds  : result.duration_seconds,
-        run_id            : result.run_id,
-        rephrased_question: result.rephrased_question,
-        prompt_tokens     : result.prompt_tokens,
-        completion_tokens : result.completion_tokens,
-        total_tokens      : result.total_tokens,
-        mode              : result.mode,
-        sql_intent        : result.sql_intent ?? undefined,
-        sql_executed      : result.sql_executed ?? undefined,
-        sql_row_count     : result.sql_row_count ?? undefined,
-        sql_results       : result.sql_results ?? undefined,
-        sql_think_aloud   : result.sql_think_aloud ?? undefined,
-        governance_note   : result.governance_note ?? undefined,
-      })
+        result = {
+            "run_id"            : run_id,
+            "session_id"        : session_id,
+            "knowledge_set"     : knowledge_set,
+            "question"          : question,
+            "rephrased_question": rephrased,
+            "answer"            : answer,
+            "mode"              : "conversational_rag",
+            "sources_used"      : sources,
+            "chunks_retrieved"  : len(source_docs),
+            "model"             : CHAT_MODEL,
+            "prompt_tokens"     : token_usage["prompt_tokens"],
+            "completion_tokens" : token_usage["completion_tokens"],
+            "total_tokens"      : token_usage["total_tokens"],
+            "created_at"        : datetime.now().isoformat(),
+            "duration_seconds"  : round(time.time() - start, 2),
+            "sql_intent"        : None,
+            "sql_executed"      : None,
+            "sql_row_count"     : None,
+            "sql_results"       : None,
+            "sql_think_aloud"   : None,
+            "governance_note"   : None,
+        }
 
-      addTokenUsage(session.id, {
-        prompt_tokens    : result.prompt_tokens,
-        completion_tokens: result.completion_tokens,
-        total_tokens     : result.total_tokens,
-      })
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Request failed'
-      onUpdateMessage(assistantId, { content: `**Error:** ${msg}\n\nPlease ensure the backend is running and this knowledge set has been indexed.` })
-    } finally {
-      setIsLoading(false)
-      setTimeout(() => inputRef.current?.focus(), 100)
-    }
-  }, [isLoading, session.id, useRag, k, windowK, enableSqlAgent, hasSqlSources, approvedTables, excludedTables, connectionId, onAddMessage, onUpdateMessage, addTokenUsage])
+    else:
+        # ── Direct LLM (no retrieval) ─────────────────────────────
+        direct_prompt = ChatPromptTemplate.from_messages([
+            (
+                "system",
+                "You are a Data & AI Expert for the insurance industry. "
+                "You have full memory of this conversation. "
+                "Build on previous answers when relevant.\n\n"
+                f"{approved_sources_block}",
+            ),
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("human", "{question}"),
+        ])
+        direct_messages = direct_prompt.format_messages(
+            chat_history=chat_history,
+            question=question,
+        )
+        llm_response = llm.invoke(direct_messages)
+        answer       = llm_response.content
+        token_usage  = _extract_tokens(llm_response)
 
-  const handleClearChat = async () => {
-    setIsClearingMemory(true)
-    try { await api.clearConversationHistory(session.id, session.id) } catch (_) {}
-    finally { onClearChat(); resetTokenUsage(session.id); setIsClearingMemory(false) }
-  }
+        result = {
+            "run_id"            : run_id,
+            "session_id"        : session_id,
+            "knowledge_set"     : knowledge_set,
+            "question"          : question,
+            "rephrased_question": question,
+            "answer"            : answer,
+            "mode"              : "direct",
+            "sources_used"      : [],
+            "chunks_retrieved"  : 0,
+            "model"             : CHAT_MODEL,
+            "prompt_tokens"     : token_usage["prompt_tokens"],
+            "completion_tokens" : token_usage["completion_tokens"],
+            "total_tokens"      : token_usage["total_tokens"],
+            "created_at"        : datetime.now().isoformat(),
+            "duration_seconds"  : round(time.time() - start, 2),
+            "sql_intent"        : None,
+            "sql_executed"      : None,
+            "sql_row_count"     : None,
+            "sql_results"       : None,
+            "sql_think_aloud"   : None,
+            "governance_note"   : None,
+        }
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(input) }
-  }
-  const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setInput(e.target.value)
-    e.target.style.height = 'auto'
-    e.target.style.height = Math.min(e.target.scrollHeight, 140) + 'px'
-  }
-
-  const visibleMessages = messages.filter(m => m.content !== '' || m.role === 'user')
-  const isTyping        = isLoading && messages[messages.length - 1]?.content === ''
-
-  return (
-    <div className="h-full flex flex-col bg-ink-50">
-
-      {/* Prompt Guide Panel — slides in from the right */}
-      <PromptGuidePanel isOpen={showGuide} onClose={() => setShowGuide(false)} />
-
-      {/* Header */}
-      <div className="flex-shrink-0 px-6 py-3 border-b border-ink-200 bg-white">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-axa-800 flex items-center justify-center">
-              <Shield className="w-4 h-4 text-white" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-sm font-semibold text-ink-800 font-display">GovernGPT Agent</span>
-                <span className="axa-badge">GPT-4o</span>
-                {assistantTurns > 0 && (
-                  <span className="flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-axa-50 border border-axa-100 text-axa-800">
-                    <Brain className="w-2.5 h-2.5" />{assistantTurns} in memory
-                  </span>
-                )}
-                {hasSqlSources && enableSqlAgent && (
-                  <span className="flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700">
-                    <SquareCode className="w-2.5 h-2.5" />{approvedTables.length} SQL source{approvedTables.length !== 1 ? 's' : ''}
-                  </span>
-                )}
-              </div>
-              <p className="text-[10px] text-ink-400">{session.project_name}</p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-1.5">
-            {tokenUsage.total_tokens > 0 && (
-              <div className="hidden md:flex items-center gap-1.5 text-[10px] text-ink-400 bg-ink-50 border border-ink-100 px-2.5 py-1.5 rounded-lg">
-                <Zap className="w-3 h-3 text-axa-400" />
-                <span className="font-mono font-medium text-ink-600">{tokenUsage.total_tokens.toLocaleString()}</span>
-                <span>tokens</span>
-              </div>
-            )}
-            <button
-              onClick={() => setShowGuide(s => !s)}
-              className={cn('p-2 rounded-lg transition-colors text-ink-400', showGuide ? 'bg-axa-50 text-axa-800 border border-axa-100' : 'hover:bg-ink-100 hover:text-ink-700')}
-              title="Prompting Guide"
-            >
-              <Info className="w-4 h-4" />
-            </button>
-            <button onClick={() => setShowSettings(s => !s)}
-              className={cn('p-2 rounded-lg transition-colors text-ink-400', showSettings ? 'bg-axa-50 text-axa-800 border border-axa-100' : 'hover:bg-ink-100 hover:text-ink-700')}
-              title="Settings">
-              <Sliders className="w-4 h-4" />
-            </button>
-            {messages.length > 0 && (
-              <button onClick={handleClearChat} disabled={isClearingMemory}
-                className="p-2 rounded-lg hover:bg-axared-50 text-ink-400 hover:text-axared-500 transition-colors disabled:opacity-50" title="Clear chat">
-                <RotateCcw className={cn('w-4 h-4', isClearingMemory && 'animate-spin')} />
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Settings panel */}
-        <AnimatePresence>
-          {showSettings && (
-            <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="mt-3 overflow-hidden">
-              <div className="flex items-center flex-wrap gap-4 py-2.5 px-3 bg-axa-50 rounded-xl border border-axa-100">
-                <Toggle label="Use RAG" value={useRag} onChange={setUseRag} />
-                <Toggle label="SQL Agent" value={enableSqlAgent} onChange={setEnableSqlAgent}
-                  disabled={!hasSqlSources} disabledTitle="Approve tables in Databricks tab to enable" activeColor="bg-emerald-600" />
-                <label className="flex items-center gap-2 text-xs text-ink-600">
-                  <span className="font-medium">Top-K</span>
-                  <select value={k} onChange={e => setK(Number(e.target.value))}
-                    className="bg-white border border-ink-200 rounded-lg px-2 py-0.5 text-xs text-ink-700 focus:outline-none focus:border-axa-400">
-                    {[3,5,8,10,15,20].map(v => <option key={v} value={v}>{v}</option>)}
-                  </select>
-                </label>
-                <label className="flex items-center gap-2 text-xs text-ink-600">
-                  <Brain className="w-3.5 h-3.5 text-axa-700" />
-                  <span className="font-medium">Memory</span>
-                  <select value={windowK} onChange={e => setWindowK(Number(e.target.value))}
-                    className="bg-white border border-ink-200 rounded-lg px-2 py-0.5 text-xs text-ink-700 focus:outline-none focus:border-axa-400">
-                    {[2,4,6,8,10,12].map(v => <option key={v} value={v}>{v}</option>)}
-                  </select>
-                </label>
-                {tokenUsage.turn_count > 0 && (
-                  <div className="ml-auto flex items-center gap-3 text-[10px] text-ink-500 font-mono">
-                    <span>↑{tokenUsage.prompt_tokens.toLocaleString()}</span>
-                    <span>↓{tokenUsage.completion_tokens.toLocaleString()}</span>
-                    <span className="font-semibold text-axa-800">={tokenUsage.total_tokens.toLocaleString()}</span>
-                  </div>
-                )}
-              </div>
-
-              {hasSqlSources && (
-                <div className="mt-2 px-3 py-2 bg-emerald-50 border border-emerald-100 rounded-xl">
-                  <p className="text-[10px] font-semibold text-emerald-700 mb-1 flex items-center gap-1">
-                    <SquareCode className="w-3 h-3" />SQL-approved tables
-                  </p>
-                  <div className="flex flex-wrap gap-1">
-                    {approvedTables.map(t => (
-                      <span key={t} className="text-[9px] font-mono bg-white border border-emerald-200 text-emerald-700 px-1.5 py-0.5 rounded">{t.split('.').pop()}</span>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
-
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-6 py-6 space-y-5">
-        {messages.length === 0 ? (
-          <WelcomeScreen sessionName={session.project_name} hasSqlSources={hasSqlSources} approvedCount={approvedTables.length} onSuggest={sendMessage} />
-        ) : (
-          <>
-            {visibleMessages.map((msg, i) =>
-              isTyping && i === visibleMessages.length - 1 && msg.role === 'assistant' ? (
-                <TypingIndicator key={msg.id} />
-              ) : (
-                <MessageBubble key={msg.id} message={msg} index={i} />
-              )
-            )}
-            <div ref={bottomRef} />
-          </>
-        )}
-      </div>
-
-      {/* Input */}
-      <div className="flex-shrink-0 px-6 pb-6 pt-3 border-t border-ink-200 bg-white">
-        <div className={cn('flex items-end gap-3 bg-white border rounded-xl px-4 py-3 transition-all', 'focus-within:border-axa-400 focus-within:ring-2 focus-within:ring-axa-50 border-ink-200')}>
-          <textarea ref={inputRef} value={input} onChange={handleInput} onKeyDown={handleKeyDown}
-            placeholder={hasSqlSources && enableSqlAgent ? 'Ask a governance question or query your SQL tables…' : 'Ask a governance question…'}
-            disabled={isLoading} rows={1} maxLength={32000}
-            className="flex-1 bg-transparent text-sm text-ink-800 placeholder-ink-300 resize-none focus:outline-none leading-relaxed py-0.5 max-h-36 disabled:opacity-60"
-            style={{ height: '24px' }} />
-          <button onClick={() => sendMessage(input)} disabled={!input.trim() || isLoading}
-            className={cn('w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 transition-all',
-              input.trim() && !isLoading ? 'bg-axa-800 text-white hover:bg-axa-700 shadow-axa' : 'bg-ink-100 text-ink-300 cursor-not-allowed')}>
-            <Send className="w-3.5 h-3.5" />
-          </button>
-        </div>
-        <div className="flex items-center justify-between mt-1.5 px-1">
-          <p className="text-[10px] text-ink-300">
-            <kbd className="font-mono bg-ink-100 px-1 rounded text-ink-400">Enter</kbd> send ·{' '}
-            <kbd className="font-mono bg-ink-100 px-1 rounded text-ink-400">Shift+Enter</kbd> new line
-          </p>
-          {input.length > 500 && <p className="text-[10px] text-ink-400 font-mono">{input.length.toLocaleString()} / 32,000</p>}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function Toggle({ label, value, onChange, disabled, disabledTitle, activeColor = 'bg-axa-800' }: {
-  label: string; value: boolean; onChange: (v: boolean) => void
-  disabled?: boolean; disabledTitle?: string; activeColor?: string
-}) {
-  return (
-    <label className={cn('flex items-center gap-2 text-xs text-ink-600 select-none', disabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer')} title={disabled ? disabledTitle : undefined}>
-      <div onClick={() => !disabled && onChange(!value)}
-        className={cn('w-8 h-4 rounded-full transition-colors relative', !disabled && 'cursor-pointer', value && !disabled ? activeColor : 'bg-ink-200')}>
-        <div className={cn('absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform shadow-sm', value ? 'translate-x-4' : 'translate-x-0.5')} />
-      </div>
-      <span className="font-medium">{label}</span>
-    </label>
-  )
-}
-
-function WelcomeScreen({ sessionName, hasSqlSources, approvedCount, onSuggest }: {
-  sessionName: string; hasSqlSources: boolean; approvedCount: number; onSuggest: (q: string) => void
-}) {
-  return (
-    <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="flex flex-col items-center justify-center min-h-[60%] text-center py-8">
-      <div className="w-14 h-14 rounded-2xl bg-axa-800 flex items-center justify-center mb-5 shadow-axa">
-        <Sparkles className="w-7 h-7 text-white" />
-      </div>
-      <h2 className="font-display text-2xl text-ink-800 mb-2">Ask GovernGPT</h2>
-      <p className="text-ink-500 text-sm max-w-sm mb-2 leading-relaxed">
-        Query your <span className="text-axa-800 font-semibold">{sessionName}</span> knowledge set.
-      </p>
-      <div className="flex flex-col items-center gap-1.5 mb-8">
-        <p className="flex items-center gap-1.5 text-[11px] text-axa-700 bg-axa-50 border border-axa-100 px-3 py-1.5 rounded-full">
-          <Brain className="w-3 h-3" />Conversational memory active
-        </p>
-        {hasSqlSources && (
-          <p className="flex items-center gap-1.5 text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-100 px-3 py-1.5 rounded-full">
-            <SquareCode className="w-3 h-3" />SQL Agent active · {approvedCount} table{approvedCount !== 1 ? 's' : ''} approved
-          </p>
-        )}
-      </div>
-      <div className="w-full max-w-lg space-y-2">
-        <p className="text-[10px] font-semibold text-ink-400 uppercase tracking-widest mb-3">
-          {hasSqlSources ? 'Suggested SQL queries' : 'Suggested queries'}
-        </p>
-        {(hasSqlSources ? SUGGESTED_SQL : SUGGESTED_RAG).map((q, i) => (
-          <motion.button key={i} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.07 }}
-            onClick={() => onSuggest(q)}
-            className="w-full text-left px-4 py-2.5 rounded-xl bg-white border border-ink-200 text-xs text-ink-600 hover:border-axa-300 hover:text-axa-800 hover:bg-axa-50 transition-all">
-            {q}
-          </motion.button>
-        ))}
-      </div>
-    </motion.div>
-  )
-}
+    # ── Persist ───────────────────────────────────────────────────
+    db_insert("llm_responses", {
+        k2: v for k2, v in result.items()
+        if not isinstance(v, (list, dict)) or k2 == "sources_used"
+    })
+    save_turn(
+        session_id=session_id, knowledge_set=knowledge_set,
+        human_message=question, ai_message=answer,
+        run_id=run_id, token_count=result.get("total_tokens", 0),
+    )
+    return result
