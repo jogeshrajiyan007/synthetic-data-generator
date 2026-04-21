@@ -1,318 +1,507 @@
-'use client'
-import { useState } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import { User, Bot, Clock, FileText, Copy, Check, Brain, Zap, SquareCode, AlertTriangle, Download, FileDown } from 'lucide-react'
-import type { ChatMessage } from '@/types'
-import { formatTime, cn } from '@/lib/utils'
+"""
+services/document_generator.py
 
-const INTENT_META: Record<string, { label: string; color: string }> = {
-  SIMPLE_LOOKUP : { label: 'Lookup',     color: 'bg-blue-50 border-blue-200 text-blue-700' },
-  AGGREGATION   : { label: 'Aggregation',color: 'bg-purple-50 border-purple-200 text-purple-700' },
-  COMPARISON    : { label: 'Comparison', color: 'bg-orange-50 border-orange-200 text-orange-700' },
-  JOIN_OPERATION: { label: 'Join',       color: 'bg-pink-50 border-pink-200 text-pink-700' },
-  MULTI_STEP    : { label: 'Multi-step', color: 'bg-indigo-50 border-indigo-200 text-indigo-700' },
-  CREATE_OBJECT : { label: 'Create',     color: 'bg-yellow-50 border-yellow-200 text-yellow-700' },
-  OUT_OF_SCOPE  : { label: 'Restricted', color: 'bg-red-50 border-red-200 text-red-600' },
-}
+AI-powered .docx generation for GovernGPT.
 
-interface MessageBubbleProps {
-  message: ChatMessage
-  index: number
-}
+Flow:
+  1. LLM receives the user's documentation request + RAG context
+  2. LLM returns structured JSON (title, sections with headings/paragraphs/tables/bullets)
+  3. A Node.js script uses the docx library to build a professional .docx file
+  4. The file path is returned to the router for download
 
-export function MessageBubble({ message, index }: MessageBubbleProps) {
-  const [copied, setCopied]               = useState(false)
-  const [showMeta, setShowMeta]           = useState(false)
-  const [showSql, setShowSql]             = useState(false)
-  const [showResults, setShowResults]     = useState(false)
-  const isUser    = message.role === 'user'
-  const isSql     = message.mode === 'sql_agent' || message.mode === 'hybrid'
-  const intentMeta = message.sql_intent ? INTENT_META[message.sql_intent] : null
+Trigger detection:
+  Keywords: "create documentation", "generate report", "write a document",
+  "create a data catalog", "produce a report", "document this", "write up"
+"""
 
-  const handleCopy = async () => {
-    await navigator.clipboard.writeText(message.content)
-    setCopied(true); setTimeout(() => setCopied(false), 2000)
-  }
+from __future__ import annotations
+import os
+import re
+import json
+import uuid
+import subprocess
+import textwrap
+from pathlib import Path
+from datetime import datetime
 
-  const showRephrased = !isUser && !isSql && message.rephrased_question &&
-    message.rephrased_question !== message.content
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import BaseMessage
+from langchain_core.output_parsers import StrOutputParser
 
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: Math.min(index * 0.04, 0.25), duration: 0.3 }}
-      className={cn('flex gap-3 group', isUser ? 'flex-row-reverse' : 'flex-row')}
-    >
-      {/* Avatar */}
-      <div className={cn('w-8 h-8 rounded-lg flex-shrink-0 flex items-center justify-center mt-0.5',
-        isUser ? 'bg-axa-800' : 'bg-white border border-ink-200 shadow-sm')}>
-        {isUser ? <User className="w-4 h-4 text-white" /> : <Bot className="w-4 h-4 text-axa-800" />}
-      </div>
+from llm import get_llm
+from config import CHAT_MODEL
 
-      {/* Content — assistant messages are full width to accommodate wide SQL result tables */}
-      <div className={cn(
-        'flex-1 min-w-0 flex flex-col gap-1',
-        isUser ? 'items-end max-w-[85%]' : 'items-start w-full'
-      )}>
+# Directory where generated .docx files are stored
+DOCS_DIR = Path(__file__).parent.parent / "generated_docs"
+DOCS_DIR.mkdir(exist_ok=True)
 
-        {/* SQL think-aloud */}
-        {!isUser && message.sql_think_aloud && (
-          <div className="flex items-start gap-1.5 mb-0.5 w-full">
-            <SquareCode className="w-3 h-3 text-emerald-600 flex-shrink-0 mt-0.5" />
-            <span className="text-[10px] text-emerald-700 bg-emerald-50 border border-emerald-100 px-2 py-1 rounded-lg italic leading-relaxed">
-              {message.sql_think_aloud}
-            </span>
-          </div>
-        )}
 
-        {/* RAG rephrased question */}
-        {showRephrased && (
-          <div className="flex items-center gap-1.5 mb-0.5">
-            <Brain className="w-3 h-3 text-axa-600 flex-shrink-0" />
-            <span className="text-[10px] text-axa-700 bg-axa-50 border border-axa-100 px-2 py-0.5 rounded-full italic">
-              Searched: "{message.rephrased_question}"
-            </span>
-          </div>
-        )}
+# ── Documentation trigger detection ──────────────────────────────
 
-        {/* Bubble */}
-        <div className={cn('relative rounded-2xl px-4 py-3 text-sm w-full',
-          isUser ? 'bg-axa-800 text-white rounded-tr-sm ml-auto' : 'bg-white border border-ink-200 shadow-sm rounded-tl-sm')}>
-          {isUser ? (
-            <p className="text-white leading-relaxed">{message.content}</p>
-          ) : (
-            <div className="prose-governance">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-            </div>
-          )}
-          {!isUser && message.content && (
-            <button onClick={handleCopy}
-              className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1 rounded-lg bg-ink-50 hover:bg-ink-100 text-ink-400 hover:text-ink-700 transition-all border border-ink-200">
-              {copied ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
-            </button>
-          )}
-        </div>
+_DOC_TRIGGER = re.compile(
+    r'\b(create|generate|write|produce|build|make|prepare|draft|design)\b.{0,30}'
+    r'\b(documentation|document|report|data catalog|catalog|summary report|'
+    r'write.?up|briefing|specification|spec|data dictionary|runbook|playbook)\b'
+    r'|\b(document this|document the|write this up|put this in a doc|'
+    r'create a doc|generate a doc|export (this|as|to) (a )?(doc|word|docx))\b',
+    re.IGNORECASE,
+)
 
-        {/* ── Document download card ── */}
-        {!isUser && message.doc_download_url && (
-          <motion.div
-            initial={{ opacity: 0, y: 6 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="w-full mt-2 flex items-center gap-3 px-4 py-3 bg-axa-50 border border-axa-200 rounded-xl"
-          >
-            <div className="w-9 h-9 rounded-lg bg-axa-800 flex items-center justify-center flex-shrink-0">
-              <FileDown className="w-4 h-4 text-white" />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-semibold text-ink-800 truncate">
-                {message.doc_title ?? 'Generated Document'}
-              </p>
-              <p className="text-[10px] text-ink-400">
-                Word document · {message.doc_section_count ?? 0} sections
-              </p>
-            </div>
-            <a
-              href={message.doc_download_url}
-              download
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-axa-800 text-white text-xs font-semibold hover:bg-axa-700 transition-colors shadow-sm flex-shrink-0"
-            >
-              <Download className="w-3.5 h-3.5" />
-              Download .docx
-            </a>
-          </motion.div>
-        )}
-        {!isUser && message.sql_results && message.sql_results.length > 0 && (
-          <div className="w-full mt-1">
-            <button onClick={() => setShowResults(v => !v)}
-              className="flex items-center gap-1.5 text-[10px] text-emerald-700 bg-emerald-50 border border-emerald-100 px-2.5 py-1 rounded-lg hover:bg-emerald-100 transition-colors">
-              <SquareCode className="w-3 h-3" />
-              <span className="font-semibold">{message.sql_row_count ?? message.sql_results.length} rows returned</span>
-              <span className="text-emerald-400">{showResults ? '▲ hide' : '▼ show'}</span>
-            </button>
-            <AnimatePresence>
-              {showResults && (
-                <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-visible">
-                  <SqlResultsTable results={message.sql_results} />
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-        )}
 
-        {/* SQL view toggle */}
-        {!isUser && message.sql_executed && (
-          <div className="w-full mt-0.5">
-            <button onClick={() => setShowSql(v => !v)} className="text-[10px] text-ink-400 hover:text-ink-600 transition-colors">
-              {showSql ? '▲ hide SQL' : '▼ view SQL'}
-            </button>
-            <AnimatePresence>
-              {showSql && (
-                <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden mt-1">
-                  <pre className="text-[10px] font-mono bg-ink-900 text-emerald-300 rounded-xl px-4 py-3 overflow-x-auto whitespace-pre-wrap leading-relaxed">
-                    {message.sql_executed}
-                  </pre>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-        )}
+def is_doc_request(question: str) -> bool:
+    """Return True if the user is asking GovernGPT to produce a .docx document."""
+    return bool(_DOC_TRIGGER.search(question))
 
-        {/* Governance note */}
-        {!isUser && message.governance_note && (
-          <div className="w-full mt-1 flex items-start gap-2 px-3 py-2 bg-amber-50 border border-amber-100 rounded-xl">
-            <AlertTriangle className="w-3 h-3 text-amber-500 flex-shrink-0 mt-0.5" />
-            <div className="text-[10px] text-amber-700 leading-relaxed prose-governance">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.governance_note}</ReactMarkdown>
-            </div>
-          </div>
-        )}
 
-        {/* Meta row */}
-        <div className={cn('flex items-center gap-3 px-1 flex-wrap', isUser ? 'flex-row-reverse' : 'flex-row')}>
-          <span className="text-[10px] text-ink-400 flex items-center gap-1 flex-shrink-0">
-            <Clock className="w-2.5 h-2.5" />{formatTime(message.timestamp)}
-          </span>
+# ── LLM prompt for structured document content ───────────────────
 
-          {/* Intent badge */}
-          {!isUser && intentMeta && (
-            <span className={cn('flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded-full border flex-shrink-0', intentMeta.color)}>
-              <SquareCode className="w-2.5 h-2.5" />{intentMeta.label}
-            </span>
-          )}
+DOC_CONTENT_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are a technical writer producing a professional Word document for an insurance data team.
 
-          {/* Sources — show for all assistant messages with sources */}
-          {!isUser && message.sources_used && message.sources_used.length > 0 && (
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <FileText className="w-2.5 h-2.5 text-ink-400 flex-shrink-0" />
-              {message.sources_used.map(src => (
-                <span key={src} className="text-[10px] font-mono text-axa-800 bg-axa-50 px-1.5 py-0.5 rounded border border-axa-100">{src}</span>
-              ))}
-            </div>
-          )}
+CRITICAL INSTRUCTION — SCOPE FILTERING:
+The user has made a SPECIFIC documentation request (shown at the bottom).
+You must ONLY document what the user explicitly asked for.
+If the user asked for "STTM", document ONLY STTM-related content.
+If the user asked for "claims status analysis", document ONLY claims status content.
+DO NOT include unrelated analyses, tables, or findings from the session — even if they appear in the responses below.
+IGNORE session responses that are not relevant to the user's specific request.
 
-          {!isUser && message.duration_seconds && (
-            <span className="text-[10px] text-ink-300 flex-shrink-0">{message.duration_seconds}s</span>
-          )}
+ACCURACY RULES:
+- Do NOT invent findings. Do NOT generalise. Do NOT add content not present in the session responses.
+- Every bullet, table, and paragraph must be drawn directly from the matching session responses.
+- Quote numbers, column names, table names exactly as they appear in the responses.
 
-          {!isUser && message.total_tokens && message.total_tokens > 0 && (
-            <button onClick={() => setShowMeta(v => !v)} className="flex items-center gap-1 text-[10px] text-ink-400 hover:text-axa-700 transition-colors flex-shrink-0">
-              <Zap className="w-2.5 h-2.5" /><span className="font-mono">{message.total_tokens.toLocaleString()}</span>
-            </button>
-          )}
-        </div>
+The session responses may contain:
+  - [SQL Analysis] — what query was about to run
+  - [SQL Executed] — the actual SQL that ran
+  - [Rows Returned] — how many rows came back
+  - [Result Data] — actual result rows as JSON (convert to readable tables)
+  - [Interpretation] — GPT-4o's bullet-point findings
+  - [Governance Note] — PII flags, sensitivity, ownership warnings
+  - Plain text answers — governance/RAG responses
 
-        {/* Token breakdown */}
-        {!isUser && showMeta && message.total_tokens && message.total_tokens > 0 && (
-          <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="px-1 overflow-hidden">
-            <div className="flex items-center gap-3 text-[10px] font-mono text-ink-400 bg-ink-50 border border-ink-100 rounded-lg px-3 py-2 mt-1">
-              <span>↑ {(message.prompt_tokens ?? 0).toLocaleString()} prompt</span>
-              <span className="text-ink-200">·</span>
-              <span>↓ {(message.completion_tokens ?? 0).toLocaleString()} completion</span>
-              <span className="text-ink-200">·</span>
-              <span className="font-semibold text-axa-700">= {(message.total_tokens ?? 0).toLocaleString()} total</span>
-              {message.mode && <><span className="text-ink-200">·</span><span className="text-ink-500">{message.mode}</span></>}
-            </div>
-          </motion.div>
-        )}
-      </div>
-    </motion.div>
-  )
-}
+Your document structure:
+1. Executive Summary — what was specifically requested and what was found (2-3 sentences only)
+2. One section per distinct analysis/finding that matches the user's request
+3. Governance Observations — only if governance notes exist for the requested topic
+4. Recommendations — only based on what was actually found for the requested topic
 
-function SqlResultsTable({ results }: { results: Record<string, unknown>[] }) {
-  if (!results.length) return null
-  const cols    = Object.keys(results[0])
-  const display = results.slice(0, 50)
-  const isWide  = cols.length > 6  // many-column tables need special treatment
+If no session responses match the user's request, return a document stating:
+"No session responses found matching the requested topic. Please ensure the relevant analysis was performed in this session before generating documentation."
 
-  // For wide tables: compute per-column max content width to set min-width
-  const colMinWidths = cols.map(col => {
-    const headerLen  = col.length
-    const maxDataLen = display.reduce((max, row) => {
-      const v = row[col]
-      const len = v === null || v === undefined ? 1 : String(v).length
-      return Math.max(max, len)
-    }, 0)
-    // Clamp: min 60px, max 200px, ~6px per char
-    return Math.min(200, Math.max(60, Math.max(headerLen, maxDataLen) * 6))
-  })
+Return ONLY valid JSON — no markdown, no explanation:
 
-  return (
-    // Key fix: w-full with negative margin breaks out of the bubble's max-w constraint
-    // The outer wrapper must scroll horizontally — not the bubble
-    <div className="mt-1.5 w-full">
-      <div className={cn(
-        'rounded-xl border border-emerald-100 bg-white shadow-sm',
-        'overflow-x-auto',  // horizontal scroll on THIS container
-        isWide ? 'max-h-72 overflow-y-auto' : ''  // vertical scroll for tall wide tables
-      )}>
-        <table className="text-[10px] border-collapse" style={{ minWidth: isWide ? `${colMinWidths.reduce((a, b) => a + b, 0)}px` : '100%' }}>
-          <thead className="sticky top-0 z-10">
-            <tr className="bg-emerald-700">
-              {cols.map((col, ci) => (
-                <th
-                  key={col}
-                  style={{ minWidth: `${colMinWidths[ci]}px` }}
-                  className="px-2.5 py-1.5 text-left font-semibold text-white font-mono text-[9px] uppercase tracking-wide border-r border-emerald-600 last:border-r-0 whitespace-nowrap"
-                >
-                  {col}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {display.map((row, ri) => (
-              <tr key={ri} className={cn('border-b border-ink-50 hover:bg-emerald-50/40 transition-colors', ri % 2 === 0 ? 'bg-white' : 'bg-ink-50/40')}>
-                {cols.map((col, ci) => {
-                  const v   = row[col]
-                  const str = v === null || v === undefined ? '—' : String(v)
-                  const isEmpty = str === '—'
-                  return (
-                    <td
-                      key={col}
-                      style={{ minWidth: `${colMinWidths[ci]}px`, maxWidth: `${Math.min(colMinWidths[ci] * 1.5, 240)}px` }}
-                      className="px-2.5 py-1.5 font-mono border-r border-ink-50 last:border-r-0 overflow-hidden"
-                      title={isEmpty ? undefined : str}
-                    >
-                      {isEmpty
-                        ? <span className="text-ink-200">—</span>
-                        : <span className="block truncate text-ink-700">{str}</span>
-                      }
-                    </td>
-                  )
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {/* Footer: column count + row count */}
-      <div className="flex items-center justify-between px-2 pt-1">
-        <span className="text-[9px] text-ink-400 font-mono">{cols.length} columns</span>
-        {results.length > 50
-          ? <span className="text-[9px] text-ink-400">Showing 50 of {results.length} rows</span>
-          : <span className="text-[9px] text-ink-400">{results.length} row{results.length !== 1 ? 's' : ''}</span>
+{{
+  "title": "Specific title based on user's request",
+  "subtitle": "e.g. 'STTM Analysis — April 2026'",
+  "author": "GovernGPT — AXA Data Governance",
+  "sections": [
+    {{
+      "heading": "Section heading",
+      "level": 1,
+      "content": [
+        {{"type": "paragraph", "text": "Factual content from matching session responses only."}},
+        {{"type": "bullets", "items": ["Exact finding from session", "Another exact finding"]}},
+        {{"type": "table",
+          "headers": ["Column 1", "Column 2"],
+          "rows": [["value from result data", "value"], ["...", "..."]]
+        }}
+      ]
+    }}
+  ]
+}}
+
+USER'S DOCUMENTATION REQUEST (this defines the SCOPE — only document what this asks for):
+{question}
+
+SESSION RESPONSES (AI assistant outputs — filter to only what is relevant to the request above):
+{history_summary}
+
+Additional knowledge base context (use only if directly relevant to the request):
+{context}"""),
+    ("human", "Generate the document JSON now. Only include content that matches the user's specific request. Ignore everything else."),
+])
+
+
+# ── Node.js docx generator script ────────────────────────────────
+
+_DOCX_SCRIPT_TEMPLATE = r"""
+const fs = require('fs');
+const {{
+  Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
+  Header, Footer, AlignmentType, HeadingLevel, BorderStyle,
+  WidthType, ShadingType, VerticalAlign, LevelFormat, PageNumber,
+  NumberFormat
+}} = require('docx');
+
+const data = {doc_json};
+
+// ── Colour palette (AXA brand) ────────────────────────────────
+const AXA_BLUE    = "00008F";
+const AXA_LIGHT   = "D0D5FF";
+const BORDER_GREY = "CCCCCC";
+const TEXT_DARK   = "1A1A2E";
+const ROW_ALT     = "F4F4F9";
+
+const border = {{ style: BorderStyle.SINGLE, size: 1, color: BORDER_GREY }};
+const allBorders = {{ top: border, bottom: border, left: border, right: border }};
+
+// ── Helpers ───────────────────────────────────────────────────
+function makeHeaderCell(text) {{
+  return new TableCell({{
+    borders: allBorders,
+    shading: {{ fill: AXA_BLUE, type: ShadingType.CLEAR }},
+    width: {{ size: Math.floor(9360 / 2), type: WidthType.DXA }},
+    margins: {{ top: 100, bottom: 100, left: 120, right: 120 }},
+    verticalAlign: VerticalAlign.CENTER,
+    children: [new Paragraph({{
+      alignment: AlignmentType.LEFT,
+      children: [new TextRun({{ text: String(text), bold: true, color: "FFFFFF", font: "Arial", size: 20 }})]
+    }})]
+  }});
+}}
+
+function makeDataCell(text, shade) {{
+  return new TableCell({{
+    borders: allBorders,
+    shading: {{ fill: shade, type: ShadingType.CLEAR }},
+    width: {{ size: Math.floor(9360 / 2), type: WidthType.DXA }},
+    margins: {{ top: 80, bottom: 80, left: 120, right: 120 }},
+    children: [new Paragraph({{
+      children: [new TextRun({{ text: String(text), font: "Arial", size: 20, color: TEXT_DARK }})]
+    }})]
+  }});
+}}
+
+function makeTable(headers, rows) {{
+  const colCount = headers.length;
+  const colWidth = Math.floor(9360 / colCount);
+  const colWidths = Array(colCount).fill(colWidth);
+
+  const headerRow = new TableRow({{
+    tableHeader: true,
+    children: headers.map(h => {{
+      return new TableCell({{
+        borders: allBorders,
+        shading: {{ fill: AXA_BLUE, type: ShadingType.CLEAR }},
+        width: {{ size: colWidth, type: WidthType.DXA }},
+        margins: {{ top: 100, bottom: 100, left: 120, right: 120 }},
+        verticalAlign: VerticalAlign.CENTER,
+        children: [new Paragraph({{
+          children: [new TextRun({{ text: String(h), bold: true, color: "FFFFFF", font: "Arial", size: 20 }})]
+        }})]
+      }});
+    }})
+  }});
+
+  const dataRows = rows.map((row, ri) => new TableRow({{
+    children: row.map(cell => new TableCell({{
+      borders: allBorders,
+      shading: {{ fill: ri % 2 === 0 ? "FFFFFF" : ROW_ALT, type: ShadingType.CLEAR }},
+      width: {{ size: colWidth, type: WidthType.DXA }},
+      margins: {{ top: 80, bottom: 80, left: 120, right: 120 }},
+      children: [new Paragraph({{
+        children: [new TextRun({{ text: String(cell), font: "Arial", size: 20, color: TEXT_DARK }})]
+      }})]
+    }}))
+  }}));
+
+  return new Table({{
+    width: {{ size: 9360, type: WidthType.DXA }},
+    columnWidths: colWidths,
+    rows: [headerRow, ...dataRows]
+  }});
+}}
+
+function contentToBlocks(items) {{
+  const blocks = [];
+  for (const item of items) {{
+    if (item.type === 'paragraph') {{
+      blocks.push(new Paragraph({{
+        spacing: {{ after: 160 }},
+        children: [new TextRun({{ text: item.text || '', font: "Arial", size: 22, color: TEXT_DARK }})]
+      }}));
+    }} else if (item.type === 'bullets') {{
+      for (const bullet of (item.items || [])) {{
+        blocks.push(new Paragraph({{
+          numbering: {{ reference: "bullets", level: 0 }},
+          spacing: {{ after: 80 }},
+          children: [new TextRun({{ text: String(bullet), font: "Arial", size: 22, color: TEXT_DARK }})]
+        }}));
+      }}
+    }} else if (item.type === 'table') {{
+      blocks.push(makeTable(item.headers || [], item.rows || []));
+      blocks.push(new Paragraph({{ spacing: {{ after: 160 }}, children: [] }}));
+    }}
+  }}
+  return blocks;
+}}
+
+// ── Build document children ───────────────────────────────────
+const children = [];
+
+// Cover title
+children.push(new Paragraph({{
+  heading: HeadingLevel.TITLE,
+  spacing: {{ before: 480, after: 240 }},
+  children: [new TextRun({{ text: data.title || 'Document', bold: true, font: "Arial", size: 56, color: AXA_BLUE }})]
+}}));
+
+if (data.subtitle) {{
+  children.push(new Paragraph({{
+    spacing: {{ after: 120 }},
+    alignment: AlignmentType.LEFT,
+    children: [new TextRun({{ text: data.subtitle, font: "Arial", size: 24, color: "666666", italics: true }})]
+  }}));
+}}
+
+children.push(new Paragraph({{
+  spacing: {{ after: 480 }},
+  children: [new TextRun({{ text: data.author || 'GovernGPT', font: "Arial", size: 22, color: "888888" }})]
+}}));
+
+// Horizontal rule
+children.push(new Paragraph({{
+  border: {{ bottom: {{ style: BorderStyle.SINGLE, size: 6, color: AXA_BLUE, space: 1 }} }},
+  children: []
+}}));
+children.push(new Paragraph({{ spacing: {{ after: 360 }}, children: [] }}));
+
+// Sections
+for (const section of (data.sections || [])) {{
+  const level = section.level === 2 ? HeadingLevel.HEADING_2 : HeadingLevel.HEADING_1;
+  const fontSize = section.level === 2 ? 26 : 32;
+  children.push(new Paragraph({{
+    heading: level,
+    spacing: {{ before: section.level === 1 ? 360 : 240, after: 160 }},
+    children: [new TextRun({{ text: section.heading || '', bold: true, font: "Arial", size: fontSize, color: AXA_BLUE }})]
+  }}));
+  children.push(...contentToBlocks(section.content || []));
+}}
+
+// ── Document ──────────────────────────────────────────────────
+const doc = new Document({{
+  numbering: {{
+    config: [{{
+      reference: "bullets",
+      levels: [{{
+        level: 0, format: LevelFormat.BULLET, text: "\u2022",
+        alignment: AlignmentType.LEFT,
+        style: {{ paragraph: {{ indent: {{ left: 720, hanging: 360 }} }} }}
+      }}]
+    }}]
+  }},
+  styles: {{
+    default: {{ document: {{ run: {{ font: "Arial", size: 22, color: TEXT_DARK }} }} }},
+    paragraphStyles: [
+      {{ id: "Heading1", name: "Heading 1", basedOn: "Normal", next: "Normal", quickFormat: true,
+         run: {{ size: 32, bold: true, font: "Arial", color: AXA_BLUE }},
+         paragraph: {{ spacing: {{ before: 360, after: 160 }}, outlineLevel: 0 }} }},
+      {{ id: "Heading2", name: "Heading 2", basedOn: "Normal", next: "Normal", quickFormat: true,
+         run: {{ size: 26, bold: true, font: "Arial", color: AXA_BLUE }},
+         paragraph: {{ spacing: {{ before: 240, after: 120 }}, outlineLevel: 1 }} }},
+    ]
+  }},
+  sections: [{{
+    properties: {{
+      page: {{
+        size: {{ width: 12240, height: 15840 }},
+        margin: {{ top: 1440, right: 1440, bottom: 1440, left: 1440 }}
+      }}
+    }},
+    headers: {{
+      default: new Header({{
+        children: [new Paragraph({{
+          border: {{ bottom: {{ style: BorderStyle.SINGLE, size: 4, color: AXA_BLUE, space: 1 }} }},
+          children: [
+            new TextRun({{ text: data.title || 'GovernGPT Document', font: "Arial", size: 18, color: "888888" }}),
+            new TextRun({{ text: "   |   AXA GovernGPT", font: "Arial", size: 18, color: AXA_BLUE }})
+          ]
+        }})]
+      }})
+    }},
+    footers: {{
+      default: new Footer({{
+        children: [new Paragraph({{
+          border: {{ top: {{ style: BorderStyle.SINGLE, size: 4, color: AXA_BLUE, space: 1 }} }},
+          children: [
+            new TextRun({{ text: "Generated by GovernGPT  |  Confidential  |  ", font: "Arial", size: 16, color: "888888" }}),
+            new TextRun({{ children: [new PageNumber()], font: "Arial", size: 16, color: "888888" }})
+          ]
+        }})]
+      }})
+    }},
+    children
+  }}]
+}});
+
+Packer.toBuffer(doc).then(buffer => {{
+  fs.writeFileSync("{output_path}", buffer);
+  console.log("OK:" + "{output_path}");
+}}).catch(err => {{
+  console.error("ERR:" + err.message);
+  process.exit(1);
+}});
+"""
+
+
+# ── Main generator function ───────────────────────────────────────
+
+def generate_document(
+    question: str,
+    rag_context: str = "",
+    chat_history: list[BaseMessage] | None = None,
+    knowledge_set: str = "default",
+) -> dict:
+    """
+    Generate a .docx document from the user's request + RAG context.
+
+    Returns:
+        {
+          "success": bool,
+          "file_name": str,
+          "file_path": str,
+          "title": str,
+          "section_count": int,
+          "error": str | None
         }
-      </div>
-    </div>
-  )
-}
+    """
+    llm    = get_llm()
+    parser = StrOutputParser()
 
-export function TypingIndicator() {
-  return (
-    <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 8 }} className="flex gap-3">
-      <div className="w-8 h-8 rounded-lg bg-white border border-ink-200 shadow-sm flex items-center justify-center flex-shrink-0">
-        <Bot className="w-4 h-4 text-axa-800" />
-      </div>
-      <div className="bg-white border border-ink-200 shadow-sm rounded-2xl rounded-tl-sm px-4 py-3 flex items-center gap-1.5">
-        {[0, 0.2, 0.4].map((delay, i) => (
-          <motion.div key={i} className="w-1.5 h-1.5 rounded-full bg-axa-800"
-            animate={{ scale: [1, 1.4, 1], opacity: [0.3, 1, 0.3] }}
-            transition={{ duration: 0.8, delay, repeat: Infinity }} />
-        ))}
-      </div>
-    </motion.div>
-  )
-}
+    # ── Step 1: Generate structured document content via LLM ─────
+    # Build the session transcript from AI responses ONLY.
+    # Pre-filter by relevance to the user's request using keyword matching.
+    # This ensures "document STTM" only passes STTM-related AI responses,
+    # not the full session history.
+    history_summary = ""
+    if chat_history:
+        # Extract keywords from the user's question for relevance filtering
+        # Strip common doc-request words to get the actual topic keywords
+        stop_words = {
+            "create", "generate", "write", "produce", "build", "make", "prepare",
+            "draft", "document", "documentation", "report", "for", "the", "a",
+            "an", "this", "from", "my", "our", "all", "what", "was", "discussed",
+            "please", "can", "you", "me", "us", "about", "in", "of", "and", "or",
+            "with", "include", "using", "based", "on", "session", "chat", "analysis",
+        }
+        q_words = set(re.findall(r'\b[a-zA-Z_]{3,}\b', question.lower())) - stop_words
+        # If no meaningful keywords found (e.g. "document everything"), include all
+        filter_keywords = q_words if len(q_words) >= 1 else set()
+
+        ai_entries = []
+        for m in chat_history:
+            if not (m.type == "ai" and m.content and m.content.strip()):
+                continue
+
+            content = m.content.strip()
+
+            # Relevance check: if we have filter keywords, only include
+            # AI responses that contain at least one keyword from the request.
+            # This filters out unrelated table analyses from the same session.
+            if filter_keywords:
+                content_lower = content.lower()
+                if not any(kw in content_lower for kw in filter_keywords):
+                    continue  # skip this response — not relevant to the request
+
+            # Cap each entry to prevent one large SQL result dominating context
+            if len(content) > 2000:
+                content = content[:2000] + "\n[...truncated]"
+            ai_entries.append(content)
+
+        history_summary = "\n\n---\n\n".join(ai_entries)
+        # Cap total at 14000 chars
+        if len(history_summary) > 14000:
+            history_summary = history_summary[:14000] + "\n\n[... earlier responses truncated ...]"
+
+    try:
+        doc_chain  = DOC_CONTENT_PROMPT | llm | parser
+        raw_json   = doc_chain.invoke({
+            "question"       : question,
+            "context"        : rag_context[:4000] if rag_context else "No additional context.",
+            "history_summary": history_summary or "No session responses available.",
+        })
+
+        # Strip accidental markdown fences
+        raw_json = re.sub(r"^```json\s*", "", raw_json, flags=re.IGNORECASE)
+        raw_json = re.sub(r"^```\s*",     "", raw_json)
+        raw_json = re.sub(r"\s*```$",     "", raw_json).strip()
+
+        doc_data = json.loads(raw_json)
+
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"LLM returned invalid JSON: {str(e)}", "file_name": "", "file_path": "", "title": "", "section_count": 0}
+    except Exception as e:
+        return {"success": False, "error": f"Content generation failed: {str(e)}", "file_name": "", "file_path": "", "title": "", "section_count": 0}
+
+    # ── Step 2: Write Node.js script and execute ──────────────────
+    file_id   = uuid.uuid4().hex[:10]
+    safe_title = re.sub(r'[^\w\s-]', '', doc_data.get("title", "document"))[:40].strip().replace(" ", "_")
+    file_name = f"{safe_title}_{file_id}.docx"
+    file_path = str(DOCS_DIR / file_name)
+
+    # Serialise doc_data to JSON safely for embedding in JS
+    doc_json_str = json.dumps(doc_data, ensure_ascii=False)
+
+    # Build the Node.js script
+    script_content = _DOCX_SCRIPT_TEMPLATE.format(
+        doc_json    = doc_json_str,
+        output_path = file_path.replace("\\", "/"),
+    )
+
+    # The script must run from the backend directory so Node.js can
+    # resolve 'docx' from backend/node_modules (or global npm).
+    # On Windows, node_modules may be in the backend root or globally.
+    BACKEND_DIR = Path(__file__).parent.parent
+    script_path = str(BACKEND_DIR / "generated_docs" / f"gen_{file_id}.js")
+
+    # Build NODE_PATH so require('docx') resolves from backend/node_modules
+    # AND from the global npm prefix — handles both local and global installs.
+    import shutil
+    node_modules_local  = str(BACKEND_DIR / "node_modules")
+    try:
+        npm_prefix = subprocess.run(
+            ["npm", "root", "-g"], capture_output=True, text=True, timeout=10
+        ).stdout.strip()
+    except Exception:
+        npm_prefix = ""
+    node_path_parts = [p for p in [node_modules_local, npm_prefix] if p]
+    node_path_env   = os.pathsep.join(node_path_parts)
+
+    try:
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write(script_content)
+
+        env = os.environ.copy()
+        env["NODE_PATH"] = node_path_env
+
+        result = subprocess.run(
+            ["node", script_path],
+            capture_output=True, text=True, timeout=60,
+            cwd=str(BACKEND_DIR),   # run from backend root
+            env=env,
+        )
+
+        if result.returncode != 0 or not Path(file_path).exists():
+            error_msg = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+            return {"success": False, "error": f"docx generation failed: {error_msg}", "file_name": "", "file_path": "", "title": doc_data.get("title", ""), "section_count": 0}
+
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "Document generation timed out.", "file_name": "", "file_path": "", "title": "", "section_count": 0}
+    except Exception as e:
+        return {"success": False, "error": str(e), "file_name": "", "file_path": "", "title": "", "section_count": 0}
+    finally:
+        # Clean up the temp script
+        try:
+            os.remove(script_path)
+        except Exception:
+            pass
+
+    return {
+        "success"      : True,
+        "file_name"    : file_name,
+        "file_path"    : file_path,
+        "title"        : doc_data.get("title", "Document"),
+        "section_count": len(doc_data.get("sections", [])),
+        "error"        : None,
+    }
