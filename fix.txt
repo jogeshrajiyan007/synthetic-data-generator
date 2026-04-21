@@ -12,6 +12,15 @@ Flow:
 Trigger detection:
   Keywords: "create documentation", "generate report", "write a document",
   "create a data catalog", "produce a report", "document this", "write up"
+
+Fixes applied (v2):
+  - subprocess cwd set to backend root so Node resolves node_modules correctly
+  - JSON written to a separate .json file to avoid template injection issues
+  - PageNumber.CURRENT used correctly inside TextRun children
+  - Redundant makeHeaderCell/makeDataCell helpers removed
+  - Dynamic column widths in makeTable (not hardcoded for 2 columns)
+  - Improved markdown fence stripping regex
+  - json file cleaned up in finally block alongside js script
 """
 
 from __future__ import annotations
@@ -20,19 +29,18 @@ import re
 import json
 import uuid
 import subprocess
-import textwrap
 from pathlib import Path
-from datetime import datetime
 
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import BaseMessage
 from langchain_core.output_parsers import StrOutputParser
 
 from llm import get_llm
-from config import CHAT_MODEL
 
-# Directory where generated .docx files are stored
-DOCS_DIR = Path(__file__).parent.parent / "generated_docs"
+# ── Directory setup ───────────────────────────────────────────────
+# DOCS_DIR lives inside the backend folder
+BACKEND_DIR = Path(__file__).parent.parent.resolve()
+DOCS_DIR    = BACKEND_DIR / "generated_docs"
 DOCS_DIR.mkdir(exist_ok=True)
 
 
@@ -122,183 +130,255 @@ Supporting context from the knowledge base (use only where directly relevant):
 ])
 
 
-# ── Node.js docx generator script ────────────────────────────────
+# ── Node.js docx generator script template ───────────────────────
+# JSON is read from a separate file (json_path) to avoid
+# template injection issues with special characters.
 
 _DOCX_SCRIPT_TEMPLATE = r"""
+'use strict';
 const fs = require('fs');
+const path = require('path');
+
 const {{
-  Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
-  Header, Footer, AlignmentType, HeadingLevel, BorderStyle,
-  WidthType, ShadingType, VerticalAlign, LevelFormat, PageNumber,
-  NumberFormat
+  Document, Packer, Paragraph, TextRun,
+  Table, TableRow, TableCell,
+  Header, Footer,
+  AlignmentType, HeadingLevel, BorderStyle,
+  WidthType, ShadingType, VerticalAlign,
+  LevelFormat, PageNumber, PageBreak
 }} = require('docx');
 
-const data = {doc_json};
+// ── Load document data from JSON file ────────────────────────────
+const data = JSON.parse(fs.readFileSync('{json_path}', 'utf8'));
 
-// ── Colour palette (AXA brand) ────────────────────────────────
-const AXA_BLUE    = "00008F";
-const AXA_LIGHT   = "D0D5FF";
-const BORDER_GREY = "CCCCCC";
-const TEXT_DARK   = "1A1A2E";
-const ROW_ALT     = "F4F4F9";
+// ── Colour palette (AXA brand) ────────────────────────────────────
+const AXA_BLUE  = "00008F";
+const ROW_ALT   = "F4F4F9";
+const TEXT_DARK = "1A1A2E";
+const GREY      = "888888";
+const BORDER_C  = "CCCCCC";
 
-const border = {{ style: BorderStyle.SINGLE, size: 1, color: BORDER_GREY }};
-const allBorders = {{ top: border, bottom: border, left: border, right: border }};
+const cellBorder = {{ style: BorderStyle.SINGLE, size: 1, color: BORDER_C }};
+const allBorders = {{
+  top: cellBorder, bottom: cellBorder,
+  left: cellBorder, right: cellBorder
+}};
 
-// ── Helpers ───────────────────────────────────────────────────
-function makeHeaderCell(text) {{
-  return new TableCell({{
-    borders: allBorders,
-    shading: {{ fill: AXA_BLUE, type: ShadingType.CLEAR }},
-    width: {{ size: Math.floor(9360 / 2), type: WidthType.DXA }},
-    margins: {{ top: 100, bottom: 100, left: 120, right: 120 }},
-    verticalAlign: VerticalAlign.CENTER,
-    children: [new Paragraph({{
-      alignment: AlignmentType.LEFT,
-      children: [new TextRun({{ text: String(text), bold: true, color: "FFFFFF", font: "Arial", size: 20 }})]
-    }})]
-  }});
-}}
-
-function makeDataCell(text, shade) {{
-  return new TableCell({{
-    borders: allBorders,
-    shading: {{ fill: shade, type: ShadingType.CLEAR }},
-    width: {{ size: Math.floor(9360 / 2), type: WidthType.DXA }},
-    margins: {{ top: 80, bottom: 80, left: 120, right: 120 }},
-    children: [new Paragraph({{
-      children: [new TextRun({{ text: String(text), font: "Arial", size: 20, color: TEXT_DARK }})]
-    }})]
-  }});
-}}
-
+// ── Table builder ─────────────────────────────────────────────────
+// Dynamically sizes columns based on number of headers.
 function makeTable(headers, rows) {{
-  const colCount = headers.length;
-  const colWidth = Math.floor(9360 / colCount);
+  const colCount  = headers.length || 1;
+  const tableW    = 9360; // US Letter content width in DXA
+  const colWidth  = Math.floor(tableW / colCount);
+  // Distribute any rounding remainder to the last column
   const colWidths = Array(colCount).fill(colWidth);
+  colWidths[colCount - 1] += tableW - colWidth * colCount;
 
   const headerRow = new TableRow({{
     tableHeader: true,
-    children: headers.map(h => {{
-      return new TableCell({{
-        borders: allBorders,
-        shading: {{ fill: AXA_BLUE, type: ShadingType.CLEAR }},
-        width: {{ size: colWidth, type: WidthType.DXA }},
-        margins: {{ top: 100, bottom: 100, left: 120, right: 120 }},
-        verticalAlign: VerticalAlign.CENTER,
-        children: [new Paragraph({{
-          children: [new TextRun({{ text: String(h), bold: true, color: "FFFFFF", font: "Arial", size: 20 }})]
-        }})]
-      }});
-    }})
-  }});
-
-  const dataRows = rows.map((row, ri) => new TableRow({{
-    children: row.map(cell => new TableCell({{
+    children: headers.map((h, i) => new TableCell({{
       borders: allBorders,
-      shading: {{ fill: ri % 2 === 0 ? "FFFFFF" : ROW_ALT, type: ShadingType.CLEAR }},
-      width: {{ size: colWidth, type: WidthType.DXA }},
-      margins: {{ top: 80, bottom: 80, left: 120, right: 120 }},
+      shading: {{ fill: AXA_BLUE, type: ShadingType.CLEAR }},
+      width: {{ size: colWidths[i], type: WidthType.DXA }},
+      margins: {{ top: 100, bottom: 100, left: 140, right: 140 }},
+      verticalAlign: VerticalAlign.CENTER,
       children: [new Paragraph({{
-        children: [new TextRun({{ text: String(cell), font: "Arial", size: 20, color: TEXT_DARK }})]
+        children: [new TextRun({{
+          text: String(h),
+          bold: true,
+          color: "FFFFFF",
+          font: "Arial",
+          size: 20
+        }})]
       }})]
     }}))
-  }}));
+  }});
+
+  const dataRows = (rows || []).map((row, ri) =>
+    new TableRow({{
+      children: (row || []).map((cell, ci) => new TableCell({{
+        borders: allBorders,
+        shading: {{
+          fill: ri % 2 === 0 ? "FFFFFF" : ROW_ALT,
+          type: ShadingType.CLEAR
+        }},
+        width: {{ size: colWidths[ci] || colWidth, type: WidthType.DXA }},
+        margins: {{ top: 80, bottom: 80, left: 140, right: 140 }},
+        children: [new Paragraph({{
+          children: [new TextRun({{
+            text: String(cell != null ? cell : ''),
+            font: "Arial",
+            size: 20,
+            color: TEXT_DARK
+          }})]
+        }})]
+      }}))
+    }})
+  );
 
   return new Table({{
-    width: {{ size: 9360, type: WidthType.DXA }},
+    width: {{ size: tableW, type: WidthType.DXA }},
     columnWidths: colWidths,
     rows: [headerRow, ...dataRows]
   }});
 }}
 
-function contentToBlocks(items) {{
+// ── Content block renderer ────────────────────────────────────────
+function renderContent(items) {{
   const blocks = [];
-  for (const item of items) {{
+  for (const item of (items || [])) {{
+    if (!item || !item.type) continue;
+
     if (item.type === 'paragraph') {{
       blocks.push(new Paragraph({{
         spacing: {{ after: 160 }},
-        children: [new TextRun({{ text: item.text || '', font: "Arial", size: 22, color: TEXT_DARK }})]
+        children: [new TextRun({{
+          text: item.text || '',
+          font: "Arial",
+          size: 22,
+          color: TEXT_DARK
+        }})]
       }}));
+
     }} else if (item.type === 'bullets') {{
       for (const bullet of (item.items || [])) {{
         blocks.push(new Paragraph({{
-          numbering: {{ reference: "bullets", level: 0 }},
+          numbering: {{ reference: "myBullets", level: 0 }},
           spacing: {{ after: 80 }},
-          children: [new TextRun({{ text: String(bullet), font: "Arial", size: 22, color: TEXT_DARK }})]
+          children: [new TextRun({{
+            text: String(bullet),
+            font: "Arial",
+            size: 22,
+            color: TEXT_DARK
+          }})]
         }}));
       }}
+      // Add spacing after the last bullet
+      blocks.push(new Paragraph({{ spacing: {{ after: 120 }}, children: [] }}));
+
     }} else if (item.type === 'table') {{
       blocks.push(makeTable(item.headers || [], item.rows || []));
-      blocks.push(new Paragraph({{ spacing: {{ after: 160 }}, children: [] }}));
+      // Spacer after table
+      blocks.push(new Paragraph({{ spacing: {{ after: 200 }}, children: [] }}));
     }}
   }}
   return blocks;
 }}
 
-// ── Build document children ───────────────────────────────────
-const children = [];
+// ── Build document body ───────────────────────────────────────────
+const bodyChildren = [];
 
-// Cover title
-children.push(new Paragraph({{
-  heading: HeadingLevel.TITLE,
-  spacing: {{ before: 480, after: 240 }},
-  children: [new TextRun({{ text: data.title || 'Document', bold: true, font: "Arial", size: 56, color: AXA_BLUE }})]
+// ── Cover: Title ─────────────────────────────────────────────────
+bodyChildren.push(new Paragraph({{
+  spacing: {{ before: 480, after: 200 }},
+  children: [new TextRun({{
+    text: data.title || 'GovernGPT Document',
+    bold: true,
+    font: "Arial",
+    size: 56,
+    color: AXA_BLUE
+  }})]
 }}));
 
 if (data.subtitle) {{
-  children.push(new Paragraph({{
+  bodyChildren.push(new Paragraph({{
     spacing: {{ after: 120 }},
-    alignment: AlignmentType.LEFT,
-    children: [new TextRun({{ text: data.subtitle, font: "Arial", size: 24, color: "666666", italics: true }})]
+    children: [new TextRun({{
+      text: data.subtitle,
+      font: "Arial",
+      size: 24,
+      color: GREY,
+      italics: true
+    }})]
   }}));
 }}
 
-children.push(new Paragraph({{
+bodyChildren.push(new Paragraph({{
   spacing: {{ after: 480 }},
-  children: [new TextRun({{ text: data.author || 'GovernGPT', font: "Arial", size: 22, color: "888888" }})]
+  children: [new TextRun({{
+    text: data.author || 'GovernGPT — AXA Data Governance',
+    font: "Arial",
+    size: 22,
+    color: GREY
+  }})]
 }}));
 
-// Horizontal rule
-children.push(new Paragraph({{
+// Horizontal rule under cover block
+bodyChildren.push(new Paragraph({{
   border: {{ bottom: {{ style: BorderStyle.SINGLE, size: 6, color: AXA_BLUE, space: 1 }} }},
+  spacing: {{ after: 360 }},
   children: []
 }}));
-children.push(new Paragraph({{ spacing: {{ after: 360 }}, children: [] }}));
 
-// Sections
+// ── Sections ──────────────────────────────────────────────────────
 for (const section of (data.sections || [])) {{
-  const level = section.level === 2 ? HeadingLevel.HEADING_2 : HeadingLevel.HEADING_1;
-  const fontSize = section.level === 2 ? 26 : 32;
-  children.push(new Paragraph({{
-    heading: level,
-    spacing: {{ before: section.level === 1 ? 360 : 240, after: 160 }},
-    children: [new TextRun({{ text: section.heading || '', bold: true, font: "Arial", size: fontSize, color: AXA_BLUE }})]
+  const isH2      = section.level === 2;
+  const hLevel    = isH2 ? HeadingLevel.HEADING_2 : HeadingLevel.HEADING_1;
+  const hSize     = isH2 ? 26 : 32;
+  const hBefore   = isH2 ? 240 : 400;
+
+  bodyChildren.push(new Paragraph({{
+    heading: hLevel,
+    spacing: {{ before: hBefore, after: 160 }},
+    children: [new TextRun({{
+      text: section.heading || '',
+      bold: true,
+      font: "Arial",
+      size: hSize,
+      color: AXA_BLUE
+    }})]
   }}));
-  children.push(...contentToBlocks(section.content || []));
+
+  bodyChildren.push(...renderContent(section.content || []));
 }}
 
-// ── Document ──────────────────────────────────────────────────
+// ── Assemble Document ─────────────────────────────────────────────
 const doc = new Document({{
   numbering: {{
     config: [{{
-      reference: "bullets",
+      reference: "myBullets",
       levels: [{{
-        level: 0, format: LevelFormat.BULLET, text: "\u2022",
+        level: 0,
+        format: LevelFormat.BULLET,
+        text: "\u2022",
         alignment: AlignmentType.LEFT,
-        style: {{ paragraph: {{ indent: {{ left: 720, hanging: 360 }} }} }}
+        style: {{
+          paragraph: {{
+            indent: {{ left: 720, hanging: 360 }}
+          }}
+        }}
       }}]
     }}]
   }},
   styles: {{
-    default: {{ document: {{ run: {{ font: "Arial", size: 22, color: TEXT_DARK }} }} }},
+    default: {{
+      document: {{ run: {{ font: "Arial", size: 22, color: TEXT_DARK }} }}
+    }},
     paragraphStyles: [
-      {{ id: "Heading1", name: "Heading 1", basedOn: "Normal", next: "Normal", quickFormat: true,
-         run: {{ size: 32, bold: true, font: "Arial", color: AXA_BLUE }},
-         paragraph: {{ spacing: {{ before: 360, after: 160 }}, outlineLevel: 0 }} }},
-      {{ id: "Heading2", name: "Heading 2", basedOn: "Normal", next: "Normal", quickFormat: true,
-         run: {{ size: 26, bold: true, font: "Arial", color: AXA_BLUE }},
-         paragraph: {{ spacing: {{ before: 240, after: 120 }}, outlineLevel: 1 }} }},
+      {{
+        id: "Heading1",
+        name: "Heading 1",
+        basedOn: "Normal",
+        next: "Normal",
+        quickFormat: true,
+        run: {{ size: 32, bold: true, font: "Arial", color: AXA_BLUE }},
+        paragraph: {{
+          spacing: {{ before: 400, after: 160 }},
+          outlineLevel: 0
+        }}
+      }},
+      {{
+        id: "Heading2",
+        name: "Heading 2",
+        basedOn: "Normal",
+        next: "Normal",
+        quickFormat: true,
+        run: {{ size: 26, bold: true, font: "Arial", color: AXA_BLUE }},
+        paragraph: {{
+          spacing: {{ before: 240, after: 120 }},
+          outlineLevel: 1
+        }}
+      }}
     ]
   }},
   sections: [{{
@@ -310,37 +390,74 @@ const doc = new Document({{
     }},
     headers: {{
       default: new Header({{
-        children: [new Paragraph({{
-          border: {{ bottom: {{ style: BorderStyle.SINGLE, size: 4, color: AXA_BLUE, space: 1 }} }},
-          children: [
-            new TextRun({{ text: data.title || 'GovernGPT Document', font: "Arial", size: 18, color: "888888" }}),
-            new TextRun({{ text: "   |   AXA GovernGPT", font: "Arial", size: 18, color: AXA_BLUE }})
-          ]
-        }})]
+        children: [
+          new Paragraph({{
+            border: {{
+              bottom: {{ style: BorderStyle.SINGLE, size: 4, color: AXA_BLUE, space: 1 }}
+            }},
+            children: [
+              new TextRun({{
+                text: (data.title || 'GovernGPT Document') + '   |   AXA GovernGPT',
+                font: "Arial",
+                size: 18,
+                color: GREY
+              }})
+            ]
+          }})
+        ]
       }})
     }},
     footers: {{
       default: new Footer({{
-        children: [new Paragraph({{
-          border: {{ top: {{ style: BorderStyle.SINGLE, size: 4, color: AXA_BLUE, space: 1 }} }},
-          children: [
-            new TextRun({{ text: "Generated by GovernGPT  |  Confidential  |  ", font: "Arial", size: 16, color: "888888" }}),
-            new TextRun({{ children: [new PageNumber()], font: "Arial", size: 16, color: "888888" }})
-          ]
-        }})]
+        children: [
+          new Paragraph({{
+            border: {{
+              top: {{ style: BorderStyle.SINGLE, size: 4, color: AXA_BLUE, space: 1 }}
+            }},
+            children: [
+              new TextRun({{
+                text: "Generated by GovernGPT  |  Confidential  |  Page ",
+                font: "Arial",
+                size: 16,
+                color: GREY
+              }}),
+              new TextRun({{
+                children: [PageNumber.CURRENT],
+                font: "Arial",
+                size: 16,
+                color: GREY
+              }}),
+              new TextRun({{
+                text: " of ",
+                font: "Arial",
+                size: 16,
+                color: GREY
+              }}),
+              new TextRun({{
+                children: [PageNumber.TOTAL_PAGES],
+                font: "Arial",
+                size: 16,
+                color: GREY
+              }})
+            ]
+          }})
+        ]
       }})
     }},
-    children
+    children: bodyChildren
   }}]
 }});
 
-Packer.toBuffer(doc).then(buffer => {{
-  fs.writeFileSync("{output_path}", buffer);
-  console.log("OK:" + "{output_path}");
-}}).catch(err => {{
-  console.error("ERR:" + err.message);
-  process.exit(1);
-}});
+// ── Write output ──────────────────────────────────────────────────
+Packer.toBuffer(doc)
+  .then(buffer => {{
+    fs.writeFileSync('{output_path}', buffer);
+    console.log('OK:{output_path}');
+  }})
+  .catch(err => {{
+    console.error('ERR:' + err.message);
+    process.exit(1);
+  }});
 """
 
 
@@ -357,22 +474,17 @@ def generate_document(
 
     Returns:
         {
-          "success": bool,
-          "file_name": str,
-          "file_path": str,
-          "title": str,
+          "success"      : bool,
+          "file_name"    : str,
+          "file_path"    : str,
+          "title"        : str,
           "section_count": int,
-          "error": str | None
+          "error"        : str | None
         }
     """
     llm    = get_llm()
     parser = StrOutputParser()
 
-    # ── Step 1: Generate structured document content via LLM ─────
-    # Build the session transcript from AI responses ONLY.
-    # Pre-filter by relevance to the user's request using keyword matching.
-    # This ensures "document STTM" only passes STTM-related AI responses,
-    # not the full session history.
     history_summary = ""
     if chat_history:
         # Extract keywords from the user's question for relevance filtering
@@ -413,89 +525,135 @@ def generate_document(
         if len(history_summary) > 14000:
             history_summary = history_summary[:14000] + "\n\n[... earlier responses truncated ...]"
 
+    # ── Step 2: Call LLM to generate structured document JSON ─────
     try:
-        doc_chain  = DOC_CONTENT_PROMPT | llm | parser
-        raw_json   = doc_chain.invoke({
+        doc_chain = DOC_CONTENT_PROMPT | llm | parser
+        raw_json  = doc_chain.invoke({
             "question"       : question,
-            "context"        : rag_context[:4000] if rag_context else "No additional context.",
-            "history_summary": history_summary or "No session responses available.",
+            "context"        : rag_context[:6000] if rag_context else "No additional context provided.",
+            "history_summary": history_summary or "No prior conversation",
         })
 
-        # Strip accidental markdown fences
-        raw_json = re.sub(r"^```json\s*", "", raw_json, flags=re.IGNORECASE)
-        raw_json = re.sub(r"^```\s*",     "", raw_json)
-        raw_json = re.sub(r"\s*```$",     "", raw_json).strip()
+        # Strip any accidental markdown fences the LLM may add
+        raw_json = re.sub(r"```(?:json)?\s*|\s*```", "", raw_json).strip()
 
         doc_data = json.loads(raw_json)
 
     except json.JSONDecodeError as e:
-        return {"success": False, "error": f"LLM returned invalid JSON: {str(e)}", "file_name": "", "file_path": "", "title": "", "section_count": 0}
+        return {
+            "success"      : False,
+            "error"        : f"LLM returned invalid JSON: {str(e)}",
+            "file_name"    : "",
+            "file_path"    : "",
+            "title"        : "",
+            "section_count": 0,
+        }
     except Exception as e:
-        return {"success": False, "error": f"Content generation failed: {str(e)}", "file_name": "", "file_path": "", "title": "", "section_count": 0}
+        return {
+            "success"      : False,
+            "error"        : f"Content generation failed: {str(e)}",
+            "file_name"    : "",
+            "file_path"    : "",
+            "title"        : "",
+            "section_count": 0,
+        }
 
-    # ── Step 2: Write Node.js script and execute ──────────────────
-    file_id   = uuid.uuid4().hex[:10]
-    safe_title = re.sub(r'[^\w\s-]', '', doc_data.get("title", "document"))[:40].strip().replace(" ", "_")
-    file_name = f"{safe_title}_{file_id}.docx"
-    file_path = str(DOCS_DIR / file_name)
+    # ── Step 3: Prepare file paths ────────────────────────────────
+    file_id    = uuid.uuid4().hex[:10]
+    safe_title = re.sub(r"[^\w\s-]", "", doc_data.get("title", "document"))[:40].strip().replace(" ", "_")
+    file_name  = f"{safe_title}_{file_id}.docx"
+    file_path  = str(DOCS_DIR / file_name)
+    json_path  = str(DOCS_DIR / f"data_{file_id}.json")
+    script_path = str(DOCS_DIR / f"gen_{file_id}.js")
 
-    # Serialise doc_data to JSON safely for embedding in JS
-    doc_json_str = json.dumps(doc_data, ensure_ascii=False)
+    # ── Step 4: Write JSON data to a separate file ────────────────
+    # This avoids template injection issues when doc_data contains
+    # special characters, backticks, or ${...} expressions.
+    try:
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(doc_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return {
+            "success"      : False,
+            "error"        : f"Failed to write data file: {str(e)}",
+            "file_name"    : "",
+            "file_path"    : "",
+            "title"        : doc_data.get("title", ""),
+            "section_count": 0,
+        }
 
-    # Build the Node.js script
+    # ── Step 5: Write Node.js generator script ────────────────────
+    # Paths use forward slashes for cross-platform Node compatibility
     script_content = _DOCX_SCRIPT_TEMPLATE.format(
-        doc_json    = doc_json_str,
+        json_path   = json_path.replace("\\", "/"),
         output_path = file_path.replace("\\", "/"),
     )
-
-    # The script must run from the backend directory so Node.js can
-    # resolve 'docx' from backend/node_modules (or global npm).
-    # On Windows, node_modules may be in the backend root or globally.
-    BACKEND_DIR = Path(__file__).parent.parent
-    script_path = str(BACKEND_DIR / "generated_docs" / f"gen_{file_id}.js")
-
-    # Build NODE_PATH so require('docx') resolves from backend/node_modules
-    # AND from the global npm prefix — handles both local and global installs.
-    import shutil
-    node_modules_local  = str(BACKEND_DIR / "node_modules")
-    try:
-        npm_prefix = subprocess.run(
-            ["npm", "root", "-g"], capture_output=True, text=True, timeout=10
-        ).stdout.strip()
-    except Exception:
-        npm_prefix = ""
-    node_path_parts = [p for p in [node_modules_local, npm_prefix] if p]
-    node_path_env   = os.pathsep.join(node_path_parts)
 
     try:
         with open(script_path, "w", encoding="utf-8") as f:
             f.write(script_content)
 
-        env = os.environ.copy()
-        env["NODE_PATH"] = node_path_env
-
+        # ── Step 6: Execute Node.js script ────────────────────────
+        # CRITICAL: cwd=BACKEND_DIR ensures Node resolves node_modules
+        # from the backend root, not from the generated_docs subfolder.
         result = subprocess.run(
             ["node", script_path],
-            capture_output=True, text=True, timeout=60,
-            cwd=str(BACKEND_DIR),   # run from backend root
-            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=str(BACKEND_DIR),          # <-- key fix
         )
 
+        stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
+
         if result.returncode != 0 or not Path(file_path).exists():
-            error_msg = result.stderr.strip() or result.stdout.strip() or "Unknown error"
-            return {"success": False, "error": f"docx generation failed: {error_msg}", "file_name": "", "file_path": "", "title": doc_data.get("title", ""), "section_count": 0}
+            error_msg = stderr or stdout or "Unknown Node.js error"
+            return {
+                "success"      : False,
+                "error"        : f"docx generation failed: {error_msg}",
+                "file_name"    : "",
+                "file_path"    : "",
+                "title"        : doc_data.get("title", ""),
+                "section_count": 0,
+            }
 
     except subprocess.TimeoutExpired:
-        return {"success": False, "error": "Document generation timed out.", "file_name": "", "file_path": "", "title": "", "section_count": 0}
+        return {
+            "success"      : False,
+            "error"        : "Document generation timed out (>60s).",
+            "file_name"    : "",
+            "file_path"    : "",
+            "title"        : "",
+            "section_count": 0,
+        }
+    except FileNotFoundError:
+        return {
+            "success"      : False,
+            "error"        : "Node.js not found. Ensure Node.js is installed and on PATH.",
+            "file_name"    : "",
+            "file_path"    : "",
+            "title"        : "",
+            "section_count": 0,
+        }
     except Exception as e:
-        return {"success": False, "error": str(e), "file_name": "", "file_path": "", "title": "", "section_count": 0}
+        return {
+            "success"      : False,
+            "error"        : str(e),
+            "file_name"    : "",
+            "file_path"    : "",
+            "title"        : "",
+            "section_count": 0,
+        }
     finally:
-        # Clean up the temp script
-        try:
-            os.remove(script_path)
-        except Exception:
-            pass
+        # Clean up temporary script and data files
+        for temp_file in [script_path, json_path]:
+            try:
+                os.remove(temp_file)
+            except Exception:
+                pass
 
+    # ── Step 7: Return success result ────────────────────────────
     return {
         "success"      : True,
         "file_name"    : file_name,
