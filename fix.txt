@@ -1,617 +1,477 @@
 """
-services/rag.py
+services/document_generator.py
 
-Conversational RAG + SQL Agent hybrid engine.
+AI-powered .docx generation for GovernGPT.
 
-Routing logic:
-  1. If enable_sql_agent=True and approved Databricks tables exist:
-     → Keyword pre-classifier runs first (no LLM call, no ChromaDB lookup)
-     → If definite SQL intent: skip RAG retrieval, go straight to SQL agent
-     → If ambiguous: LLM classifies intent, gate blocks non-SQL → standard RAG
-     → If SQL intent confirmed: run SQL agent
-     → If NOT_SQL: fall through to standard RAG
-  2. Standard RAG: condense → retrieve → answer
-  3. Direct (no retrieval): history-aware direct LLM call
+Flow:
+  1. LLM receives the user's documentation request + RAG context
+  2. LLM returns structured JSON (title, sections with headings/paragraphs/tables/bullets)
+  3. A Node.js script uses the docx library to build a professional .docx file
+  4. The file path is returned to the router for download
 
-Compatible with LangChain >= 0.2.x — no deprecated chains used.
+Trigger detection:
+  Keywords: "create documentation", "generate report", "write a document",
+  "create a data catalog", "produce a report", "document this", "write up"
 """
 
-import time
+from __future__ import annotations
+import os
+import re
+import json
 import uuid
+import subprocess
+import textwrap
+from pathlib import Path
 from datetime import datetime
-from typing import Optional
 
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import BaseMessage
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.documents import Document
-from langchain_community.vectorstores import Chroma
 
 from llm import get_llm
-from db import db_insert
-from config import CHAT_MODEL, RETRIEVAL_K
-from services.memory import save_turn, load_history_as_messages, DEFAULT_WINDOW_K
+from config import CHAT_MODEL
+
+# Directory where generated .docx files are stored
+DOCS_DIR = Path(__file__).parent.parent / "generated_docs"
+DOCS_DIR.mkdir(exist_ok=True)
 
 
-# ── Prompts ──────────────────────────────────────────────────────
+# ── Documentation trigger detection ──────────────────────────────
 
-CONDENSE_PROMPT = ChatPromptTemplate.from_messages([
-    (
-        "system",
-        "You are a question rewriter. "
-        "Given the conversation history below and a follow-up question, "
-        "rewrite the follow-up question into a fully self-contained standalone question "
-        "that captures all relevant context from the history. "
-        "Return ONLY the rewritten question — no explanation, no preamble.",
-    ),
-    MessagesPlaceholder(variable_name="chat_history"),
-    ("human", "{question}"),
-])
+_DOC_TRIGGER = re.compile(
+    r'\b(create|generate|write|produce|build|make|prepare|draft|design)\b.{0,30}'
+    r'\b(documentation|document|report|data catalog|catalog|summary report|'
+    r'write.?up|briefing|specification|spec|data dictionary|runbook|playbook)\b'
+    r'|\b(document this|document the|write this up|put this in a doc|'
+    r'create a doc|generate a doc|export (this|as|to) (a )?(doc|word|docx))\b',
+    re.IGNORECASE,
+)
 
-QA_PROMPT = ChatPromptTemplate.from_messages([
-    (
-        "system",
-        """You are an expert Data & AI Advisor specialising in the insurance industry, \
-with deep, cross-domain expertise spanning:
 
-- **Data Architecture** – enterprise data platforms, lakehouse/warehouse design, \
-cloud-native patterns (Azure, AWS, GCP), data mesh, data fabric, integration patterns \
-(ETL/ELT, CDC, event streaming)
-- **Data Engineering** – pipeline design, PySpark, Databricks, Delta Lake, dbt, \
-orchestration (Airflow, ADF), data contracts, data quality frameworks, CI/CD for data
-- **Data Modelling** – dimensional modelling (Kimball, Inmon), entity-relationship design, \
-insurance-specific schemas (policy, claims, reinsurance, premium), semantic layers
-- **Data Management & Governance** – GDPR, Solvency II, IFRS 17, data cataloguing, lineage, \
-stewardship, metadata management, data contracts, DQ SLAs, BCBS 239
-- **AI & Advanced Analytics** – RAG architectures, LLM integration, MLOps, predictive \
-modelling (churn, fraud, risk scoring), NLP on claims/policy documents, agentic AI
-- **Business Intelligence & Reporting** – Power BI, Tableau, KPI frameworks, self-service \
-analytics, observability dashboards, actuarial and regulatory reporting
+def is_doc_request(question: str) -> bool:
+    """Return True if the user is asking GovernGPT to produce a .docx document."""
+    return bool(_DOC_TRIGGER.search(question))
 
-You operate exclusively within the context of the **insurance industry** — including Life, \
-Non-Life (P&C), Health, Reinsurance, and Global Business Services functions. All responses \
-should reflect the regulatory environment, data domains, and operational realities of \
-insurance organisations.
 
-{approved_sources_block}
+# ── LLM prompt for structured document content ───────────────────
 
-You have been provided with retrieved document context below.
-Use it as your primary source of evidence.
+DOC_CONTENT_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are a technical writer producing a professional Word document for an insurance data team.
 
---- RETRIEVED CONTEXT ---
+IMPORTANT — YOUR ONLY JOB IS TO SUMMARISE AND STRUCTURE WHAT ACTUALLY HAPPENED IN THIS SESSION.
+Do NOT invent findings. Do NOT generalise. Do NOT add content that is not present in the session responses below.
+Every bullet, table, and paragraph must be drawn directly from the session responses provided.
+
+The session responses below are AI assistant outputs from a data governance analysis session.
+They may contain:
+  - [SQL Analysis] — what query was about to run
+  - [SQL Executed] — the actual SQL that ran
+  - [Rows Returned] — how many rows came back
+  - [Result Data] — actual result rows as JSON (use these as table data in the document)
+  - [Interpretation] — GPT-4o's bullet-point findings about the data
+  - [Governance Note] — PII flags, sensitivity, ownership warnings
+
+Your document must:
+1. Faithfully represent the actual findings — quote numbers, table names, column names exactly as they appear
+2. Convert [Result Data] JSON into readable tables in the document where useful
+3. Group related SQL analyses into sections (e.g. "Claims Status Analysis", "Monthly Filing Trends")
+4. Include a brief Executive Summary of what was analysed in this session
+5. Include a Findings section per analysis performed
+6. Include Governance Observations from any [Governance Note] entries
+7. End with a Recommendations section based ONLY on what was actually found
+
+Return ONLY valid JSON matching this exact schema — no markdown, no explanation:
+
+{{
+  "title": "Document title based on what was actually analysed",
+  "subtitle": "e.g. 'Claims Data Analysis — April 2026'",
+  "author": "GovernGPT — AXA Data Governance",
+  "sections": [
+    {{
+      "heading": "Section heading",
+      "level": 1,
+      "content": [
+        {{"type": "paragraph", "text": "Factual summary drawn from session responses."}},
+        {{"type": "bullets", "items": ["Exact finding 1 from session", "Exact finding 2"]}},
+        {{"type": "table",
+          "headers": ["Column 1", "Column 2"],
+          "rows": [["actual value from result data", "actual value"], ["...", "..."]]
+        }}
+      ]
+    }}
+  ]
+}}
+
+SESSION RESPONSES (AI assistant outputs only — these are the facts to document):
+{history_summary}
+
+Additional context from knowledge base (use only if directly relevant):
 {context}
---- END CONTEXT ---
 
-You also have the full conversation history for this session. Use it to:
-- Refer back to findings from earlier in the conversation
-- Build on previously identified entities, owners, issues, or recommendations
-- Avoid repeating analysis already covered unless asked to expand
-- Explicitly reference prior findings when relevant
-  (e.g. "Building on the schema gaps identified earlier...", \
-"As noted in the pipeline review above...")
-
-Response structure (adapt based on question type):
-
-| Question Type         | Structure |
-|-----------------------|-----------|
-| Architecture          | Context → Design Options → Trade-offs → Recommended Pattern |
-| Engineering           | Problem → Pipeline/Code Design → Edge Cases → Implementation Notes |
-| Modelling             | Propose tables, columns, data types, relationships, transformation logic |
-| Governance/Compliance | Cite regulation + article number → Gap → Remediation steps |
-| AI/Analytics          | Use Case → Approach → Data Requirements → Risks & Guardrails |
-| BI/Reporting          | Metric Definition → Data Source → Visualisation Guidance → Caveats |
-| Follow-up             | Reference prior findings, build on them, avoid redundancy |
-
-Always:
-- State which source file your insights are drawn from
-- Anchor responses in insurance industry context \
-(e.g. policy lifecycle, claims processing, actuarial needs, regulatory reporting)
-- Flag any assumptions made when context is incomplete
-
-IMPORTANT — SQL on local files:
-If the user asks to run SQL against a locally uploaded file (CSV, Excel, PDF), respond:
-"SQL query execution is only supported for approved Databricks tables, \
-not for locally uploaded files."
-
-If the answer is not in the context or conversation history, say so clearly. \
-Do not hallucinate.""",
-    ),
-    MessagesPlaceholder(variable_name="chat_history"),
-    ("human", "{question}"),
+User's documentation request (use as title/scope guide only):
+{question}"""),
+    ("human", "Generate the document JSON now, based strictly on the session responses above."),
 ])
 
 
-# ── Approved sources block ────────────────────────────────────────
+# ── Node.js docx generator script ────────────────────────────────
 
-def _build_approved_sources_block(approved_tables: list[str]) -> str:
-    """
-    Injected into the RAG system prompt only when routing reaches the RAG path.
-    This only happens for genuine governance/doc questions (NOT_SQL intent).
-    """
-    if not approved_tables:
-        return ""
-    lines = "\n".join(f"  - {t}" for t in approved_tables)
-    return f"""
-APPROVED DATABRICKS TABLES (available for live SQL queries via the SQL Agent):
-<approved_sources>
-{lines}
-</approved_sources>
+_DOCX_SCRIPT_TEMPLATE = r"""
+const fs = require('fs');
+const {{
+  Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
+  Header, Footer, AlignmentType, HeadingLevel, BorderStyle,
+  WidthType, ShadingType, VerticalAlign, LevelFormat, PageNumber,
+  NumberFormat
+}} = require('docx');
 
-NOTE: You are answering a governance or documentation question — NOT a live data query.
-If the user is asking to retrieve actual rows or run analytics, tell them:
-"To query live data, ask a specific data question like \
-'Show me the first 10 rows of claims_casualty_bronze' and the SQL Agent will execute it."
-Do NOT suggest users run SQL manually in their Databricks environment.
+const data = {doc_json};
+
+// ── Colour palette (AXA brand) ────────────────────────────────
+const AXA_BLUE    = "00008F";
+const AXA_LIGHT   = "D0D5FF";
+const BORDER_GREY = "CCCCCC";
+const TEXT_DARK   = "1A1A2E";
+const ROW_ALT     = "F4F4F9";
+
+const border = {{ style: BorderStyle.SINGLE, size: 1, color: BORDER_GREY }};
+const allBorders = {{ top: border, bottom: border, left: border, right: border }};
+
+// ── Helpers ───────────────────────────────────────────────────
+function makeHeaderCell(text) {{
+  return new TableCell({{
+    borders: allBorders,
+    shading: {{ fill: AXA_BLUE, type: ShadingType.CLEAR }},
+    width: {{ size: Math.floor(9360 / 2), type: WidthType.DXA }},
+    margins: {{ top: 100, bottom: 100, left: 120, right: 120 }},
+    verticalAlign: VerticalAlign.CENTER,
+    children: [new Paragraph({{
+      alignment: AlignmentType.LEFT,
+      children: [new TextRun({{ text: String(text), bold: true, color: "FFFFFF", font: "Arial", size: 20 }})]
+    }})]
+  }});
+}}
+
+function makeDataCell(text, shade) {{
+  return new TableCell({{
+    borders: allBorders,
+    shading: {{ fill: shade, type: ShadingType.CLEAR }},
+    width: {{ size: Math.floor(9360 / 2), type: WidthType.DXA }},
+    margins: {{ top: 80, bottom: 80, left: 120, right: 120 }},
+    children: [new Paragraph({{
+      children: [new TextRun({{ text: String(text), font: "Arial", size: 20, color: TEXT_DARK }})]
+    }})]
+  }});
+}}
+
+function makeTable(headers, rows) {{
+  const colCount = headers.length;
+  const colWidth = Math.floor(9360 / colCount);
+  const colWidths = Array(colCount).fill(colWidth);
+
+  const headerRow = new TableRow({{
+    tableHeader: true,
+    children: headers.map(h => {{
+      return new TableCell({{
+        borders: allBorders,
+        shading: {{ fill: AXA_BLUE, type: ShadingType.CLEAR }},
+        width: {{ size: colWidth, type: WidthType.DXA }},
+        margins: {{ top: 100, bottom: 100, left: 120, right: 120 }},
+        verticalAlign: VerticalAlign.CENTER,
+        children: [new Paragraph({{
+          children: [new TextRun({{ text: String(h), bold: true, color: "FFFFFF", font: "Arial", size: 20 }})]
+        }})]
+      }});
+    }})
+  }});
+
+  const dataRows = rows.map((row, ri) => new TableRow({{
+    children: row.map(cell => new TableCell({{
+      borders: allBorders,
+      shading: {{ fill: ri % 2 === 0 ? "FFFFFF" : ROW_ALT, type: ShadingType.CLEAR }},
+      width: {{ size: colWidth, type: WidthType.DXA }},
+      margins: {{ top: 80, bottom: 80, left: 120, right: 120 }},
+      children: [new Paragraph({{
+        children: [new TextRun({{ text: String(cell), font: "Arial", size: 20, color: TEXT_DARK }})]
+      }})]
+    }}))
+  }}));
+
+  return new Table({{
+    width: {{ size: 9360, type: WidthType.DXA }},
+    columnWidths: colWidths,
+    rows: [headerRow, ...dataRows]
+  }});
+}}
+
+function contentToBlocks(items) {{
+  const blocks = [];
+  for (const item of items) {{
+    if (item.type === 'paragraph') {{
+      blocks.push(new Paragraph({{
+        spacing: {{ after: 160 }},
+        children: [new TextRun({{ text: item.text || '', font: "Arial", size: 22, color: TEXT_DARK }})]
+      }}));
+    }} else if (item.type === 'bullets') {{
+      for (const bullet of (item.items || [])) {{
+        blocks.push(new Paragraph({{
+          numbering: {{ reference: "bullets", level: 0 }},
+          spacing: {{ after: 80 }},
+          children: [new TextRun({{ text: String(bullet), font: "Arial", size: 22, color: TEXT_DARK }})]
+        }}));
+      }}
+    }} else if (item.type === 'table') {{
+      blocks.push(makeTable(item.headers || [], item.rows || []));
+      blocks.push(new Paragraph({{ spacing: {{ after: 160 }}, children: [] }}));
+    }}
+  }}
+  return blocks;
+}}
+
+// ── Build document children ───────────────────────────────────
+const children = [];
+
+// Cover title
+children.push(new Paragraph({{
+  heading: HeadingLevel.TITLE,
+  spacing: {{ before: 480, after: 240 }},
+  children: [new TextRun({{ text: data.title || 'Document', bold: true, font: "Arial", size: 56, color: AXA_BLUE }})]
+}}));
+
+if (data.subtitle) {{
+  children.push(new Paragraph({{
+    spacing: {{ after: 120 }},
+    alignment: AlignmentType.LEFT,
+    children: [new TextRun({{ text: data.subtitle, font: "Arial", size: 24, color: "666666", italics: true }})]
+  }}));
+}}
+
+children.push(new Paragraph({{
+  spacing: {{ after: 480 }},
+  children: [new TextRun({{ text: data.author || 'GovernGPT', font: "Arial", size: 22, color: "888888" }})]
+}}));
+
+// Horizontal rule
+children.push(new Paragraph({{
+  border: {{ bottom: {{ style: BorderStyle.SINGLE, size: 6, color: AXA_BLUE, space: 1 }} }},
+  children: []
+}}));
+children.push(new Paragraph({{ spacing: {{ after: 360 }}, children: [] }}));
+
+// Sections
+for (const section of (data.sections || [])) {{
+  const level = section.level === 2 ? HeadingLevel.HEADING_2 : HeadingLevel.HEADING_1;
+  const fontSize = section.level === 2 ? 26 : 32;
+  children.push(new Paragraph({{
+    heading: level,
+    spacing: {{ before: section.level === 1 ? 360 : 240, after: 160 }},
+    children: [new TextRun({{ text: section.heading || '', bold: true, font: "Arial", size: fontSize, color: AXA_BLUE }})]
+  }}));
+  children.push(...contentToBlocks(section.content || []));
+}}
+
+// ── Document ──────────────────────────────────────────────────
+const doc = new Document({{
+  numbering: {{
+    config: [{{
+      reference: "bullets",
+      levels: [{{
+        level: 0, format: LevelFormat.BULLET, text: "\u2022",
+        alignment: AlignmentType.LEFT,
+        style: {{ paragraph: {{ indent: {{ left: 720, hanging: 360 }} }} }}
+      }}]
+    }}]
+  }},
+  styles: {{
+    default: {{ document: {{ run: {{ font: "Arial", size: 22, color: TEXT_DARK }} }} }},
+    paragraphStyles: [
+      {{ id: "Heading1", name: "Heading 1", basedOn: "Normal", next: "Normal", quickFormat: true,
+         run: {{ size: 32, bold: true, font: "Arial", color: AXA_BLUE }},
+         paragraph: {{ spacing: {{ before: 360, after: 160 }}, outlineLevel: 0 }} }},
+      {{ id: "Heading2", name: "Heading 2", basedOn: "Normal", next: "Normal", quickFormat: true,
+         run: {{ size: 26, bold: true, font: "Arial", color: AXA_BLUE }},
+         paragraph: {{ spacing: {{ before: 240, after: 120 }}, outlineLevel: 1 }} }},
+    ]
+  }},
+  sections: [{{
+    properties: {{
+      page: {{
+        size: {{ width: 12240, height: 15840 }},
+        margin: {{ top: 1440, right: 1440, bottom: 1440, left: 1440 }}
+      }}
+    }},
+    headers: {{
+      default: new Header({{
+        children: [new Paragraph({{
+          border: {{ bottom: {{ style: BorderStyle.SINGLE, size: 4, color: AXA_BLUE, space: 1 }} }},
+          children: [
+            new TextRun({{ text: data.title || 'GovernGPT Document', font: "Arial", size: 18, color: "888888" }}),
+            new TextRun({{ text: "   |   AXA GovernGPT", font: "Arial", size: 18, color: AXA_BLUE }})
+          ]
+        }})]
+      }})
+    }},
+    footers: {{
+      default: new Footer({{
+        children: [new Paragraph({{
+          border: {{ top: {{ style: BorderStyle.SINGLE, size: 4, color: AXA_BLUE, space: 1 }} }},
+          children: [
+            new TextRun({{ text: "Generated by GovernGPT  |  Confidential  |  ", font: "Arial", size: 16, color: "888888" }}),
+            new TextRun({{ children: [new PageNumber()], font: "Arial", size: 16, color: "888888" }})
+          ]
+        }})]
+      }})
+    }},
+    children
+  }}]
+}});
+
+Packer.toBuffer(doc).then(buffer => {{
+  fs.writeFileSync("{output_path}", buffer);
+  console.log("OK:" + "{output_path}");
+}}).catch(err => {{
+  console.error("ERR:" + err.message);
+  process.exit(1);
+}});
 """
 
 
-# ── Retriever ─────────────────────────────────────────────────────
+# ── Main generator function ───────────────────────────────────────
 
-def _build_retriever(vectordb: Chroma, k: int, excluded_tables: list[str] | None = None):
-    """
-    MMR retriever with multi-source representation guarantee.
-    excluded_tables: list of full table names to exclude from results.
-    """
-    base = vectordb.as_retriever(
-        search_type="mmr",
-        search_kwargs={"k": k * 2, "fetch_k": k * 6},
-    )
-    # Build set of short table names to exclude
-    excluded_short = {t.split(".")[-1].lower() for t in (excluded_tables or [])}
-
-    def multi_source_retrieve(query: str) -> list[Document]:
-        docs = base.invoke(query)
-
-        # Filter out chunks from excluded (removed) tables
-        if excluded_short:
-            docs = [
-                d for d in docs
-                if not (
-                    d.metadata.get("source_type") == "databricks"
-                    and d.metadata.get("source_file", "").lower() in excluded_short
-                )
-            ]
-
-        seen: dict[str, Document] = {}
-        for doc in docs:
-            src = doc.metadata.get("source_file", "unknown")
-            if src not in seen:
-                seen[src] = doc
-        if len(seen) < 2:
-            try:
-                all_srcs = list({
-                    d.metadata.get("source_file", "unknown")
-                    for d in vectordb.similarity_search("data governance summary", k=50)
-                })
-                for src in all_srcs:
-                    # Skip excluded tables
-                    if src.lower() in excluded_short:
-                        continue
-                    if src not in seen:
-                        results = vectordb.similarity_search(
-                            query, k=2, filter={"source_file": src}
-                        )
-                        if results:
-                            seen[src] = results[0]
-            except Exception:
-                pass
-        truncated: list[Document] = []
-        for doc in seen.values():
-            if len(doc.page_content) > 1500:
-                doc = Document(
-                    page_content=doc.page_content[:1500] + "\n[...truncated]",
-                    metadata=doc.metadata,
-                )
-            truncated.append(doc)
-        return truncated
-
-    return multi_source_retrieve
-
-
-def _format_docs(docs: list[Document]) -> str:
-    parts = []
-    for doc in docs:
-        src = doc.metadata.get("source_file", "unknown")
-        parts.append(f"[Source: {src}]\n{doc.page_content}")
-    return "\n\n---\n\n".join(parts)
-
-
-# ── Token extraction ──────────────────────────────────────────────
-
-def _extract_tokens(llm_response) -> dict:
-    try:
-        usage = getattr(llm_response, "usage_metadata", None) or {}
-        return {
-            "prompt_tokens"    : int(usage.get("input_tokens",  0)),
-            "completion_tokens": int(usage.get("output_tokens", 0)),
-            "total_tokens"     : int(usage.get("total_tokens",  0)),
-        }
-    except Exception:
-        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-
-
-# ── Main query function ───────────────────────────────────────────
-
-def query_governance(
+def generate_document(
     question: str,
-    vectordb: Chroma,
+    rag_context: str = "",
+    chat_history: list[BaseMessage] | None = None,
     knowledge_set: str = "default",
-    session_id: str = "",
-    use_rag: bool = True,
-    k: int = RETRIEVAL_K,
-    window_k: int = DEFAULT_WINDOW_K,
-    enable_sql_agent: bool = True,
-    approved_tables: Optional[list[str]] = None,
-    connection_id: Optional[str] = None,
-    excluded_tables: Optional[list[str]] = None,
 ) -> dict:
     """
-    Hybrid query engine: SQL Agent + RAG.
+    Generate a .docx document from the user's request + RAG context.
 
-    Routing:
-      1. If enable_sql_agent=True and approved_tables exist:
-         a. Keyword pre-classifier runs instantly (no LLM, no ChromaDB)
-         b. Definite SQL intent → skip RAG retrieval, run SQL agent directly
-         c. Ambiguous → LLM classifies; gate blocks NOT_SQL → fall to RAG
-         d. SQL intent confirmed → run SQL agent
-      2. Standard LCEL RAG: condense → retrieve → answer
-      3. Direct LLM: history-aware, no retrieval
+    Returns:
+        {
+          "success": bool,
+          "file_name": str,
+          "file_path": str,
+          "title": str,
+          "section_count": int,
+          "error": str | None
+        }
     """
-    start   = time.time()
-    run_id  = str(uuid.uuid4())
-    answer  = ""
-    llm     = get_llm()
-    parser  = StrOutputParser()
+    llm    = get_llm()
+    parser = StrOutputParser()
 
-    if not session_id:
-        session_id = knowledge_set
+    # ── Step 1: Generate structured document content via LLM ─────
+    # Build the session transcript from AI responses ONLY.
+    # We include the full AI message which contains:
+    #   - [SQL Analysis] think-aloud
+    #   - [SQL Executed] actual SQL query
+    #   - [Rows Returned] count
+    #   - [Result Data] actual result rows as JSON
+    #   - [Interpretation] GPT-4o findings
+    #   - [Governance Note] PII/sensitivity flags
+    # User prompts are excluded — the document should reflect findings, not questions.
+    history_summary = ""
+    if chat_history:
+        ai_entries = []
+        for m in chat_history:
+            if m.type == "ai" and m.content and m.content.strip():
+                # Cap each individual entry to prevent single large SQL result
+                # from dominating the entire context window
+                content = m.content[:2000] if len(m.content) > 2000 else m.content
+                ai_entries.append(content)
+        history_summary = "\n\n---\n\n".join(ai_entries)
+        # Cap total at 14000 chars — allows ~10-15 substantial responses
+        if len(history_summary) > 14000:
+            history_summary = history_summary[:14000] + "\n\n[... earlier responses truncated ...]"
 
-    approved_tables = approved_tables or []
+    try:
+        doc_chain  = DOC_CONTENT_PROMPT | llm | parser
+        raw_json   = doc_chain.invoke({
+            "question"       : question,
+            "context"        : rag_context[:4000] if rag_context else "No additional context.",
+            "history_summary": history_summary or "No session responses available.",
+        })
 
-    # ── Sync approved sources to SQLite ──────────────────────────
-    if approved_tables and connection_id:
+        # Strip accidental markdown fences
+        raw_json = re.sub(r"^```json\s*", "", raw_json, flags=re.IGNORECASE)
+        raw_json = re.sub(r"^```\s*",     "", raw_json)
+        raw_json = re.sub(r"\s*```$",     "", raw_json).strip()
+
+        doc_data = json.loads(raw_json)
+
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"LLM returned invalid JSON: {str(e)}", "file_name": "", "file_path": "", "title": "", "section_count": 0}
+    except Exception as e:
+        return {"success": False, "error": f"Content generation failed: {str(e)}", "file_name": "", "file_path": "", "title": "", "section_count": 0}
+
+    # ── Step 2: Write Node.js script and execute ──────────────────
+    file_id   = uuid.uuid4().hex[:10]
+    safe_title = re.sub(r'[^\w\s-]', '', doc_data.get("title", "document"))[:40].strip().replace(" ", "_")
+    file_name = f"{safe_title}_{file_id}.docx"
+    file_path = str(DOCS_DIR / file_name)
+
+    # Serialise doc_data to JSON safely for embedding in JS
+    doc_json_str = json.dumps(doc_data, ensure_ascii=False)
+
+    # Build the Node.js script
+    script_content = _DOCX_SCRIPT_TEMPLATE.format(
+        doc_json    = doc_json_str,
+        output_path = file_path.replace("\\", "/"),
+    )
+
+    # The script must run from the backend directory so Node.js can
+    # resolve 'docx' from backend/node_modules (or global npm).
+    # On Windows, node_modules may be in the backend root or globally.
+    BACKEND_DIR = Path(__file__).parent.parent
+    script_path = str(BACKEND_DIR / "generated_docs" / f"gen_{file_id}.js")
+
+    # Build NODE_PATH so require('docx') resolves from backend/node_modules
+    # AND from the global npm prefix — handles both local and global installs.
+    import shutil
+    node_modules_local  = str(BACKEND_DIR / "node_modules")
+    try:
+        npm_prefix = subprocess.run(
+            ["npm", "root", "-g"], capture_output=True, text=True, timeout=10
+        ).stdout.strip()
+    except Exception:
+        npm_prefix = ""
+    node_path_parts = [p for p in [node_modules_local, npm_prefix] if p]
+    node_path_env   = os.pathsep.join(node_path_parts)
+
+    try:
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write(script_content)
+
+        env = os.environ.copy()
+        env["NODE_PATH"] = node_path_env
+
+        result = subprocess.run(
+            ["node", script_path],
+            capture_output=True, text=True, timeout=60,
+            cwd=str(BACKEND_DIR),   # run from backend root
+            env=env,
+        )
+
+        if result.returncode != 0 or not Path(file_path).exists():
+            error_msg = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+            return {"success": False, "error": f"docx generation failed: {error_msg}", "file_name": "", "file_path": "", "title": doc_data.get("title", ""), "section_count": 0}
+
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "Document generation timed out.", "file_name": "", "file_path": "", "title": "", "section_count": 0}
+    except Exception as e:
+        return {"success": False, "error": str(e), "file_name": "", "file_path": "", "title": "", "section_count": 0}
+    finally:
+        # Clean up the temp script
         try:
-            from services.databricks.approved_sources import sync_approved_sources
-            sync_approved_sources(
-                session_id=session_id,
-                knowledge_set=knowledge_set,
-                connection_id=connection_id,
-                tables=approved_tables,
-            )
+            os.remove(script_path)
         except Exception:
             pass
 
-    # ── Load conversation history ─────────────────────────────────
-    chat_history: list[BaseMessage] = load_history_as_messages(
-        session_id, knowledge_set, window_k
-    )
-
-    # ── SQL Agent routing ─────────────────────────────────────────
-    # Requires BOTH:
-    #   1. enable_sql_agent=True (frontend toggle must be ON)
-    #   2. approved_tables non-empty (user must have approved at least one table)
-    if enable_sql_agent and approved_tables:
-        sql_agent_error = None
-        try:
-            from services.databricks.sql_agent import run_sql_agent, _keyword_intent, INTENT_PROMPT
-            from langchain_core.output_parsers import StrOutputParser as _StrParser
-
-            approved_list_str = "\n".join(f"  - {t}" for t in approved_tables)
-
-            # ── Stage 1: Keyword pre-classifier ──────────────────────
-            # Returns SQL intent instantly if confident, None if ambiguous.
-            quick_intent    = _keyword_intent(question, approved_tables)
-            is_definite_sql = quick_intent is not None and quick_intent != "NOT_SQL"
-
-            # ── Stage 2: Resolve ambiguous questions via LLM ─────────
-            # Only call the LLM if the keyword classifier was uncertain.
-            if quick_intent is None:
-                try:
-                    _parser = _StrParser()
-                    _intent_chain = INTENT_PROMPT | llm | _parser
-                    _llm_intent = _intent_chain.invoke({
-                        "approved_sources_list": approved_list_str,
-                        "question": question,
-                    }).strip().upper()
-                    resolved_intent = _llm_intent if _llm_intent in {
-                        "SIMPLE_LOOKUP", "AGGREGATION", "COMPARISON",
-                        "JOIN_OPERATION", "MULTI_STEP", "CREATE_OBJECT",
-                        "OUT_OF_SCOPE", "NOT_SQL"
-                    } else "NOT_SQL"
-                except Exception:
-                    resolved_intent = "NOT_SQL"
-            else:
-                resolved_intent = quick_intent
-
-            # ── Stage 3: Gate — only proceed to agent for SQL intents ─
-            # NOT_SQL falls through to standard RAG via StopIteration.
-            # OUT_OF_SCOPE is a SQL intent — agent returns "not in approved sources".
-            SQL_GATE_INTENTS = {
-                "SIMPLE_LOOKUP", "AGGREGATION", "COMPARISON",
-                "JOIN_OPERATION", "MULTI_STEP", "CREATE_OBJECT",
-            }
-
-            if resolved_intent not in SQL_GATE_INTENTS:
-                # NOT_SQL or OUT_OF_SCOPE_DOC → fall through to standard RAG
-                raise StopIteration  # clean non-exception exit to RAG path
-
-            # ── Fetch RAG context for schema/governance overlay ───────
-            rag_context        = ""
-            governance_context = ""
-            schema_context     = ""
-            rag_sources: list[str] = []
-            rag_chunks         = 0
-
-            if not is_definite_sql:
-                # Ambiguous questions: fetch RAG context for SQL agent to use
-                try:
-                    retriever_fn = _build_retriever(vectordb, k, excluded_tables)
-                    source_docs  = retriever_fn(question)
-                    rag_context  = _format_docs(source_docs)
-                    rag_sources  = list({
-                        doc.metadata.get("source_file", "unknown")
-                        for doc in source_docs
-                    })
-                    rag_chunks = len(source_docs)
-
-                    gov_docs = [
-                        d for d in source_docs
-                        if d.metadata.get("source_type") == "databricks"
-                        or any(t in d.page_content.lower() for t in
-                               ["pii", "sensitivity", "owner", "gdpr", "solvency"])
-                    ]
-                    governance_context = _format_docs(gov_docs)
-
-                    schema_docs = [
-                        d for d in source_docs
-                        if d.metadata.get("file_type") in
-                        ("databricks_schema", "databricks_stats")
-                    ]
-                    schema_context = _format_docs(schema_docs)
-                except Exception:
-                    pass  # RAG unavailable — SQL agent works without it
-
-            agent_result = run_sql_agent(
-                question                 = question,
-                session_id               = session_id,
-                knowledge_set            = knowledge_set,
-                chat_history             = chat_history,
-                rag_context              = rag_context,
-                governance_context       = governance_context,
-                schema_context           = schema_context,
-                approved_tables_override = approved_tables,
-                connection_id_override   = connection_id,
-                intent_override          = resolved_intent,
-            )
-
-            intent = agent_result.get("intent", "NOT_SQL")
-
-            # All SQL-related intents return agent result.
-            # Only NOT_SQL falls through to standard RAG below.
-            SQL_INTENTS = {
-                "SIMPLE_LOOKUP", "AGGREGATION", "COMPARISON",
-                "JOIN_OPERATION", "MULTI_STEP", "CREATE_OBJECT", "OUT_OF_SCOPE",
-            }
-
-            if intent in SQL_INTENTS:
-                answer_parts = []
-                if agent_result.get("think_aloud"):
-                    answer_parts.append(f"_{agent_result['think_aloud']}_\n")
-                if agent_result.get("interpretation"):
-                    answer_parts.append(agent_result["interpretation"])
-                if agent_result.get("governance_note"):
-                    answer_parts.append(f"\n\n{agent_result['governance_note']}")
-                answer = "\n".join(answer_parts) if answer_parts else "Query executed."
-
-                # Build a rich memory record that includes the actual SQL and result data.
-                # This is what gets saved to conversation_history and read by the document
-                # generator — it must contain the real findings, not just the interpretation.
-                import json as _json
-                results_list = agent_result.get("results", [])
-                row_count    = agent_result.get("row_count", 0)
-                sql_executed = agent_result.get("sql", "")
-
-                memory_parts = []
-                if agent_result.get("think_aloud"):
-                    memory_parts.append(f"[SQL Analysis] {agent_result['think_aloud']}")
-                if sql_executed:
-                    memory_parts.append(f"[SQL Executed]\n{sql_executed}")
-                if row_count is not None:
-                    memory_parts.append(f"[Rows Returned] {row_count}")
-                if results_list:
-                    # Store up to 50 rows as compact JSON for document context
-                    sample = results_list[:50]
-                    try:
-                        memory_parts.append(f"[Result Data]\n{_json.dumps(sample, default=str, indent=2)}")
-                    except Exception:
-                        pass
-                if agent_result.get("interpretation"):
-                    memory_parts.append(f"[Interpretation]\n{agent_result['interpretation']}")
-                if agent_result.get("governance_note"):
-                    memory_parts.append(f"[Governance Note]\n{agent_result['governance_note']}")
-
-                rich_ai_message = "\n\n".join(memory_parts) if memory_parts else answer
-
-                result = {
-                    "run_id"            : run_id,
-                    "session_id"        : session_id,
-                    "knowledge_set"     : knowledge_set,
-                    "question"          : question,
-                    "rephrased_question": question,
-                    "answer"            : answer,
-                    "mode"              : agent_result.get("mode", "sql_agent"),
-                    "sources_used"      : rag_sources,
-                    "chunks_retrieved"  : rag_chunks,
-                    "model"             : CHAT_MODEL,
-                    "prompt_tokens"     : 0,
-                    "completion_tokens" : 0,
-                    "total_tokens"      : 0,
-                    "created_at"        : datetime.now().isoformat(),
-                    "duration_seconds"  : round(time.time() - start, 2),
-                    "sql_intent"        : intent,
-                    "sql_executed"      : agent_result.get("sql", ""),
-                    "sql_row_count"     : agent_result.get("row_count", 0),
-                    "sql_results"       : agent_result.get("results", []),
-                    "sql_think_aloud"   : agent_result.get("think_aloud", ""),
-                    "governance_note"   : agent_result.get("governance_note", ""),
-                }
-
-                db_insert("llm_responses", {
-                    k2: v for k2, v in result.items()
-                    if not isinstance(v, (list, dict)) or k2 == "sources_used"
-                })
-                save_turn(
-                    session_id=session_id, knowledge_set=knowledge_set,
-                    human_message=question,
-                    ai_message=rich_ai_message,  # contains SQL + result data + interpretation
-                    run_id=run_id, token_count=0,
-                )
-                return result
-
-            # NOT_SQL from agent — fall through to standard RAG
-
-        except StopIteration:
-            pass  # Intentional: resolved_intent was NOT_SQL → fall to standard RAG
-
-        except Exception as e:
-            import traceback
-            print(f"[SQL AGENT ERROR] {type(e).__name__}: {e}")
-            traceback.print_exc()
-            sql_agent_error = str(e)
-            # Fall through to standard RAG
-
-    # ── Standard RAG ─────────────────────────────────────────────
-    approved_sources_block = _build_approved_sources_block(approved_tables)
-
-    if use_rag:
-        # Condense follow-up questions into standalone questions
-        if chat_history:
-            condense_chain = CONDENSE_PROMPT | llm | parser
-            rephrased      = condense_chain.invoke({
-                "chat_history": chat_history,
-                "question"    : question,
-            })
-        else:
-            rephrased = question
-
-        retriever_fn = _build_retriever(vectordb, k, excluded_tables)
-        source_docs  = retriever_fn(rephrased)
-        context      = _format_docs(source_docs)
-
-        # Build sources_used list.
-        # Rule: always show uploaded-file sources.
-        # For Databricks chunks: only show if the table is currently approved.
-        # This prevents removed tables from appearing in sources.
-        all_sources = list({
-            doc.metadata.get("source_file", "unknown") for doc in source_docs
-        })
-        if approved_tables:
-            approved_short = {t.split(".")[-1].lower() for t in approved_tables}
-            sources = []
-            for s in all_sources:
-                # Identify if this source is a Databricks chunk
-                is_databricks = any(
-                    doc.metadata.get("source_type") == "databricks"
-                    for doc in source_docs
-                    if doc.metadata.get("source_file") == s
-                )
-                if is_databricks:
-                    # Only include if the table is currently approved
-                    if s.lower() in approved_short:
-                        sources.append(s)
-                else:
-                    # Always include uploaded file sources
-                    sources.append(s)
-        else:
-            sources = all_sources
-
-        qa_messages = QA_PROMPT.format_messages(
-            approved_sources_block=approved_sources_block,
-            context=context,
-            chat_history=chat_history,
-            question=question,
-        )
-        llm_response = llm.invoke(qa_messages)
-        answer       = llm_response.content
-        token_usage  = _extract_tokens(llm_response)
-
-        result = {
-            "run_id"            : run_id,
-            "session_id"        : session_id,
-            "knowledge_set"     : knowledge_set,
-            "question"          : question,
-            "rephrased_question": rephrased,
-            "answer"            : answer,
-            "mode"              : "conversational_rag",
-            "sources_used"      : sources,
-            "chunks_retrieved"  : len(source_docs),
-            "model"             : CHAT_MODEL,
-            "prompt_tokens"     : token_usage["prompt_tokens"],
-            "completion_tokens" : token_usage["completion_tokens"],
-            "total_tokens"      : token_usage["total_tokens"],
-            "created_at"        : datetime.now().isoformat(),
-            "duration_seconds"  : round(time.time() - start, 2),
-            "sql_intent"        : None,
-            "sql_executed"      : None,
-            "sql_row_count"     : None,
-            "sql_results"       : None,
-            "sql_think_aloud"   : None,
-            "governance_note"   : None,
-        }
-
-    else:
-        # ── Direct LLM (no retrieval) ─────────────────────────────
-        direct_prompt = ChatPromptTemplate.from_messages([
-            (
-                "system",
-                "You are a Data & AI Expert for the insurance industry. "
-                "You have full memory of this conversation. "
-                "Build on previous answers when relevant.\n\n"
-                f"{approved_sources_block}",
-            ),
-            MessagesPlaceholder(variable_name="chat_history"),
-            ("human", "{question}"),
-        ])
-        direct_messages = direct_prompt.format_messages(
-            chat_history=chat_history,
-            question=question,
-        )
-        llm_response = llm.invoke(direct_messages)
-        answer       = llm_response.content
-        token_usage  = _extract_tokens(llm_response)
-
-        result = {
-            "run_id"            : run_id,
-            "session_id"        : session_id,
-            "knowledge_set"     : knowledge_set,
-            "question"          : question,
-            "rephrased_question": question,
-            "answer"            : answer,
-            "mode"              : "direct",
-            "sources_used"      : [],
-            "chunks_retrieved"  : 0,
-            "model"             : CHAT_MODEL,
-            "prompt_tokens"     : token_usage["prompt_tokens"],
-            "completion_tokens" : token_usage["completion_tokens"],
-            "total_tokens"      : token_usage["total_tokens"],
-            "created_at"        : datetime.now().isoformat(),
-            "duration_seconds"  : round(time.time() - start, 2),
-            "sql_intent"        : None,
-            "sql_executed"      : None,
-            "sql_row_count"     : None,
-            "sql_results"       : None,
-            "sql_think_aloud"   : None,
-            "governance_note"   : None,
-        }
-
-    # ── Persist ───────────────────────────────────────────────────
-    db_insert("llm_responses", {
-        k2: v for k2, v in result.items()
-        if not isinstance(v, (list, dict)) or k2 == "sources_used"
-    })
-    save_turn(
-        session_id=session_id, knowledge_set=knowledge_set,
-        human_message=question, ai_message=answer,
-        run_id=run_id, token_count=result.get("total_tokens", 0),
-    )
-    return result
+    return {
+        "success"      : True,
+        "file_name"    : file_name,
+        "file_path"    : file_path,
+        "title"        : doc_data.get("title", "Document"),
+        "section_count": len(doc_data.get("sections", [])),
+        "error"        : None,
+    }
