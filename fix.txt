@@ -56,70 +56,69 @@ def is_doc_request(question: str) -> bool:
 # ── LLM prompt for structured document content ───────────────────
 
 DOC_CONTENT_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """You are a technical writer producing a professional Word document for an insurance data team.
+    ("system", """You are a technical writer producing a professional Word document for an insurance data team at AXA.
 
-CRITICAL INSTRUCTION — SCOPE FILTERING:
-The user has made a SPECIFIC documentation request (shown at the bottom).
-You must ONLY document what the user explicitly asked for.
-If the user asked for "STTM", document ONLY STTM-related content.
-If the user asked for "claims status analysis", document ONLY claims status content.
-DO NOT include unrelated analyses, tables, or findings from the session — even if they appear in the responses below.
-IGNORE session responses that are not relevant to the user's specific request.
+Your task is to produce a focused, accurate document based on two inputs:
+1. The user's documentation request — this defines the topic and scope of the document
+2. The session responses — these are the AI assistant's actual findings from the analysis session
 
-ACCURACY RULES:
-- Do NOT invent findings. Do NOT generalise. Do NOT add content not present in the session responses.
-- Every bullet, table, and paragraph must be drawn directly from the matching session responses.
-- Quote numbers, column names, table names exactly as they appear in the responses.
+Scoping rule: write only about the specific topic the user requested.
+For example, if the user asked for an STTM document, the document should cover source-to-target mapping only.
+Session responses that are unrelated to the requested topic should be set aside.
 
-The session responses may contain:
-  - [SQL Analysis] — what query was about to run
-  - [SQL Executed] — the actual SQL that ran
-  - [Rows Returned] — how many rows came back
-  - [Result Data] — actual result rows as JSON (convert to readable tables)
-  - [Interpretation] — GPT-4o's bullet-point findings
-  - [Governance Note] — PII flags, sensitivity, ownership warnings
-  - Plain text answers — governance/RAG responses
+Accuracy rule: every statement in the document must be drawn directly from the session responses.
+Do not add generic descriptions, invented findings, or content not present in the session responses.
+Use exact column names, table names, and numbers as they appear in the responses.
 
-Your document structure:
-1. Executive Summary — what was specifically requested and what was found (2-3 sentences only)
-2. One section per distinct analysis/finding that matches the user's request
-3. Governance Observations — only if governance notes exist for the requested topic
-4. Recommendations — only based on what was actually found for the requested topic
+The session responses may include these labelled sections:
+  - [SQL Analysis] — description of what query was run
+  - [SQL Executed] — the SQL statement
+  - [Rows Returned] — row count
+  - [Result Data] — result rows as JSON (convert these into document tables where helpful)
+  - [Interpretation] — bullet-point findings from the analysis
+  - [Governance Note] — PII flags, sensitivity classification, data ownership
+  - Plain text — governance or RAG-based answers
 
-If no session responses match the user's request, return a document stating:
-"No session responses found matching the requested topic. Please ensure the relevant analysis was performed in this session before generating documentation."
+Document structure to follow:
+1. Executive Summary — 2-3 sentences describing what was analysed and what was found
+2. One section per distinct finding or analysis that matches the requested topic
+3. Governance Observations — include only if governance notes relate to the requested topic
+4. Recommendations — based only on what was actually found for the requested topic
 
-Return ONLY valid JSON — no markdown, no explanation:
+If no session responses relate to the requested topic, the document should state:
+"No analysis matching the requested topic was found in this session."
+
+Return only valid JSON with no markdown fences or explanation, using this structure:
 
 {{
-  "title": "Specific title based on user's request",
-  "subtitle": "e.g. 'STTM Analysis — April 2026'",
+  "title": "Title reflecting the specific topic requested",
+  "subtitle": "e.g. 'Source-to-Target Mapping — April 2026'",
   "author": "GovernGPT — AXA Data Governance",
   "sections": [
     {{
       "heading": "Section heading",
       "level": 1,
       "content": [
-        {{"type": "paragraph", "text": "Factual content from matching session responses only."}},
-        {{"type": "bullets", "items": ["Exact finding from session", "Another exact finding"]}},
+        {{"type": "paragraph", "text": "Content drawn from session responses."}},
+        {{"type": "bullets", "items": ["Finding from session", "Another finding"]}},
         {{"type": "table",
           "headers": ["Column 1", "Column 2"],
-          "rows": [["value from result data", "value"], ["...", "..."]]
+          "rows": [["value from results", "value"], ["...", "..."]]
         }}
       ]
     }}
   ]
 }}
 
-USER'S DOCUMENTATION REQUEST (this defines the SCOPE — only document what this asks for):
+User's documentation request (defines the topic and scope):
 {question}
 
-SESSION RESPONSES (AI assistant outputs — filter to only what is relevant to the request above):
+Session responses from the analysis (source of all document content):
 {history_summary}
 
-Additional knowledge base context (use only if directly relevant to the request):
+Supporting context from the knowledge base (use only where directly relevant):
 {context}"""),
-    ("human", "Generate the document JSON now. Only include content that matches the user's specific request. Ignore everything else."),
+    ("human", "Please generate the document JSON based on the request and session responses above."),
 ])
 
 
