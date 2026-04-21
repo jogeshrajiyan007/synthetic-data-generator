@@ -1,56 +1,611 @@
-import httpx
-from langchain_openai import AzureChatOpenAI
-from langchain_huggingface import HuggingFaceEmbeddings
-from auth import token_manager
-from config import CHAT_MODEL, API_BASE_URL, API_VERSION, MODELS_DIR
+"""
+services/document_generator.py
+
+AI-powered .docx generation for GovernGPT.
+
+Flow:
+  1. LLM receives the user's documentation request + session context
+  2. LLM returns structured JSON (title, sections with headings/paragraphs/tables/bullets)
+  3. A Node.js script uses the docx library to build a professional .docx file
+  4. The file path is returned to the router for download
+
+Fixes applied (v3):
+  - get_llm_for_docs() uses max_tokens=8000 to prevent truncation on large STTM responses
+  - JSON truncation repair: salvages partial JSON if LLM hits token limit mid-generation
+  - subprocess cwd set to backend root so Node resolves node_modules correctly
+  - JSON written to a separate .json file to avoid template injection issues
+  - Dynamic column widths in makeTable (not hardcoded for 2 columns)
+  - Keyword-based relevance pre-filter: only passes AI responses relevant to user's request
+"""
+
+from __future__ import annotations
+import os
+import re
+import json
+import uuid
+import subprocess
+from pathlib import Path
+
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import BaseMessage
+from langchain_core.output_parsers import StrOutputParser
+
+from llm import get_llm, get_llm_for_docs
+
+# ── Directory setup ───────────────────────────────────────────────
+BACKEND_DIR = Path(__file__).parent.parent.resolve()
+DOCS_DIR    = BACKEND_DIR / "generated_docs"
+DOCS_DIR.mkdir(exist_ok=True)
 
 
-class SecureGPTChat(AzureChatOpenAI):
-    def __init__(self, api_key: str, base_url: str, max_tokens: int = 4096):
-        super().__init__(
-            model=CHAT_MODEL,
-            api_key=api_key,
-            api_version=API_VERSION,
-            base_url=base_url,
-            validate_base_url=False,
-            http_client=httpx.Client(verify=False),
-            temperature=0,
-            top_p=0.2,
-            max_tokens=max_tokens,
-        )
+# ── Documentation trigger detection ──────────────────────────────
+
+_DOC_TRIGGER = re.compile(
+    r'\b(create|generate|write|produce|build|make|prepare|draft|design)\b.{0,30}'
+    r'\b(documentation|document|report|data catalog|catalog|summary report|'
+    r'write.?up|briefing|specification|spec|data dictionary|runbook|playbook)\b'
+    r'|\b(document this|document the|write this up|put this in a doc|'
+    r'create a doc|generate a doc|export (this|as|to) (a )?(doc|word|docx))\b',
+    re.IGNORECASE,
+)
 
 
-def get_llm() -> SecureGPTChat:
-    """Returns a fresh LLM instance with a valid token."""
-    token = token_manager.get_token()
-    return SecureGPTChat(api_key=token, base_url=API_BASE_URL)
+def is_doc_request(question: str) -> bool:
+    """Return True if the user is asking GovernGPT to produce a .docx document."""
+    return bool(_DOC_TRIGGER.search(question))
 
 
-def get_llm_for_docs() -> SecureGPTChat:
+# ── AI response compaction ────────────────────────────────────────
+
+def _compact_ai_response(content: str) -> str:
     """
-    Returns an LLM instance for document generation.
-    AXA SecureGPT Hub supports max 4096 completion tokens.
-    Input compression in document_generator.py keeps responses within this limit.
+    Compress a stored AI response to fit within the document prompt budget.
+
+    What we KEEP (document-relevant):
+      - [Interpretation] findings — the actual bullet-point conclusions
+      - [Governance Note] — PII/sensitivity flags
+      - [SQL Analysis] think-aloud — what was queried (1 line)
+      - [Rows Returned] count
+      - Plain text RAG answers (governance/schema responses)
+
+    What we STRIP (raw data, not needed for document prose):
+      - [SQL Executed] — the SQL query itself (too long, not document content)
+      - [Result Data] — raw JSON rows (can be 2000+ chars, LLM already interpreted these)
+
+    This reduces a typical SQL agent response from ~2000 chars to ~300 chars
+    while preserving all information needed to write the document.
     """
-    token = token_manager.get_token()
-    return SecureGPTChat(api_key=token, base_url=API_BASE_URL, max_tokens=4096)
+    # Remove [SQL Executed] block and everything until the next tagged section
+    content = re.sub(
+        r'\[SQL Executed\]\n.*?(?=\n\n\[|\Z)',
+        '',
+        content,
+        flags=re.DOTALL
+    )
+    # Remove [Result Data] block (often very large JSON)
+    content = re.sub(
+        r'\[Result Data\]\n.*?(?=\n\n\[|\Z)',
+        '',
+        content,
+        flags=re.DOTALL
+    )
+    # Collapse multiple blank lines
+    content = re.sub(r'\n{3,}', '\n\n', content).strip()
+    return content
+
+def _is_valid_json(s: str) -> bool:
+    """Quick check whether a string is valid JSON."""
+    try:
+        json.loads(s)
+        return True
+    except Exception:
+        return False
 
 
-def get_embeddings() -> HuggingFaceEmbeddings:
-    """Local embeddings — loads from disk, no network call."""
-    return HuggingFaceEmbeddings(
-        model_name=str(MODELS_DIR),
-        model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True}
+def _repair_truncated_json(s: str) -> str:
+    """
+    Attempt to close an unterminated JSON string produced when the LLM
+    hits max_tokens mid-generation.
+
+    Strategy:
+    1. Truncate at the last complete top-level value we can find.
+    2. Close any open string by adding a closing quote if needed.
+    3. Close open arrays and objects from innermost outward.
+    4. Ensure the root object is closed.
+    """
+    # Work character by character to track open structures
+    depth_stack: list[str] = []  # '{' or '['
+    in_string   = False
+    escape_next = False
+    last_safe_pos = 0  # position after the last complete value at root level
+
+    i = 0
+    while i < len(s):
+        ch = s[i]
+
+        if escape_next:
+            escape_next = False
+            i += 1
+            continue
+
+        if ch == '\\' and in_string:
+            escape_next = True
+            i += 1
+            continue
+
+        if ch == '"':
+            in_string = not in_string
+            i += 1
+            continue
+
+        if in_string:
+            i += 1
+            continue
+
+        if ch in ('{', '['):
+            depth_stack.append(ch)
+        elif ch in ('}', ']'):
+            if depth_stack:
+                depth_stack.pop()
+            if not depth_stack:
+                last_safe_pos = i + 1  # just closed the root object
+
+        i += 1
+
+    # If still inside a string, close it
+    result = s
+    if in_string:
+        result += '"'
+
+    # Close all open structures from innermost to outermost
+    closers = {'{': '}', '[': ']'}
+    for opener in reversed(depth_stack):
+        result += closers[opener]
+
+    # If we truncated mid-array of sections, remove the last incomplete section
+    # by trying to parse and if still broken, strip back to last_safe_pos
+    if not _is_valid_json(result) and last_safe_pos > 0:
+        result = s[:last_safe_pos]
+
+    return result
+
+
+# ── LLM prompt for structured document content ───────────────────
+
+DOC_CONTENT_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are a technical writer producing a professional Word document for an insurance data team at AXA.
+
+Your task is to produce a focused, accurate document based on two inputs:
+1. The user's documentation request — this defines the topic and scope of the document
+2. The session responses — these are the AI assistant's actual findings from the analysis session
+
+Scoping rule: write only about the specific topic the user requested.
+For example, if the user asked for an STTM document, the document should cover source-to-target mapping only.
+Session responses that are unrelated to the requested topic should be set aside.
+
+Accuracy rule: every statement in the document must be drawn directly from the session responses.
+Do not add generic descriptions, invented findings, or content not present in the session responses.
+Use exact column names, table names, and numbers as they appear in the responses.
+
+The session responses may include these labelled sections:
+  - [SQL Analysis] — description of what query was run
+  - [SQL Executed] — the SQL statement
+  - [Rows Returned] — row count
+  - [Result Data] — result rows as JSON (convert these into document tables where helpful)
+  - [Interpretation] — bullet-point findings from the analysis
+  - [Governance Note] — PII flags, sensitivity classification, data ownership
+  - Plain text — governance or RAG-based answers
+
+Document structure to follow:
+1. Executive Summary — 2-3 sentences describing what was analysed and what was found
+2. One section per distinct finding or analysis that matches the requested topic
+3. Governance Observations — include only if governance notes relate to the requested topic
+4. Recommendations — based only on what was actually found for the requested topic
+
+If no session responses relate to the requested topic, the document should state:
+"No analysis matching the requested topic was found in this session."
+
+Return only valid JSON with no markdown fences or explanation, using this structure:
+
+{{
+  "title": "Title reflecting the specific topic requested",
+  "subtitle": "e.g. 'Source-to-Target Mapping — April 2026'",
+  "author": "GovernGPT — AXA Data Governance",
+  "sections": [
+    {{
+      "heading": "Section heading",
+      "level": 1,
+      "content": [
+        {{"type": "paragraph", "text": "Content drawn from session responses."}},
+        {{"type": "bullets", "items": ["Finding from session", "Another finding"]}},
+        {{"type": "table",
+          "headers": ["Column 1", "Column 2"],
+          "rows": [["value from results", "value"], ["...", "..."]]
+        }}
+      ]
+    }}
+  ]
+}}
+
+User's documentation request (defines the topic and scope):
+{question}
+
+Session responses from the analysis (source of all document content):
+{history_summary}
+
+Supporting context from the knowledge base (use only where directly relevant):
+{context}"""),
+    ("human", "Please generate the document JSON based on the request and session responses above."),
+])
+
+
+# ── Node.js docx generator script template ───────────────────────
+
+_DOCX_SCRIPT_TEMPLATE = r"""
+'use strict';
+const fs = require('fs');
+const path = require('path');
+
+const {{
+  Document, Packer, Paragraph, TextRun,
+  Table, TableRow, TableCell,
+  Header, Footer,
+  AlignmentType, HeadingLevel, BorderStyle,
+  WidthType, ShadingType, VerticalAlign,
+  LevelFormat, PageNumber, PageBreak
+}} = require('docx');
+
+// ── Load document data from JSON file ────────────────────────────
+const data = JSON.parse(fs.readFileSync('{json_path}', 'utf8'));
+
+// ── Colour palette (AXA brand) ────────────────────────────────────
+const AXA_BLUE  = "00008F";
+const ROW_ALT   = "F4F4F9";
+const TEXT_DARK = "1A1A2E";
+const GREY      = "888888";
+const BORDER_C  = "CCCCCC";
+
+const cellBorder = {{ style: BorderStyle.SINGLE, size: 1, color: BORDER_C }};
+const allBorders = {{
+  top: cellBorder, bottom: cellBorder,
+  left: cellBorder, right: cellBorder
+}};
+
+// ── Table builder ─────────────────────────────────────────────────
+function makeTable(headers, rows) {{
+  const colCount  = headers.length || 1;
+  const tableW    = 9360;
+  const colWidth  = Math.floor(tableW / colCount);
+  const colWidths = Array(colCount).fill(colWidth);
+  colWidths[colCount - 1] += tableW - colWidth * colCount;
+
+  const headerRow = new TableRow({{
+    tableHeader: true,
+    children: headers.map((h, i) => new TableCell({{
+      borders: allBorders,
+      shading: {{ fill: AXA_BLUE, type: ShadingType.CLEAR }},
+      width: {{ size: colWidths[i], type: WidthType.DXA }},
+      margins: {{ top: 100, bottom: 100, left: 140, right: 140 }},
+      verticalAlign: VerticalAlign.CENTER,
+      children: [new Paragraph({{
+        children: [new TextRun({{ text: String(h), bold: true, color: "FFFFFF", font: "Arial", size: 20 }})]
+      }})]
+    }}))
+  }});
+
+  const dataRows = (rows || []).map((row, ri) =>
+    new TableRow({{
+      children: (row || []).map((cell, ci) => new TableCell({{
+        borders: allBorders,
+        shading: {{ fill: ri % 2 === 0 ? "FFFFFF" : ROW_ALT, type: ShadingType.CLEAR }},
+        width: {{ size: colWidths[ci] || colWidth, type: WidthType.DXA }},
+        margins: {{ top: 80, bottom: 80, left: 140, right: 140 }},
+        children: [new Paragraph({{
+          children: [new TextRun({{ text: String(cell != null ? cell : ''), font: "Arial", size: 20, color: TEXT_DARK }})]
+        }})]
+      }}))
+    }})
+  );
+
+  return new Table({{
+    width: {{ size: tableW, type: WidthType.DXA }},
+    columnWidths: colWidths,
+    rows: [headerRow, ...dataRows]
+  }});
+}}
+
+// ── Content block renderer ────────────────────────────────────────
+function renderContent(items) {{
+  const blocks = [];
+  for (const item of (items || [])) {{
+    if (!item || !item.type) continue;
+    if (item.type === 'paragraph') {{
+      blocks.push(new Paragraph({{
+        spacing: {{ after: 160 }},
+        children: [new TextRun({{ text: item.text || '', font: "Arial", size: 22, color: TEXT_DARK }})]
+      }}));
+    }} else if (item.type === 'bullets') {{
+      for (const bullet of (item.items || [])) {{
+        blocks.push(new Paragraph({{
+          numbering: {{ reference: "myBullets", level: 0 }},
+          spacing: {{ after: 80 }},
+          children: [new TextRun({{ text: String(bullet), font: "Arial", size: 22, color: TEXT_DARK }})]
+        }}));
+      }}
+      blocks.push(new Paragraph({{ spacing: {{ after: 120 }}, children: [] }}));
+    }} else if (item.type === 'table') {{
+      blocks.push(makeTable(item.headers || [], item.rows || []));
+      blocks.push(new Paragraph({{ spacing: {{ after: 200 }}, children: [] }}));
+    }}
+  }}
+  return blocks;
+}}
+
+// ── Build document body ───────────────────────────────────────────
+const bodyChildren = [];
+
+bodyChildren.push(new Paragraph({{
+  spacing: {{ before: 480, after: 200 }},
+  children: [new TextRun({{ text: data.title || 'GovernGPT Document', bold: true, font: "Arial", size: 56, color: AXA_BLUE }})]
+}}));
+
+if (data.subtitle) {{
+  bodyChildren.push(new Paragraph({{
+    spacing: {{ after: 120 }},
+    children: [new TextRun({{ text: data.subtitle, font: "Arial", size: 24, color: GREY, italics: true }})]
+  }}));
+}}
+
+bodyChildren.push(new Paragraph({{
+  spacing: {{ after: 480 }},
+  children: [new TextRun({{ text: data.author || 'GovernGPT — AXA Data Governance', font: "Arial", size: 22, color: GREY }})]
+}}));
+
+bodyChildren.push(new Paragraph({{
+  border: {{ bottom: {{ style: BorderStyle.SINGLE, size: 6, color: AXA_BLUE, space: 1 }} }},
+  spacing: {{ after: 360 }},
+  children: []
+}}));
+
+for (const section of (data.sections || [])) {{
+  const isH2    = section.level === 2;
+  const hLevel  = isH2 ? HeadingLevel.HEADING_2 : HeadingLevel.HEADING_1;
+  const hSize   = isH2 ? 26 : 32;
+  const hBefore = isH2 ? 240 : 400;
+
+  bodyChildren.push(new Paragraph({{
+    heading: hLevel,
+    spacing: {{ before: hBefore, after: 160 }},
+    children: [new TextRun({{ text: section.heading || '', bold: true, font: "Arial", size: hSize, color: AXA_BLUE }})]
+  }}));
+
+  bodyChildren.push(...renderContent(section.content || []));
+}}
+
+// ── Assemble Document ─────────────────────────────────────────────
+const doc = new Document({{
+  numbering: {{
+    config: [{{
+      reference: "myBullets",
+      levels: [{{
+        level: 0, format: LevelFormat.BULLET, text: "\u2022",
+        alignment: AlignmentType.LEFT,
+        style: {{ paragraph: {{ indent: {{ left: 720, hanging: 360 }} }} }}
+      }}]
+    }}]
+  }},
+  styles: {{
+    default: {{ document: {{ run: {{ font: "Arial", size: 22, color: TEXT_DARK }} }} }},
+    paragraphStyles: [
+      {{ id: "Heading1", name: "Heading 1", basedOn: "Normal", next: "Normal", quickFormat: true,
+         run: {{ size: 32, bold: true, font: "Arial", color: AXA_BLUE }},
+         paragraph: {{ spacing: {{ before: 400, after: 160 }}, outlineLevel: 0 }} }},
+      {{ id: "Heading2", name: "Heading 2", basedOn: "Normal", next: "Normal", quickFormat: true,
+         run: {{ size: 26, bold: true, font: "Arial", color: AXA_BLUE }},
+         paragraph: {{ spacing: {{ before: 240, after: 120 }}, outlineLevel: 1 }} }},
+    ]
+  }},
+  sections: [{{
+    properties: {{
+      page: {{
+        size: {{ width: 12240, height: 15840 }},
+        margin: {{ top: 1440, right: 1440, bottom: 1440, left: 1440 }}
+      }}
+    }},
+    headers: {{
+      default: new Header({{
+        children: [new Paragraph({{
+          border: {{ bottom: {{ style: BorderStyle.SINGLE, size: 4, color: AXA_BLUE, space: 1 }} }},
+          children: [new TextRun({{
+            text: (data.title || 'GovernGPT Document') + '   |   AXA GovernGPT',
+            font: "Arial", size: 18, color: GREY
+          }})]
+        }})]
+      }})
+    }},
+    footers: {{
+      default: new Footer({{
+        children: [new Paragraph({{
+          border: {{ top: {{ style: BorderStyle.SINGLE, size: 4, color: AXA_BLUE, space: 1 }} }},
+          children: [
+            new TextRun({{ text: "Generated by GovernGPT  |  Confidential  |  Page ", font: "Arial", size: 16, color: GREY }}),
+            new TextRun({{ children: [PageNumber.CURRENT], font: "Arial", size: 16, color: GREY }}),
+            new TextRun({{ text: " of ", font: "Arial", size: 16, color: GREY }}),
+            new TextRun({{ children: [PageNumber.TOTAL_PAGES], font: "Arial", size: 16, color: GREY }})
+          ]
+        }})]
+      }})
+    }},
+    children: bodyChildren
+  }}]
+}});
+
+Packer.toBuffer(doc)
+  .then(buffer => {{
+    fs.writeFileSync('{output_path}', buffer);
+    console.log('OK:{output_path}');
+  }})
+  .catch(err => {{
+    console.error('ERR:' + err.message);
+    process.exit(1);
+  }});
+"""
+
+
+# ── Main generator function ───────────────────────────────────────
+
+def generate_document(
+    question: str,
+    rag_context: str = "",
+    chat_history: list[BaseMessage] | None = None,
+    knowledge_set: str = "default",
+) -> dict:
+    """
+    Generate a .docx document from the user's request + RAG context.
+    Uses get_llm_for_docs() (max_tokens=4096, AXA Hub limit) to prevent JSON truncation
+    on large responses like STTM with many columns and tables.
+    """
+    # High-token LLM — prevents truncation on large STTM/report responses
+    llm    = get_llm_for_docs()
+    parser = StrOutputParser()
+
+    # ── Build session transcript (AI responses only, relevance-filtered) ──
+    history_summary = ""
+    if chat_history:
+        stop_words = {
+            "create", "generate", "write", "produce", "build", "make", "prepare",
+            "draft", "document", "documentation", "report", "for", "the", "a",
+            "an", "this", "from", "my", "our", "all", "what", "was", "discussed",
+            "please", "can", "you", "me", "us", "about", "in", "of", "and", "or",
+            "with", "include", "using", "based", "on", "session", "chat", "analysis",
+        }
+        q_words = set(re.findall(r'\b[a-zA-Z_]{3,}\b', question.lower())) - stop_words
+        filter_keywords = q_words if len(q_words) >= 1 else set()
+
+        ai_entries = []
+        for m in chat_history:
+            if not (m.type == "ai" and m.content and m.content.strip()):
+                continue
+            content = m.content.strip()
+            if filter_keywords:
+                content_lower = content.lower()
+                if not any(kw in content_lower for kw in filter_keywords):
+                    continue
+
+            # Compact: strip raw SQL and result JSON, keep only findings
+            content = _compact_ai_response(content)
+            if not content:
+                continue
+
+            # Cap each entry at 800 chars after compaction
+            if len(content) > 800:
+                content = content[:800] + "\n[...truncated]"
+            ai_entries.append(content)
+
+        history_summary = "\n\n---\n\n".join(ai_entries)
+        # Cap total at 8000 chars (leaves ~3000 for prompt template + JSON output)
+        if len(history_summary) > 8000:
+            history_summary = history_summary[:8000] + "\n\n[... earlier responses truncated ...]"
+
+    # ── Call LLM to generate structured document JSON ─────────────
+    try:
+        doc_chain = DOC_CONTENT_PROMPT | llm | parser
+        raw_json  = doc_chain.invoke({
+            "question"       : question,
+            "context"        : rag_context[:2000] if rag_context else "No additional context.",
+            "history_summary": history_summary or "No session responses available.",
+        })
+
+        # Strip accidental markdown fences
+        raw_json = re.sub(r"^```json\s*", "", raw_json, flags=re.IGNORECASE)
+        raw_json = re.sub(r"^```\s*",     "", raw_json)
+        raw_json = re.sub(r"\s*```$",     "", raw_json).strip()
+
+        # Repair truncated JSON if LLM hit token limit mid-generation
+        if raw_json and not _is_valid_json(raw_json):
+            raw_json = _repair_truncated_json(raw_json)
+
+        doc_data = json.loads(raw_json)
+
+    except json.JSONDecodeError as e:
+        return {
+            "success": False, "error": f"LLM returned invalid JSON: {str(e)}",
+            "file_name": "", "file_path": "", "title": "", "section_count": 0,
+        }
+    except Exception as e:
+        return {
+            "success": False, "error": f"Content generation failed: {str(e)}",
+            "file_name": "", "file_path": "", "title": "", "section_count": 0,
+        }
+
+    # ── Prepare file paths ────────────────────────────────────────
+    file_id     = uuid.uuid4().hex[:10]
+    safe_title  = re.sub(r"[^\w\s-]", "", doc_data.get("title", "document"))[:40].strip().replace(" ", "_")
+    file_name   = f"{safe_title}_{file_id}.docx"
+    file_path   = str(DOCS_DIR / file_name)
+    json_path   = str(DOCS_DIR / f"data_{file_id}.json")
+    script_path = str(DOCS_DIR / f"gen_{file_id}.js")
+
+    # Write JSON to separate file (avoids template injection with special chars)
+    try:
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(doc_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return {
+            "success": False, "error": f"Failed to write data file: {str(e)}",
+            "file_name": "", "file_path": "", "title": doc_data.get("title", ""), "section_count": 0,
+        }
+
+    # Write Node.js generator script
+    script_content = _DOCX_SCRIPT_TEMPLATE.format(
+        json_path   = json_path.replace("\\", "/"),
+        output_path = file_path.replace("\\", "/"),
     )
 
+    try:
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write(script_content)
 
-# ── Module-level singletons (loaded once at startup) ───────────
-_embeddings: HuggingFaceEmbeddings | None = None
+        result = subprocess.run(
+            ["node", script_path],
+            capture_output=True, text=True, timeout=60,
+            cwd=str(BACKEND_DIR),
+        )
 
+        if result.returncode != 0 or not Path(file_path).exists():
+            error_msg = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+            return {
+                "success": False, "error": f"docx generation failed: {error_msg}",
+                "file_name": "", "file_path": "", "title": doc_data.get("title", ""), "section_count": 0,
+            }
 
-def get_embeddings_singleton() -> HuggingFaceEmbeddings:
-    global _embeddings
-    if _embeddings is None:
-        _embeddings = get_embeddings()
-    return _embeddings
+    except subprocess.TimeoutExpired:
+        return {
+            "success": False, "error": "Document generation timed out (>60s).",
+            "file_name": "", "file_path": "", "title": "", "section_count": 0,
+        }
+    except FileNotFoundError:
+        return {
+            "success": False, "error": "Node.js not found. Ensure Node.js is installed and on PATH.",
+            "file_name": "", "file_path": "", "title": "", "section_count": 0,
+        }
+    except Exception as e:
+        return {
+            "success": False, "error": str(e),
+            "file_name": "", "file_path": "", "title": "", "section_count": 0,
+        }
+    finally:
+        for temp_file in [script_path, json_path]:
+            try:
+                os.remove(temp_file)
+            except Exception:
+                pass
+
+    return {
+        "success"      : True,
+        "file_name"    : file_name,
+        "file_path"    : file_path,
+        "title"        : doc_data.get("title", "Document"),
+        "section_count": len(doc_data.get("sections", [])),
+        "error"        : None,
+    }
