@@ -55,40 +55,46 @@ def is_doc_request(question: str) -> bool:
     return bool(_DOC_TRIGGER.search(question))
 
 
-# ── AI response compaction ────────────────────────────────────────
+# ── AI response formatter ─────────────────────────────────────────
 
-def _compact_ai_response(content: str) -> str:
+def _format_ai_response(content: str) -> str:
     """
-    Compress a stored AI response to fit within the document prompt budget.
+    Format a stored AI response for the document generator.
 
-    What we KEEP (document-relevant):
-      - [Interpretation] findings — the actual bullet-point conclusions
-      - [Governance Note] — PII/sensitivity flags
-      - [SQL Analysis] think-aloud — what was queried (1 line)
-      - [Rows Returned] count
-      - Plain text RAG answers (governance/schema responses)
+    Keeps ALL content sections but trims Result Data JSON to a
+    manageable size (first 10 rows) so the LLM can produce tables
+    without overflowing the token budget.
 
-    What we STRIP (raw data, not needed for document prose):
-      - [SQL Executed] — the SQL query itself (too long, not document content)
-      - [Result Data] — raw JSON rows (can be 2000+ chars, LLM already interpreted these)
-
-    This reduces a typical SQL agent response from ~2000 chars to ~300 chars
-    while preserving all information needed to write the document.
+    Sections preserved:
+      [SQL Analysis]   — what was queried
+      [SQL Executed]   — the actual SQL (for SQL Query section in doc)
+      [Rows Returned]  — count
+      [Result Data]    — trimmed to first 10 rows (for Sample Data tables)
+      [Interpretation] — bullet findings (for Results section in doc)
+      [Governance Note] — PII/sensitivity flags
     """
-    # Remove [SQL Executed] block and everything until the next tagged section
+    import json as _json
+
+    # Trim [Result Data] JSON to first 10 rows to save tokens
+    def trim_result_data(match: re.Match) -> str:
+        raw = match.group(1).strip()
+        try:
+            rows = _json.loads(raw)
+            if isinstance(rows, list) and len(rows) > 10:
+                trimmed = _json.dumps(rows[:10], default=str)
+                return f"[Result Data]\n{trimmed}"
+            return f"[Result Data]\n{raw}"
+        except Exception:
+            # Not valid JSON — take first 500 chars
+            return f"[Result Data]\n{raw[:500]}"
+
     content = re.sub(
-        r'\[SQL Executed\]\n.*?(?=\n\n\[|\Z)',
-        '',
+        r'\[Result Data\]\n(.*?)(?=\n\n\[|\Z)',
+        trim_result_data,
         content,
         flags=re.DOTALL
     )
-    # Remove [Result Data] block (often very large JSON)
-    content = re.sub(
-        r'\[Result Data\]\n.*?(?=\n\n\[|\Z)',
-        '',
-        content,
-        flags=re.DOTALL
-    )
+
     # Collapse multiple blank lines
     content = re.sub(r'\n{3,}', '\n\n', content).strip()
     return content
@@ -180,47 +186,52 @@ Your task is to produce a focused, accurate document based on two inputs:
 2. The session responses — these are the AI assistant's actual findings from the analysis session
 
 Scoping rule: write only about the specific topic the user requested.
-For example, if the user asked for an STTM document, the document should cover source-to-target mapping only.
 Session responses that are unrelated to the requested topic should be set aside.
 
-Accuracy rule: every statement in the document must be drawn directly from the session responses.
-Do not add generic descriptions, invented findings, or content not present in the session responses.
-Use exact column names, table names, and numbers as they appear in the responses.
+Accuracy rule: every statement must be drawn directly from the session responses.
+Use exact column names, table names, SQL queries, and numbers as they appear.
 
-The session responses may include these labelled sections:
-  - [SQL Analysis] — description of what query was run
-  - [SQL Executed] — the SQL statement
-  - [Rows Returned] — row count
-  - [Result Data] — result rows as JSON (convert these into document tables where helpful)
-  - [Interpretation] — bullet-point findings from the analysis
-  - [Governance Note] — PII flags, sensitivity classification, data ownership
-  - Plain text — governance or RAG-based answers
+The session responses contain these labelled sections — use them as follows:
 
-Document structure to follow:
-1. Executive Summary — 2-3 sentences describing what was analysed and what was found
-2. One section per distinct finding or analysis that matches the requested topic
-3. Governance Observations — include only if governance notes relate to the requested topic
-4. Recommendations — based only on what was actually found for the requested topic
+  [SQL Analysis]   → use as the section introduction paragraph (what was being investigated)
+  [SQL Executed]   → include as a "SQL Query" paragraph showing the actual SQL statement
+  [Rows Returned]  → include in the Results subsection
+  [Result Data]    → convert the JSON rows into a "Sample Data" table in the document
+  [Interpretation] → use as "Results" bullet points (the key findings)
+  [Governance Note] → use in a Governance subsection if present
+  Plain text       → use as section content directly
 
-If no session responses relate to the requested topic, the document should state:
-"No analysis matching the requested topic was found in this session."
+For each SQL analysis in the session, produce a section structured like this:
+  - Section heading: descriptive name of what was analysed (e.g. "Customers Holding Multiple Policies")
+  - Paragraph: what the analysis investigated (from [SQL Analysis])
+  - Sub-heading "SQL Query" with the SQL as a paragraph (from [SQL Executed])
+  - Sub-heading "Results" with bullet findings (from [Interpretation])
+  - Sub-heading "Sample Data" with a table of actual rows (from [Result Data])
 
-Return only valid JSON with no markdown fences or explanation, using this structure:
+For governance/RAG responses (no SQL tags), produce a section with the answer as paragraphs and bullets.
+
+Overall document structure:
+1. Executive Summary — what analyses were performed and what was found overall
+2. One section per SQL analysis or governance finding
+3. Summary — 2-3 sentences consolidating the key insights
+
+Return only valid JSON with no markdown fences:
 
 {{
-  "title": "Title reflecting the specific topic requested",
-  "subtitle": "e.g. 'Source-to-Target Mapping — April 2026'",
+  "title": "Title based on the user's request",
+  "subtitle": "e.g. 'SQL Analysis Session — April 2026'",
   "author": "GovernGPT — AXA Data Governance",
   "sections": [
     {{
       "heading": "Section heading",
       "level": 1,
       "content": [
-        {{"type": "paragraph", "text": "Content drawn from session responses."}},
-        {{"type": "bullets", "items": ["Finding from session", "Another finding"]}},
+        {{"type": "paragraph", "text": "What was investigated."}},
+        {{"type": "paragraph", "text": "SQL Query: SELECT ..."}},
+        {{"type": "bullets", "items": ["Finding 1", "Finding 2"]}},
         {{"type": "table",
-          "headers": ["Column 1", "Column 2"],
-          "rows": [["value from results", "value"], ["...", "..."]]
+          "headers": ["COL_A", "COL_B"],
+          "rows": [["value", "value"], ["value", "value"]]
         }}
       ]
     }}
@@ -492,20 +503,22 @@ def generate_document(
                 if not any(kw in content_lower for kw in filter_keywords):
                     continue
 
-            # Compact: strip raw SQL and result JSON, keep only findings
-            content = _compact_ai_response(content)
+            # Format: keep SQL + trimmed results (first 10 rows), strip nothing else
+            content = _format_ai_response(content)
             if not content:
                 continue
 
-            # Cap each entry at 800 chars after compaction
-            if len(content) > 800:
-                content = content[:800] + "\n[...truncated]"
+            # Cap each entry at 2500 chars — enough for SQL + 10 result rows + interpretation
+            if len(content) > 2500:
+                content = content[:2500] + "\n[...truncated]"
             ai_entries.append(content)
 
         history_summary = "\n\n---\n\n".join(ai_entries)
-        # Cap total at 8000 chars (leaves ~3000 for prompt template + JSON output)
-        if len(history_summary) > 8000:
-            history_summary = history_summary[:8000] + "\n\n[... earlier responses truncated ...]"
+        # Cap total at 10000 chars — fits within 4096 token output budget
+        if len(history_summary) > 10000:
+            # Keep most recent entries (end of list) — most relevant to user's request
+            history_summary = "[... earlier responses omitted to fit token budget ...]\n\n" + \
+                               history_summary[-10000:]
 
     # ── Call LLM to generate structured document JSON ─────────────
     try:
