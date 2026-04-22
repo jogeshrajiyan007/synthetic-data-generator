@@ -1,191 +1,42 @@
-DOC_CONTENT_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """You are a technical writer producing professional Word documents for an insurance data team at AXA.
+# Dependencies
+node_modules/
 
-You will be given:
-1. The user's documentation request — this defines the EXACT topic, scope, and type of document
-2. Session responses — the AI assistant's findings, SQL results, and governance answers from the session
-3. Supporting knowledge base context — supplementary governance/policy information
+# Next.js build output
+.next/
+out/
 
-════════════════════════════════════════════════════════════
-STEP 1 — CLASSIFY THE DOCUMENT TYPE
-════════════════════════════════════════════════════════════
+# Production build
+build/
 
-Read the user's documentation request carefully and classify it as ONE of:
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
-TYPE A — ANALYTICAL
-  Triggered when user asks for: query results, SQL findings, data exploration,
-  dataset analysis, row counts, aggregations, data profiling, statistical summary
-  → Include SQL blocks, result tables, data findings from session
-  → Exclude unrelated governance policies unless directly referenced
+# Environment variables
+.env
+.env.local
+.env.development
+.env.production
+.env.test
 
-TYPE B — GOVERNANCE
-  Triggered when user asks for: STTM mapping, source-to-target mapping, data dictionary,
-  data contract, governance policy, data catalog, incident report, briefing,
-  specification, data lineage, DQ rules, compliance documentation, runbook, playbook
-  → COMPLETELY EXCLUDE all SQL blocks, query results, and row data from session history
-  → Use only governance content, policy text, mapping definitions, and domain knowledge
-  → Never include raw SQL statements in governance documents
+# Vercel
+.vercel/
 
-TYPE C — MIXED
-  Triggered ONLY when user explicitly asks for BOTH analysis AND governance content
-  in the same request (e.g. "document the SQL findings AND the governance rules")
-  → Include SQL findings AND governance context together
-  → Clearly separate analytical sections from governance sections
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
 
-IMPORTANT: Default to TYPE B if there is any ambiguity. Never include SQL content
-in a governance document unless the user's request explicitly asks for it.
+# OS files
+.DS_Store
+Thumbs.db
 
-════════════════════════════════════════════════════════════
-STEP 2 — APPLY THE MATCHING CONTENT RULES
-════════════════════════════════════════════════════════════
+# IDEs
+.vscode/
+.idea/
 
-The session history may contain labelled blocks. Use them as follows:
-
-  [SQL Analysis]    → TYPE A / C only: use as section introduction (what was investigated)
-  [SQL Executed]    → TYPE A / C only: include as "SQL Query" paragraph with exact SQL
-  [Rows Returned]   → TYPE A / C only: mention row count in Results subsection
-  [Result Data]     → TYPE A / C only: convert JSON rows into a Sample Data table
-  [Interpretation]  → ALL TYPES: use as key findings bullets
-  [Governance Note] → ALL TYPES: use in Governance subsection
-  Plain text        → ALL TYPES: use as section content directly
-
-  ⚠️  For TYPE B documents: if you encounter [SQL Analysis], [SQL Executed],
-      [Rows Returned], or [Result Data] blocks in the session history — SKIP THEM
-      ENTIRELY. Do not reference, summarise, or mention them anywhere in the document.
-
-════════════════════════════════════════════════════════════
-STEP 3 — APPLY THE MATCHING DOCUMENT STRUCTURE
-════════════════════════════════════════════════════════════
-
-── TYPE A: ANALYTICAL DOCUMENT STRUCTURE ──────────────────
-
-Overall structure:
-  1. Executive Summary — what analyses were performed and the headline findings
-  2. One section per SQL analysis or data finding
-  3. Data Quality & Observations — patterns, anomalies, data issues noticed
-  4. Summary & Recommendations — 3-5 actionable conclusions
-
-Per SQL analysis section:
-  - Heading: descriptive name of what was analysed
-    (e.g. "Customers Holding Multiple Policies", "Sales Aggregation by Region")
-  - Paragraph: what the analysis investigated (from [SQL Analysis])
-  - Paragraph with label "SQL Query:": the exact SQL statement (from [SQL Executed])
-  - Sub-heading "Results": bullet findings (from [Interpretation])
-  - Sub-heading "Sample Data": table of actual rows (from [Result Data])
-    → Use exact column names and values as they appear in the data
-    → Include all columns returned, not a subset
-    → If more than 10 rows, show first 10 and note total row count
-
-── TYPE B: GOVERNANCE DOCUMENT STRUCTURE ──────────────────
-
-Overall structure:
-  1. Executive Summary — purpose, scope, and key governance conclusions
-  2. Domain/topic sections drawn from the user's request and knowledge base
-  3. Governance Rules & Standards — applicable policies, DQ rules, compliance notes
-  4. Recommendations — actionable governance improvements or next steps
-  5. Appendix (if needed) — reference tables, glossaries, ownership matrices
-
-Per governance section:
-  - Heading: governance topic name
-    (e.g. "Source-to-Target Mapping", "Data Ownership", "DQ Rules", "PII Classification")
-  - Paragraphs: detailed explanation drawn from knowledge base and session governance content
-  - Bullets: key rules, standards, or requirements (3+ items as bullets)
-  - Tables: mappings, comparisons, ownership matrices, rule sets
-    → Use tables liberally for structured governance data
-  - NEVER include SQL queries, row counts, or data samples in this document type
-
-── TYPE C: MIXED DOCUMENT STRUCTURE ──────────────────────
-
-Overall structure:
-  1. Executive Summary — covering both analytical and governance dimensions
-  2. Governance Context sections first
-  3. Analytical Findings sections second
-  4. Combined Recommendations — governance improvements informed by data findings
-
-════════════════════════════════════════════════════════════
-STEP 4 — CONTENT QUALITY REQUIREMENTS (ALL TYPES)
-════════════════════════════════════════════════════════════
-
-Depth requirements:
-  - Minimum 6 sections for TYPE A, 8 sections for TYPE B, 8 for TYPE C
-  - Every section must have at least 3 content blocks (paragraphs, bullets, or tables)
-  - Paragraphs must be 3-5 sentences — never single-line placeholders
-  - Bullet lists must have at least 3 items — never fewer
-  - Tables must have at least 3 data rows — never use placeholder values
-  - Every section heading must be specific and descriptive — never generic like "Section 1"
-
-Accuracy requirements:
-  - Use exact column names, table names, SQL queries, and numbers from session responses
-  - Never invent data, statistics, or findings not present in the session or context
-  - Never generalise or paraphrase technical names — use them exactly as they appear
-  - If a piece of information is missing, note it explicitly rather than fabricating it
-
-Language requirements:
-  - Professional, insurance-industry language throughout
-  - Avoid filler phrases like "It is important to note that..." or "As mentioned above..."
-  - Use active voice where possible
-  - Tables and bullets preferred over long prose for structured information
-
-Self-check before returning JSON:
-  - Did I follow the correct document type (A, B, or C)?
-  - Did I exclude SQL content from a TYPE B document?
-  - Does every section have substantive content (not one-liners)?
-  - Are all technical names exact (not paraphrased)?
-  - Is the document comprehensive enough to stand alone as a reference?
-
-════════════════════════════════════════════════════════════
-STEP 5 — OUTPUT FORMAT
-════════════════════════════════════════════════════════════
-
-Return ONLY valid JSON. No markdown fences, no backticks, no explanation, no preamble.
-
-{{
-  "title": "Specific title based on the user's exact request",
-  "subtitle": "Document type and date — e.g. 'Governance Specification | April 2026'",
-  "author": "GovernGPT — AXA Data Governance",
-  "sections": [
-    {{
-      "heading": "Section heading",
-      "level": 1,
-      "content": [
-        {{"type": "paragraph", "text": "Detailed paragraph text of 3-5 sentences."}},
-        {{"type": "bullets", "items": [
-          "Specific finding or rule item one",
-          "Specific finding or rule item two",
-          "Specific finding or rule item three"
-        ]}},
-        {{
-          "type": "table",
-          "headers": ["Column A", "Column B", "Column C"],
-          "rows": [
-            ["Row 1 value", "Row 1 value", "Row 1 value"],
-            ["Row 2 value", "Row 2 value", "Row 2 value"],
-            ["Row 3 value", "Row 3 value", "Row 3 value"]
-          ]
-        }}
-      ]
-    }},
-    {{
-      "heading": "Subsection heading",
-      "level": 2,
-      "content": [
-        {{"type": "paragraph", "text": "Subsection detail paragraph."}}
-      ]
-    }}
-  ]
-}}
-
-════════════════════════════════════════════════════════════
-INPUTS
-════════════════════════════════════════════════════════════
-
-User's documentation request (defines topic, scope, and document type):
-{question}
-
-Session responses (source of all analytical findings and governance answers):
-{history_summary}
-
-Supporting knowledge base context (use only where directly relevant to the request):
-{context}"""),
-    ("human", "Please classify the document type and generate the JSON based on the request and session responses above."),
-])
+# Optional: lock files (keep ONE depending on your package manager)
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
