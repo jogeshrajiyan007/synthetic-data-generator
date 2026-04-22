@@ -1,852 +1,622 @@
-"""
-contract_enricher.py
-────────────────────
-Enriches a data contract JSON with AI-generated metadata using
-Databricks-hosted LLM endpoints (MLflow Deployments).
-
-Designed to be triggered as a Databricks Job by a frontend application
-via the Databricks Jobs REST API (POST /api/2.1/jobs/run-now).
-
-Flow
-----
-  Frontend App
-      │  POST /api/2.1/jobs/run-now
-      │  {
-      │    "job_id": 123,
-      │    "python_params": [
-      │      "--payload-json", "<escaped JSON string>",
-      │      "--output-table", "catalog.schema.contracts",
-      │      "--run-id",       "req-abc-123"
-      │    ]
-      │  }
-      ▼
-  Databricks Job (this script)
-      │  Enriches contract with LLM
-      │  Writes result to Delta table
-      │  (optionally POSTs result back to callback URL)
-      ▼
-  Frontend polls job status via GET /api/2.1/jobs/runs/get?run_id=...
-
-CLI Usage
----------
-# Triggered by Databricks Job (frontend path)
-python contract_enricher.py \\
-  --payload-json  '<json string from frontend>' \\
-  --output-table  'catalog.schema.enriched_contracts' \\
-  --run-id        'req-abc-123'
-
-# Local dev / testing from a file
-python contract_enricher.py \\
-  --payload       payload.json \\
-  --output        /dbfs/tmp/enriched_contract.json
-
-# Dry-run: build skeleton only, skip LLM calls
-python contract_enricher.py --payload payload.json --dry-run
-
-# List available endpoints
-python contract_enricher.py --payload payload.json --list-endpoints
-"""
-
-import argparse
-import json
-import logging
-import sys
-import time
-import uuid
-from datetime import date, datetime
-from typing import Any
-
-# ── Logging ─────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger(__name__)
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# 1. CONTRACT TEMPLATE BUILDER
-# ════════════════════════════════════════════════════════════════════════════
-
-class ContractTemplateBuilder:
-    """
-    Converts a flat payload dict (sourced from Databricks tables or API)
-    into the canonical data-contract JSON structure.
-    """
-
-    def build(self, payload: dict) -> dict:
-        """Return a fully-structured contract dict from *payload*."""
-        contract = {
-            "contract_id":   payload.get("contract_id", ""),
-            "name":          payload.get("name", ""),
-            "domain":        payload.get("domain", ""),
-            "version":       "1.0",
-            "dataset": {
-                "name":                     payload.get("target_table", ""),
-                "logicalType":              "object",
-                "physicalType":             "table",
-                "description":              payload.get("summary", ""),
-                "dataGranularityDescription": "",
-                "schema": {
-                    "type":       "object",
-                    "properties": [],
-                },
-            },
-            "servers": [],
-            "quality": {
-                "rules": {
-                    "completeness": [],
-                    "validity":     [],
-                    "accuracy":     [],
-                    "uniqueness":   [],
-                },
-            },
-            "sla": {
-                "availability": payload.get("availability", ""),
-                "support": {
-                    "source_owner_email": payload.get("data_owner", ""),
-                    "tech_support_email": payload.get("support_email", ""),
-                },
-                "slaProperties": payload.get("slaProperties", {}),
-            },
-            "changes":               "Initial version",
-            "contractCreationDate":  str(date.today()),
-            "contractLastUpdatedDate": str(date.today()),
-        }
-
-        # ── Schema properties ────────────────────────────────────────────
-        for col in payload.get("schema", []):
-            prop: dict[str, Any] = {
-                "physicalName":       col.get("columnName", ""),
-                "dataType":           col.get("dataType", ""),
-                "attributeName":      "",
-                "criticalDataElement": "Y",
-                "description":        "",
-                "isPII":              "",
-            }
-            if col.get("dataType", "").lower() == "date":
-                prop["format"] = "YYYY-MM-DD"
-            contract["dataset"]["schema"]["properties"].append(prop)
-
-        # ── Servers ──────────────────────────────────────────────────────
-        for srv in payload.get("servers", []):
-            contract["servers"].append({
-                "server": srv.get("server", ""),
-                "type":   srv.get("type", ""),
-                "config": srv.get("config", {}),
-            })
-
-        # ── Quality rules ────────────────────────────────────────────────
-        for dimension in ("completeness", "validity", "accuracy", "uniqueness"):
-            for rule in payload.get("quality", {}).get(dimension, []):
-                contract["quality"]["rules"][dimension].append({
-                    "ruleName":           "",
-                    "ruleDescription":    "",
-                    "column_name":        rule.get("column_name", ""),
-                    "ruleCondition":      rule.get("condition", rule.get("ruleCondition", "")),
-                    "ruleCriterion":      rule.get("criterion",  rule.get("ruleCriterion", "")),
-                    "ruleErrorThreshold": rule.get("ruleErrorThreshold", 5),
-                    "weight":             rule.get("weight", 1),
-                })
-
-        return contract
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# 2. LLM CLIENT
-# ════════════════════════════════════════════════════════════════════════════
-
-class LLMClient:
-    """
-    Thin wrapper around mlflow.deployments for Databricks-hosted models.
-    Handles retry logic and JSON parsing.
-    """
-
-    SYSTEM_PROMPT = (
-        "You are a data governance and insurance domain expert. "
-        "Always respond with ONLY a valid JSON object. "
-        "No explanation, no markdown, no code blocks. Just raw JSON."
-    )
-
-    def __init__(self, endpoint: str, max_tokens: int = 300,
-                 temperature: float = 0.1, retries: int = 3,
-                 retry_delay: float = 2.0):
-        try:
-            import mlflow.deployments
-            self._client   = mlflow.deployments.get_deploy_client("databricks")
-        except ImportError as exc:
-            raise RuntimeError(
-                "mlflow is not installed. Run: pip install mlflow"
-            ) from exc
-
-        self.endpoint    = endpoint
-        self.max_tokens  = max_tokens
-        self.temperature = temperature
-        self.retries     = retries
-        self.retry_delay = retry_delay
-
-    # ── public ───────────────────────────────────────────────────────────
-
-    def ask(self, prompt: str) -> str:
-        """Call the LLM and return the raw text response."""
-        for attempt in range(1, self.retries + 1):
-            try:
-                response = self._client.predict(
-                    endpoint=self.endpoint,
-                    inputs={
-                        "messages": [
-                            {"role": "system", "content": self.SYSTEM_PROMPT},
-                            {"role": "user",   "content": prompt},
-                        ],
-                        "max_tokens":  self.max_tokens,
-                        "temperature": self.temperature,
-                    },
-                )
-                return response["choices"][0]["message"]["content"].strip()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Attempt %d/%d failed: %s", attempt, self.retries, exc)
-                if attempt < self.retries:
-                    time.sleep(self.retry_delay)
-        logger.error("All %d attempts failed.", self.retries)
-        return ""
-
-    def ask_json(self, prompt: str, context: str = "") -> dict:
-        """Call the LLM and parse the response as JSON."""
-        raw = self.ask(prompt)
-        if not raw:
-            return {}
-        try:
-            clean = raw.replace("```json", "").replace("```", "").strip()
-            return json.loads(clean)
-        except json.JSONDecodeError:
-            logger.warning("JSON parse failed [%s]:\n%s", context, raw)
-            return {}
-
-    def list_endpoints(self) -> list:
-        """Return all available serving endpoints."""
-        return self._client.list_endpoints()
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# 3. CONTRACT ENRICHER
-# ════════════════════════════════════════════════════════════════════════════
-
-class ContractEnricher:
-    """
-    Uses an LLMClient to fill in the empty fields of a data contract:
-      - dataset.dataGranularityDescription
-      - schema properties: attributeName, description, isPII
-      - quality rules: ruleName, ruleDescription
-    """
-
-    def __init__(self, llm: LLMClient):
-        self.llm = llm
-
-    # ── public entry point ───────────────────────────────────────────────
-
-    def enrich(self, contract: dict) -> dict:
-        """Enrich *contract* in-place and return it."""
-        self._enrich_granularity(contract)
-        self._enrich_columns(contract)
-        self._enrich_all_rules(contract)
-        return contract
-
-    # ── private helpers ──────────────────────────────────────────────────
-
-    def _enrich_granularity(self, contract: dict) -> None:
-        dataset  = contract["dataset"]
-        col_names = [p["physicalName"]
-                     for p in dataset["schema"]["properties"]]
-
-        prompt = f"""
-Dataset name        : {dataset['name']}
-Dataset description : {dataset['description']}
-Columns             : {', '.join(col_names)}
-
-Write a dataGranularityDescription (1-2 sentences) explaining what ONE
-single row in this dataset represents. Be specific to the insurance context.
-
-Return ONLY:
-{{
-  "dataGranularityDescription": "<your answer>"
-}}
-"""
-        parsed = self.llm.ask_json(prompt, "dataGranularityDescription")
-        value  = parsed.get("dataGranularityDescription", "")
-        if value:
-            dataset["dataGranularityDescription"] = value
-            logger.info("✅ dataGranularityDescription set")
-        else:
-            logger.warning("⚠️  dataGranularityDescription — no value returned")
-
-    def _enrich_columns(self, contract: dict) -> None:
-        dataset_desc = contract["dataset"]["description"]
-        props        = contract["dataset"]["schema"]["properties"]
-        total        = len(props)
-
-        logger.info("Enriching %d columns …", total)
-
-        for idx, prop in enumerate(props, start=1):
-            name  = prop["physicalName"]
-            dtype = prop["dataType"]
-            fmt   = prop.get("format", "N/A")
-
-            prompt = f"""
-You are enriching a data contract for an insurance dataset.
-Dataset context : "{dataset_desc}"
-
-Column physical name : {name}
-Data type            : {dtype}
-Format               : {fmt}
-
-PII means any data that could directly or indirectly identify a real person
-(names, addresses, phone numbers, email, ID numbers, zip codes, DOB, etc.).
-
-Return ONLY:
-{{
-  "attributeName" : "<human-friendly display name>",
-  "description"   : "<1-2 sentence business description in insurance context>",
-  "isPII"         : "true" or "false"
-}}
-"""
-            parsed = self.llm.ask_json(prompt, name)
-            if parsed:
-                prop["attributeName"] = parsed.get("attributeName", "")
-                prop["description"]   = parsed.get("description", "")
-                prop["isPII"]         = parsed.get("isPII", "false")
-                flag = "🔴 PII" if prop["isPII"] == "true" else "🟢 Non-PII"
-                logger.info(
-                    "  [%d/%d] %-30s %s | %s",
-                    idx, total, name, flag, prop["attributeName"],
-                )
-            else:
-                logger.warning("  [%d/%d] %-30s ❌ skipped", idx, total, name)
-
-        logger.info("✅ Column enrichment complete")
-
-    def _enrich_all_rules(self, contract: dict) -> None:
-        dimensions = ("completeness", "validity", "accuracy", "uniqueness")
-        for dim in dimensions:
-            rules = contract["quality"]["rules"].get(dim, [])
-            if rules:
-                self._enrich_rules(rules, dim)
-
-    def _enrich_rules(self, rule_list: list, rule_type: str) -> None:
-        total = len(rule_list)
-        logger.info("Enriching %d [%s] rules …", total, rule_type.upper())
-
-        for idx, rule in enumerate(rule_list, start=1):
-            col       = rule.get("column_name", "")
-            condition = rule.get("ruleCondition", "")
-            criterion = rule.get("ruleCriterion", "")
-
-            prompt = f"""
-You are a data quality engineer for an insurance dataset.
-
-Rule type      : {rule_type}
-Column         : {col}
-Rule condition : {condition}
-Rule criterion : {criterion}
-
-Return ONLY:
-{{
-  "ruleName"        : "<short snake_case name, e.g. chk_policy_number_not_null>",
-  "ruleDescription" : "<1 sentence plain-English explanation of what this rule checks and why it matters>"
-}}
-"""
-            parsed = self.llm.ask_json(prompt, f"{rule_type}_{col}")
-            if parsed:
-                rule["ruleName"]        = parsed.get("ruleName", "")
-                rule["ruleDescription"] = parsed.get("ruleDescription", "")
-                logger.info(
-                    "  [%d/%d] %-30s → %s",
-                    idx, total, col, rule["ruleName"],
-                )
-            else:
-                logger.warning("  [%d/%d] %-30s ❌ skipped", idx, total, col)
-
-        logger.info("✅ [%s] rules enriched", rule_type)
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# 4. VALIDATOR
-# ════════════════════════════════════════════════════════════════════════════
-
-class ContractValidator:
-    """
-    Post-enrichment validation: checks that all expected fields are non-empty
-    and prints a summary report.
-    """
-
-    def validate(self, contract: dict) -> bool:
-        """
-        Validate *contract* and print a report.
-        Returns True if no issues were found.
-        """
-        issues: list[str] = []
-        self._check_granularity(contract, issues)
-        self._check_columns(contract, issues)
-        self._check_rules(contract, issues)
-
-        print("\n" + "=" * 60)
-        print("VALIDATION REPORT")
-        print("=" * 60)
-
-        if not issues:
-            print("🎉 All fields enriched successfully!")
-            self._print_pii_summary(contract)
-            return True
-
-        print(f"⚠️  {len(issues)} issue(s) found:")
-        for issue in issues:
-            print(f"   {issue}")
-        self._print_pii_summary(contract)
-        return False
-
-    # ── private ──────────────────────────────────────────────────────────
-
-    def _check_granularity(self, contract: dict, issues: list) -> None:
-        if not contract["dataset"].get("dataGranularityDescription"):
-            issues.append("❌ dataGranularityDescription is empty")
-        else:
-            print("✅ dataGranularityDescription : OK")
-
-    def _check_columns(self, contract: dict, issues: list) -> None:
-        props = contract["dataset"]["schema"]["properties"]
-        ok    = 0
-        for prop in props:
-            name = prop["physicalName"]
-            col_ok = True
-            if not prop.get("attributeName"):
-                issues.append(f"❌ Column [{name}] — attributeName is empty")
-                col_ok = False
-            if not prop.get("description"):
-                issues.append(f"❌ Column [{name}] — description is empty")
-                col_ok = False
-            if prop.get("isPII") not in ("true", "false"):
-                issues.append(
-                    f"❌ Column [{name}] — isPII must be 'true' or 'false', "
-                    f"got: '{prop.get('isPII')}'"
-                )
-                col_ok = False
-            if col_ok:
-                ok += 1
-        print(f"✅ Columns fully enriched : {ok}/{len(props)}")
-
-    def _check_rules(self, contract: dict, issues: list) -> None:
-        for dim in ("completeness", "validity", "accuracy", "uniqueness"):
-            rules = contract["quality"]["rules"].get(dim, [])
-            ok    = 0
-            for rule in rules:
-                col = rule.get("column_name", "?")
-                if not rule.get("ruleName"):
-                    issues.append(f"❌ [{dim}] rule [{col}] — ruleName empty")
-                elif not rule.get("ruleDescription"):
-                    issues.append(f"❌ [{dim}] rule [{col}] — ruleDescription empty")
-                else:
-                    ok += 1
-            if rules:
-                print(f"✅ {dim.capitalize():15s} rules OK : {ok}/{len(rules)}")
-
-    def _print_pii_summary(self, contract: dict) -> None:
-        props    = contract["dataset"]["schema"]["properties"]
-        pii      = [p["physicalName"] for p in props if p.get("isPII") == "true"]
-        non_pii  = [p["physicalName"] for p in props if p.get("isPII") == "false"]
-        print(f"\n🔴 PII columns     ({len(pii)}) : {pii}")
-        print(f"🟢 Non-PII columns ({len(non_pii)}) : {non_pii}")
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# 5. JOB RESULT WRITER  (Delta table output for Databricks Job use case)
-# ════════════════════════════════════════════════════════════════════════════
-
-class JobResultWriter:
-    """
-    Writes the enriched contract to a Delta table so the frontend
-    can query the result by run_id.
-
-    Table schema (auto-created if it does not exist):
-      run_id          STRING    – correlates back to the frontend request
-      contract_id     STRING
-      status          STRING    – 'success' | 'failed'
-      enriched_json   STRING    – full contract as a JSON string
-      created_at      STRING    – ISO-8601 UTC timestamp
-    """
-
-    CREATE_DDL = """
-        CREATE TABLE IF NOT EXISTS {table} (
-            run_id        STRING    NOT NULL,
-            contract_id   STRING,
-            status        STRING,
-            enriched_json STRING,
-            created_at    STRING
-        )
-        USING DELTA
-        TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true')
-    """
-
-    def __init__(self, table_name: str):
-        self.table_name = table_name
-
-    def write(self, contract: dict, run_id: str, status: str = "success") -> None:
-        try:
-            from pyspark.sql import SparkSession
-
-            spark = SparkSession.builder.getOrCreate()
-
-            # Ensure table exists
-            spark.sql(self.CREATE_DDL.format(table=self.table_name))
-
-            record = [{
-                "run_id":        run_id,
-                "contract_id":   contract.get("contract_id", ""),
-                "status":        status,
-                "enriched_json": json.dumps(contract),
-                "created_at":    datetime.utcnow().isoformat() + "Z",
-            }]
-
-            df = spark.createDataFrame(record)
-            df.createOrReplaceTempView("_contract_incoming")
-
-            # Upsert so re-runs overwrite the same run_id
-            spark.sql(f"""
-                MERGE INTO {self.table_name} AS target
-                USING _contract_incoming     AS source
-                ON target.run_id = source.run_id
-                WHEN MATCHED  THEN UPDATE SET *
-                WHEN NOT MATCHED THEN INSERT *
-            """)
-            logger.info("✅ Result written to [%s]  run_id=%s  status=%s",
-                        self.table_name, run_id, status)
-
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Failed to write to Delta table: %s", exc)
-            raise
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# 5b. CALLBACK NOTIFIER  (optional POST-back to frontend)
-# ════════════════════════════════════════════════════════════════════════════
-
-class CallbackNotifier:
-    """
-    Optionally POSTs the enriched contract back to a frontend callback URL.
-    Lets the frontend receive results without polling the Databricks Jobs API.
-    Pass --callback-url when triggering the job to enable this.
-    """
-
-    def __init__(self, callback_url: str | None):
-        self.callback_url = callback_url
-
-    def notify(self, contract: dict, run_id: str, status: str = "success") -> None:
-        if not self.callback_url:
-            return
-        try:
-            import urllib.request
-
-            body = json.dumps({
-                "run_id":   run_id,
-                "status":   status,
-                "contract": contract,
-            }).encode("utf-8")
-
-            req = urllib.request.Request(
-                self.callback_url,
-                data=body,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                logger.info("✅ Callback → %s  HTTP %s",
-                            self.callback_url, resp.status)
-        except Exception as exc:  # noqa: BLE001
-            # Never crash the job over a failed callback
-            logger.warning("Callback failed (non-fatal): %s", exc)
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# 6. ORCHESTRATOR
-# ════════════════════════════════════════════════════════════════════════════
-
-class DataContractPipeline:
-    """
-    Top-level orchestrator. Wires together all components:
-      ContractTemplateBuilder → ContractEnricher → ContractValidator
-      → JobResultWriter (Delta) → CallbackNotifier (HTTP POST-back)
-
-    Designed to be triggered as a Databricks Job by a frontend application.
-    """
-
-    DEFAULT_ENDPOINT = "databricks-meta-llama-3-3-70b-instruct"
-
-    def __init__(
-        self,
-        endpoint:      str        = DEFAULT_ENDPOINT,
-        output_path:   str | None = "/dbfs/tmp/enriched_contract.json",
-        output_table:  str | None = None,
-        callback_url:  str | None = None,
-        dry_run:       bool       = False,
-        max_tokens:    int        = 300,
-        temperature:   float      = 0.1,
-        retries:       int        = 3,
-    ):
-        self.output_path  = output_path
-        self.dry_run      = dry_run
-
-        self.builder      = ContractTemplateBuilder()
-        self.validator    = ContractValidator()
-        self.result_writer = JobResultWriter(output_table) if output_table else None
-        self.notifier     = CallbackNotifier(callback_url)
-
-        if not dry_run:
-            self.llm      = LLMClient(
-                endpoint    = endpoint,
-                max_tokens  = max_tokens,
-                temperature = temperature,
-                retries     = retries,
-            )
-            self.enricher = ContractEnricher(self.llm)
-        else:
-            self.llm      = None
-            self.enricher = None
-
-    # ── public entry point ───────────────────────────────────────────────
-
-    def run(self, payload: dict, run_id: str | None = None) -> dict:
-        """
-        Full pipeline:
-          1. Build contract skeleton from payload
-          2. Enrich with LLM  (skipped in dry-run)
-          3. Validate
-          4. Save to DBFS file  (if --output given)
-          5. Write to Delta table  (if --output-table given)
-          6. POST result to callback URL  (if --callback-url given)
-
-        Parameters
-        ----------
-        payload : dict   — raw input from frontend
-        run_id  : str    — correlation ID from frontend request (auto-generated if None)
-
-        Returns the enriched contract dict.
-        """
-        run_id = run_id or str(uuid.uuid4())
-        logger.info("▶ Pipeline start  run_id=%s", run_id)
-
-        status   = "failed"
-        contract = {}
-
-        try:
-            logger.info("Building contract template …")
-            contract = self.builder.build(payload)
-
-            if self.dry_run:
-                logger.info("Dry-run mode — skipping LLM enrichment")
-            else:
-                logger.info("Starting LLM enrichment …")
-                self.enricher.enrich(contract)
-
-            self.validator.validate(contract)
-            status = "success"
-
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Pipeline error: %s", exc)
-            contract["_error"] = str(exc)
-
-        finally:
-            # Always attempt to persist results
-            if self.output_path:
-                self._save_file(contract)
-            if self.result_writer:
-                self.result_writer.write(contract, run_id, status)
-            self.notifier.notify(contract, run_id, status)
-
-        if status == "failed":
-            sys.exit(1)   # Non-zero exit marks the Databricks job as failed
-
-        logger.info("✅ Pipeline complete  run_id=%s", run_id)
-        return contract
-
-    def list_endpoints(self) -> None:
-        if self.llm is None:
-            logger.warning("Cannot list endpoints in dry-run mode.")
-            return
-        for ep in self.llm.list_endpoints():
-            print(f"  → {ep.get('name', ep)}  [{ep.get('task', '')}]")
-
-    # ── private ──────────────────────────────────────────────────────────
-
-    def _save_file(self, contract: dict) -> None:
-        try:
-            with open(self.output_path, "w", encoding="utf-8") as fh:
-                json.dump(contract, fh, indent=4)
-            logger.info("✅ Contract saved → %s", self.output_path)
-        except OSError as exc:
-            logger.error("Could not save contract file: %s", exc)
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# 7. CLI
-# ════════════════════════════════════════════════════════════════════════════
-
-def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="contract_enricher",
-        description=(
-            "Enrich a data contract JSON with AI-generated metadata. "
-            "Designed to be triggered as a Databricks Job by a frontend application."
-        ),
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-
-    # ── Input: payload (file path OR inline JSON string) ─────────────────
-    input_group = parser.add_mutually_exclusive_group(required=True)
-    input_group.add_argument(
-        "--payload",
-        metavar="FILE",
-        help="Path to a JSON file containing the payload (local dev / testing).",
-    )
-    input_group.add_argument(
-        "--payload-json",
-        metavar="JSON_STRING",
-        help=(
-            "Payload as an escaped JSON string. "
-            "This is how Databricks Jobs pass parameters: "
-            "python_params: ['--payload-json', '<json>']"
-        ),
-    )
-
-    # ── Correlation: run ID from frontend ─────────────────────────────────
-    parser.add_argument(
-        "--run-id",
-        metavar="RUN_ID",
-        default=None,
-        help=(
-            "Correlation ID from the frontend request (e.g. a UUID). "
-            "Auto-generated if not provided. "
-            "Stored in the output Delta table for the frontend to query."
-        ),
-    )
-
-    # ── LLM / model endpoint ──────────────────────────────────────────────
-    parser.add_argument(
-        "--endpoint",
-        default=DataContractPipeline.DEFAULT_ENDPOINT,
-        help="Databricks model serving endpoint name.",
-    )
-    parser.add_argument(
-        "--max-tokens",
-        type=int,
-        default=300,
-        help="Maximum tokens per LLM call.",
-    )
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=0.1,
-        help="Sampling temperature (lower = more deterministic).",
-    )
-    parser.add_argument(
-        "--retries",
-        type=int,
-        default=3,
-        help="Number of LLM retries on transient failure.",
-    )
-
-    # ── Output: file path (local/DBFS) ────────────────────────────────────
-    parser.add_argument(
-        "--output",
-        default=None,
-        help=(
-            "File path for the enriched contract JSON "
-            "(e.g. /dbfs/tmp/contract.json or a Unity Catalog Volume path). "
-            "Optional when --output-table is given."
-        ),
-    )
-
-    # ── Output: Delta table (primary output for job use case) ─────────────
-    parser.add_argument(
-        "--output-table",
-        default=None,
-        metavar="CATALOG.SCHEMA.TABLE",
-        help=(
-            "Fully-qualified Delta table to write the enriched contract into. "
-            "The table is created automatically if it does not exist. "
-            "The frontend can poll this table using the run_id column."
-        ),
-    )
-
-    # ── Callback: optional POST-back to frontend ──────────────────────────
-    parser.add_argument(
-        "--callback-url",
-        default=None,
-        metavar="URL",
-        help=(
-            "HTTP(S) endpoint to POST the enriched contract to on completion. "
-            "Lets the frontend receive results without polling. "
-            "A failed POST is logged as a warning but does not fail the job."
-        ),
-    )
-
-    # ── Utility flags ─────────────────────────────────────────────────────
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Build the contract skeleton without calling the LLM (for testing).",
-    )
-    parser.add_argument(
-        "--list-endpoints",
-        action="store_true",
-        help="Print available Databricks serving endpoints and exit.",
-    )
-    parser.add_argument(
-        "--print-contract",
-        action="store_true",
-        help="Print the final enriched contract JSON to stdout.",
-    )
-
-    return parser
-
-
-def load_payload(args: argparse.Namespace) -> dict:
-    """Load and return the payload dict from CLI args."""
-    if args.payload:
-        with open(args.payload, "r", encoding="utf-8") as fh:
-            return json.load(fh)
-    return json.loads(args.payload_json)
-
-
-def main(argv: list[str] | None = None) -> None:
-    parser = build_arg_parser()
-    args   = parser.parse_args(argv)
-
-    # Validate: at least one output must be specified
-    if not args.dry_run and not args.output and not args.output_table:
-        parser.error(
-            "Specify at least one output: --output <file> or --output-table <table>"
-        )
-
-    pipeline = DataContractPipeline(
-        endpoint     = args.endpoint,
-        output_path  = args.output,
-        output_table = args.output_table,
-        callback_url = args.callback_url,
-        dry_run      = args.dry_run,
-        max_tokens   = args.max_tokens,
-        temperature  = args.temperature,
-        retries      = args.retries,
-    )
-
-    if args.list_endpoints:
-        pipeline.list_endpoints()
-        return
-
-    payload  = load_payload(args)
-    contract = pipeline.run(payload, run_id=args.run_id)
-
-    if args.print_contract:
-        print(json.dumps(contract, indent=4))
-
-
-if __name__ == "__main__":
-    main()
+AXA GovernGPT
+Platform Architecture & Technical Reference
+Version 4.0.0  |  AXA Global Business Services  |  DAAS DMG Team
+Author: Jogesh Rajiyan, Analyst II — Data Quality & Governance
+Classification: Internal  |  Domain: Insurance
+1. Executive Summary
+AXA GovernGPT is an enterprise-grade AI-powered Data Governance platform built for AXA Insurance. It combines a Retrieval-Augmented Generation (RAG) engine for governance knowledge with a live agentic SQL execution layer against Databricks, and a professional document generation capability. The platform is designed to enable Data Governance teams, Data Engineers, and Business Analysts to interrogate complex insurance datasets, enforce data governance policies, and produce professional documentation — all through a single conversational interface.
+GovernGPT is built on FastAPI (Python 3.11), Next.js 14, ChromaDB, LangChain 0.2.x, and GPT-4o via the AXA SecureGPT Hub (Azure OpenAI OAuth2). Embeddings are generated locally using the all-MiniLM-L6-v2 model — no data leaves the AXA network for embedding operations.
+2. System Architecture Overview
+GovernGPT is structured as a two-tier application: a Python backend exposing a REST API, and a React/Next.js frontend. They communicate exclusively over HTTP. All AI inference routes through the AXA SecureGPT Hub — no direct OpenAI API calls are made.
+2.1 Technology Stack
+2.2 Directory Structure
+The project uses two separate root directories:
+StealthProject-Sandbox/
+backend/                  ← FastAPI application root
+main.py                 ← App factory, lifespan, router registration
+config.py               ← SecureGPT credentials, paths, governance taxonomy
+auth.py                 ← Thread-safe OAuth2 TokenManager
+llm.py                  ← SecureGPTChat wrapper, embeddings singleton
+db.py                   ← SQLite utilities (WAL mode, auto-schema)
+models/schemas.py       ← Pydantic request/response models
+routers/                ← FastAPI route handlers
+ingest.py             ←   POST /api/ingest
+query.py              ←   POST /api/query/
+databricks.py         ←   /api/databricks/*
+sql_agent.py          ←   /api/sql-agent/*
+document.py           ←   /api/document/*
+services/
+rag.py                ← Hybrid RAG + SQL Agent routing engine
+ingestion.py          ← File loaders, CSV profiler
+chunking.py           ← RecursiveTextSplitter + metadata enrichment
+vectorstore.py        ← ChromaDB build/load/add
+memory.py             ← SQLite conversation history
+document_generator.py ← LLM → JSON → Node.js → .docx pipeline
+databricks/
+client.py           ←   AES-256 PAT store, SQL execution
+catalog.py          ←   Hive Metastore + Unity Catalog browser
+profiler.py         ←   Statistical profiling, PII detection
+ingestion.py        ←   Profile → chunk → vectorise pipeline
+approved_sources.py ←   Per-session SQL whitelist (SQLite)
+chroma_db/              ← Persisted ChromaDB vector store
+llm_logs.db             ← SQLite: history, logs, connections
+generated_docs/         ← Output .docx files
+models/all-MiniLM-L6-v2/ ← Local embedding model
+frontend-governgpt/       ← Next.js 14 application root
+src/
+app/                  ← Next.js App Router
+components/           ← React components
+chat/               ←   ChatWindow, MessageBubble, PromptGuidePanel
+databricks/         ←   DatabricksPanel, CatalogBrowser, ConnectModal
+sources/            ←   SourcePanel, UploadDropzone, FileItem
+session/            ←   SessionGrid, CreateSessionModal
+lib/api.ts            ← Type-safe HTTP client
+store/index.ts        ← Zustand store (persisted)
+types/index.ts        ← Shared TypeScript interfaces
+3. RAG Engine — Conversational Document Intelligence
+The RAG (Retrieval-Augmented Generation) engine is the core knowledge layer of GovernGPT. It ingests structured and unstructured documents, builds a persistent vector store, and answers governance questions by retrieving semantically relevant context and passing it to GPT-4o. All conversation turns are stored in SQLite for multi-turn memory.
+3.1 Document Ingestion Pipeline
+The ingestion pipeline processes 12 file types through format-specific loaders:
+3.2 Chunking and Metadata Enrichment
+After loading, all documents pass through chunk_and_enrich() which uses LangChain's RecursiveCharacterTextSplitter (chunk_size=800, overlap=100, separators: \n\n, \n, '. ', ' ').
+Each chunk receives a rich metadata envelope persisted to both ChromaDB and SQLite:
+3.3 Vector Store (ChromaDB)
+Chunks are embedded using all-MiniLM-L6-v2 (384-dimensional vectors, L2-normalised) and stored in a persistent ChromaDB collection named 'governance_docs'. All metadata values are flattened to strings before storage (ChromaDB rejects lists/booleans). The vector store persists on disk at chroma_db/ and survives server restarts.
+The retriever uses Maximum Marginal Relevance (MMR) search:
+fetch_k = k × 6 candidates retrieved by cosine similarity
+k × 2 selected by MMR algorithm (diversity over pure relevance)
+Multi-source guarantee: if only 1 source represented, force-fetches from all other source files
+Excluded tables: chunks from removed Databricks ingest items are filtered before context is built
+1,500 character truncation per chunk prevents context window overflow
+3.4 Query Routing: 3-Stage Gate
+Every query entering query_governance() passes through a 3-stage routing gate before any LLM call:
+3.5 Standard RAG Path (NOT_SQL intent)
+When a query is classified as NOT_SQL, the standard conversational RAG chain executes:
+Step 1 — Condense: if chat_history is non-empty, GPT-4o rewrites the question into a self-contained standalone question incorporating conversation context
+Step 2 — Retrieve: MMR retriever fetches k=5 chunks from ChromaDB using the condensed question
+Step 3 — Format: chunks are formatted with [Source: filename] headers
+Step 4 — Answer: QA_PROMPT passes context + history + question to GPT-4o
+Step 5 — Persist: human and AI messages saved to conversation_history in SQLite
+The QA_PROMPT embeds a full insurance-industry expert persona covering Data Architecture, Data Engineering, Modelling, Governance/Compliance (GDPR, Solvency II, IFRS 17, BCBS 239), AI/Analytics, and BI/Reporting. Response structure templates are provided for each question type.
+3.6 Conversation Memory
+4. SQL Agent — Agentic Live Data Analysis
+The SQL Agent is a 6-step agentic loop that classifies user intent, generates SQL, executes it against live Databricks tables, interprets results, and surfaces governance signals. It is activated only when SQL Agent is toggled ON and approved tables exist in the session.
+4.1 Databricks Connection Management
+Connections are stored in SQLite with the PAT encrypted using AES-256 (Fernet):
+User provides: connection name, workspace URL, HTTP path, PAT, default catalog
+PAT is encrypted via encrypt_pat() before SQLite storage — never stored in plaintext
+Decryption key derived from CLIENT_ID + CLIENT_SECRET + '_governgpt_key' via PBKDF2-HMAC-SHA256
+Connection tested at save time via Databricks SQL Connector test query
+Each connection assigned a UUID connection_id referenced in all subsequent calls
+4.2 Table Ingestion into Knowledge Set
+Before SQL queries can run, tables must be profiled and ingested:
+4.3 The 6-Step Agentic Loop
+Once intent is confirmed as SQL (Stage 3 gate passed), run_sql_agent() executes:
+4.4 Security Architecture
+5. Document Generation (.docx)
+GovernGPT can produce professional Word documents (.docx) on demand. The pipeline uses a 3-step approach: LLM generates structured JSON, a Node.js script builds the document using the docx@9.6.1 library, and the file is served for download.
+5.1 Trigger Detection
+The frontend's DOC_TRIGGER regex detects documentation requests before sending to the API:
+/(create|generate|write|produce|build|make|prepare|draft|design)
+.{0,30}(documentation|document|report|data catalog|catalog|
+summary report|write-up|briefing|specification|data dictionary|runbook)/i
+Matched queries bypass the RAG/SQL path and call POST /api/document/generate directly.
+5.2 Generation Pipeline
+6. Frontend Architecture
+6.1 Application Structure
+The frontend is a Next.js 14 App Router application with no server-side data fetching — all data flows through the api.ts client to the FastAPI backend.
+6.2 State Management (Zustand)
+Global state is managed by a single Zustand store (store/index.ts) persisted to localStorage:
+6.3 SQL Approval Flow
+SQL approval follows a strict explicit-consent model:
+Ingest via ↓ button in CatalogBrowser → table appears in INGESTED TABLES section
+'Use SQL' toggle on TableIngestCard → calls handleToggleApprove → setApprovedTables() in store
+Sync call to POST /api/sql-agent/approved-sources/sync keeps backend SQLite in sync
+ChatWindow reads approvedTables from store; hasSqlSources = approvedTables.length > 0
+SQL Agent toggle in settings disabled when hasSqlSources = false
+When last table toggled off or removed: clearApprovedTables() removes entire session key from store
+On mount: reconciliation effect removes stale approvals for non-existent ingest items
+excludedTables computed as ingestedFullTables.filter(t => !approvedTables.includes(t)) and sent with every query
+7. End-to-End Data Flow
+7.1 File Ingestion Flow
+User drags file onto UploadDropzone → POST /api/ingest with file + knowledge_set
+Backend saves to loading_zone/, runs format-specific loader, builds Documents
+chunk_and_enrich(): RecursiveTextSplitter (800/100) → metadata enrichment → SQLite persist
+build_vector_store() or add_to_vector_store(): embed via all-MiniLM-L6-v2 → ChromaDB
+Response: chunk count, row count, duration. File appears in Sources panel.
+7.2 RAG Query Flow
+User types question → ChatWindow sendMessage() → POST /api/query/
+query.py passes request to query_governance() with excluded_tables from frontend
+Stage 1: _keyword_intent() — instant regex classification
+Stage 2: LLM intent classifier if ambiguous (INTENT_PROMPT → GPT-4o)
+Stage 3: Gate — NOT_SQL raises StopIteration → falls to RAG path
+RAG: condense question → MMR retrieve (k=5, filtered) → format docs → QA_PROMPT → GPT-4o
+save_turn() persists to SQLite. Response includes sources_used, chunks_retrieved, tokens.
+7.3 SQL Agent Query Flow
+Stage 3 gate confirms SQL intent → run_sql_agent() called with intent_override
+Step 2: THINK_ALOUD_PROMPT → GPT-4o → italic strip shown in chat
+Step 3: SQL_GENERATION_PROMPT (stateless, intent-aware) → GPT-4o → single SQL statement
+Pre-execution: DDL block + table whitelist check → OUT_OF_SCOPE if either fails
+Step 4: DatabricksClient.execute_query() → list of row dicts (max 200)
+Step 5: INTERPRETATION_PROMPT (stateless) → GPT-4o → 2-4 bullet findings
+Step 6: GOVERNANCE_OVERLAY_PROMPT (if governance context present) → ⚠️ note
+Response: sql_intent, sql_executed, sql_results[], sql_row_count, think_aloud, governance_note
+7.4 Document Generation Flow
+ChatWindow DOC_TRIGGER regex matches → api.document.generate() → POST /api/document/generate
+Router: load full session history (get_full_history) + RAG context from ChromaDB
+DOC_CONTENT_PROMPT → GPT-4o → structured JSON (title, sections[], bullets, tables)
+Write gen_{uuid}.js to generated_docs/, execute with NODE_PATH=backend/node_modules
+docx@9.6.1 builds AXA-branded .docx, Packer.toBuffer → write file
+Cleanup temp JS. Return {file_name, download_url, title, section_count}
+MessageBubble renders download card with 'Download .docx' button
+8. API Reference
+9. SQLite Database Schema
+All relational state is stored in llm_logs.db (WAL journal mode, 30s busy timeout):
+10. Built-in Governance & Compliance Framework
+10.1 PII Detection
+PII signals are scanned at ingest time and at query time:
+Ingest-time: chunking.py scans for SSN, Aadhar, passport, DOB, bank account, credit card, policy number, claimant ID
+Profiler-time: _detect_pii_type() checks column names in Databricks tables
+Query-time: governance_overlay generates ⚠️ PII warnings when PII-containing chunks are retrieved
+10.2 Sensitivity Classification
+10.3 Insurance Regulatory Coverage
+11. Sequential Prompting Framework
+GovernGPT is optimised for a 3-phase analytical workflow. Mixing phases causes routing conflicts and degrades response quality. The ⓘ button in the chat header opens an interactive version of this guide.
+12. Deployment & Configuration
+12.1 Prerequisites
+12.2 Key pip Packages
+pip install fastapi uvicorn langchain langchain-openai langchain-community
+langchain-core langchain-text-splitters langchain-huggingface
+chromadb sentence-transformers databricks-sql-connector
+cryptography pandas openpyxl pypdf unstructured python-docx
+pillow pytesseract httpx
+12.3 Starting the Application
+Backend (from backend/ directory)
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+Frontend (from frontend-governgpt/ directory)
+npm run dev        # development — http://localhost:3000
+npm run build && npm start  # production
+12.4 Environment Notes
+config.py contains AXA SecureGPT credentials — do not commit to public repositories
+chroma_db/ and llm_logs.db persist all data — back up before server migrations
+generated_docs/ contains .docx files — clean periodically or implement TTL
+The all-MiniLM-L6-v2 model must be present locally — embedding fails silently otherwise
+SSL verification is disabled for AXA corporate proxy (verify=False in httpx) — intentional
+GovernGPT v4.0.0  ·  AXA Global Business Services  ·  DAAS DMG  ·  Jogesh Rajiyan
+| Core Capabilities
+• Conversational RAG over uploaded documents and Databricks table profiles
+• Agentic SQL execution with intent detection, source enforcement, and governance overlay
+• Professional .docx document generation from session context
+• SQLite-persisted conversation memory for multi-turn analysis sessions
+• AES-256 encrypted Databricks PAT storage
+• Insurance-domain expertise embedded in every LLM prompt (GDPR, Solvency II, IFRS 17) |
+| --- |
+Layer
+Technology
+Version
+Purpose
+LLM Inference
+AXA SecureGPT Hub (Azure OpenAI)
+GPT-4o-2024-05-13
+All LLM generation, intent classification, interpretation
+Embeddings
+HuggingFace all-MiniLM-L6-v2
+Local (CPU)
+Document and query embedding — runs fully offline
+Vector Store
+ChromaDB
+Persistent on disk
+Semantic similarity search over document chunks
+Backend Framework
+FastAPI + Uvicorn
+Python 3.11+
+REST API, async request handling, CORS
+LLM Orchestration
+LangChain 0.2.x (LCEL)
+>=0.2
+Prompt chains, retriever, output parsers
+Relational Store
+SQLite (WAL mode)
+Built-in
+Conversation memory, logs, connections, approvals
+Frontend
+Next.js 14 (App Router)
+14.x
+React 18 SPA with server components
+State Management
+Zustand + localStorage
+4.x
+Session state, approved tables, ingest items
+Document Generation
+docx@9.6.1 (Node.js)
+9.6.1
+Professional .docx creation via JS script
+Databricks Connector
+databricks-sql-connector
+Latest
+Live SQL execution against Databricks SQL Warehouses
+Authentication
+OAuth2 Client Credentials
+AXA OneLogin
+Thread-safe token rotation for SecureGPT Hub
+PAT Encryption
+Python cryptography (Fernet)
+AES-256
+Databricks PATs encrypted at rest in SQLite
+File Type
+Loader
+Special Handling
+.pdf
+PyPDFLoader (LangChain)
+Page-level splitting, page number preserved in metadata
+.docx / .doc
+UnstructuredWordDocumentLoader
+Structure-aware extraction preserving headings
+.csv
+Custom _profile_csv()
+Full statistical profiling — NO raw rows stored (see below)
+.xlsx / .xls
+pandas read_excel()
+Multi-sheet: each sheet becomes a separate Document
+.json
+Custom loader
+Pretty-printed JSON as single document
+.xml
+UnstructuredXMLLoader
+Tag-aware extraction
+.md
+UnstructuredMarkdownLoader
+Markdown structure preserved
+.txt
+TextLoader (UTF-8)
+Plain text, encoding-safe
+.jpg / .jpeg / .png
+Pillow + pytesseract
+OCR extraction — text from images
+| CSV Profiling: Statistical Representation (Not Raw Data)
+CSV files are NOT stored as raw rows. Instead, _profile_csv() computes a full statistical
+profile per column: dtype, null count/%, unique count, value distributions, mean/median/
+mode/std/skew/kurtosis for numerics, date ranges for temporal columns, top-20 categoricals,
+5-bucket histograms, strong correlations (|r| > 0.5), and a 5-row sample.
+The LLM receives computed insights — not raw tabular data. This prevents context overflow
+and keeps sensitive data off the LLM wire. |
+| --- |
+Metadata Field
+Source
+Purpose
+doc_id
+UUID4 generated
+Unique chunk identifier
+source_file
+File path basename
+Source attribution in responses
+source_type
+'file' or 'databricks'
+Controls RAG filtering and exclusion logic
+file_type
+Extension
+Schema context for SQL agent
+sensitivity
+Signal-based detection
+Restricted / Confidential / Internal / Public
+contains_pii
+PII keyword scan
+Triggers governance overlay warnings
+department
+Keyword scoring
+Claims / Underwriting / Compliance / Finance / IT
+governance_themes
+Taxonomy match
+GDPR / Solvency II / IFRS 17 / data quality etc.
+keywords
+TF-IDF top-8
+Searchability and relevance scoring
+owner
+Configured default
+DAAS DMG (configurable)
+ingested_at
+Timestamp
+Temporal ordering for recent data preference
+| S1 | Keyword Pre-Classifier (_keyword_intent)
+Instant regex-based classification. Catches obvious SQL patterns (table name mentioned, strong data verbs: 'show me', 'fetch', 'give me N rows') and obvious NOT_SQL patterns (analytical openers: 'why', 'how does', 'can you build'). No LLM call. Returns in <1ms. |
+| --- | --- |
+| S2 | LLM Intent Classifier (INTENT_PROMPT → GPT-4o)
+Only called if Stage 1 returns None (ambiguous). GPT-4o classifies into one of 8 intent types: SIMPLE_LOOKUP, AGGREGATION, COMPARISON, JOIN_OPERATION, MULTI_STEP, CREATE_OBJECT, OUT_OF_SCOPE, NOT_SQL. Receives the approved tables list as context so it can detect unapproved table references. |
+| --- | --- |
+| S3 | SQL Gate (Hard Block)
+Only SIMPLE_LOOKUP, AGGREGATION, COMPARISON, JOIN_OPERATION, MULTI_STEP, CREATE_OBJECT proceed to run_sql_agent(). NOT_SQL falls through via StopIteration to standard RAG. This prevents governance questions from ever reaching the SQL agent. |
+| --- | --- |
+Property
+Value
+Storage
+SQLite table: conversation_history
+Identifier
+(session_id, knowledge_set) — maps to frontend Knowledge Set project ID
+Schema
+id, session_id, knowledge_set, role, content, run_id, token_count, created_at
+Window
+DEFAULT_WINDOW_K = 6 turns (12 messages) for active context
+Full history
+get_full_history() returns all turns — used by document generator
+Persistence
+Survives server restarts. Cleared only by explicit user action.
+Journal mode
+WAL (Write-Ahead Logging) for concurrent read/write safety
+| 01 | Statistical Profiling (profiler.py)
+profile_table() connects via DatabricksClient and executes multiple analytical queries: row count, column-level null/unique/cardinality stats, numeric mean/std/min/max/percentiles, datetime ranges, top-N categorical distributions, duplicate estimation, PII detection on column names, sensitivity classification, STRUCT/ARRAY/MAP type parsing. |
+| --- | --- |
+| 02 | Document Conversion (profile_to_documents())
+Profile data is converted into LangChain Documents: one schema overview doc, one per-column-stats doc, one sample rows doc. STRUCT columns get dedicated documents with nested field rendering. All docs tagged source_type='databricks' for filtering. |
+| --- | --- |
+| 03 | Chunk → Embed → Store
+Documents pass through chunk_and_enrich() then into the ChromaDB vector store. Schema context is now available for RAG retrieval, providing the SQL agent with column names, data types, and distributions during SQL generation. |
+| --- | --- |
+| 04 | SQL Approval (Manual)
+After ingestion, the table appears in INGESTED TABLES. User toggles 'Use SQL' on the TableIngestCard. This calls setApprovedTables() in Zustand store and syncs to the backend via POST /api/sql-agent/approved-sources/sync. No auto-approval on ingest. |
+| --- | --- |
+| STEP 1 | Intent Override
+If called from rag.py with intent_override, uses the pre-classified intent directly — skips internal LLM classification. For standalone /api/sql-agent/query calls, runs keyword classifier then LLM fallback. |
+| --- | --- |
+| STEP 2 | Think Aloud (THINK_ALOUD_PROMPT)
+GPT-4o generates a 2-3 sentence plain-English explanation of what SQL it is about to run: which table, which columns, what logic. This is displayed in the chat as the italic green strip before the main answer. |
+| --- | --- |
+| STEP 3 | SQL Generation (SQL_GENERATION_PROMPT)
+Stateless: no chat_history passed. GPT-4o receives the approved tables list, detected intent, schema context from RAG, and the user question. Intent-specific examples are embedded in the prompt to enforce correct patterns: AGGREGATION → COUNT(*)/GROUP BY, DISTINCT → SELECT DISTINCT. Markdown fences stripped. Single statement enforced. |
+| --- | --- |
+| STEP 4 | Pre-Execution Validation
+Two security checks before any SQL touches Databricks: (1) PROHIBITED_PATTERNS regex blocks DROP/DELETE/INSERT/UPDATE/TRUNCATE/ALTER/GRANT/REVOKE — returns OUT_OF_SCOPE immediately. (2) _validate_tables_in_sql() extracts all FROM/JOIN references and verifies each against the approved_tables whitelist. Unapproved tables return OUT_OF_SCOPE with the table name listed. |
+| --- | --- |
+| STEP 5 | Execution (DatabricksClient)
+Multi-statement detection: if SQL contains multiple SELECTs, checks for 'all tables' keywords to run _execute_multi_table_query() (sequential SELECT * LIMIT N per approved table, capped at 5). Single statements execute via client.execute_query(limit=200). Errors translated to plain English via ERROR_TRANSLATION_PROMPT with available column names for context. |
+| --- | --- |
+| STEP 6 | Interpret + Governance Overlay
+INTERPRETATION_PROMPT (stateless — no chat_history) receives question, SQL, row_count, and first 50 result rows as JSON (capped at 8,000 chars). GPT-4o produces 2-4 bullet findings. If governance_context exists (PII/sensitivity chunks from RAG), GOVERNANCE_OVERLAY_PROMPT produces a ⚠️ governance note with PII flags, data owner, sensitivity tier. |
+| --- | --- |
+Control
+Implementation
+Coverage
+Table whitelist
+approved_tables list passed per-request, overrides SQLite read
+Prevents querying tables not explicitly approved
+DDL/DML block
+PROHIBITED_PATTERNS regex on generated SQL
+Prevents any writes/deletes to Databricks
+Table reference validation
+_validate_tables_in_sql() with approved_tables
+Catches SQL injection via table name manipulation
+PAT encryption
+Fernet AES-256, key from PBKDF2-HMAC
+PATs never stored or transmitted in plaintext
+Read-only enforcement
+SQL Connector runs with warehouse-level read permissions
+Defence in depth — even if validation bypassed
+Result row cap
+MAX_RESULT_ROWS = 200, LLM cap = 50 rows
+Prevents data exfiltration via large dumps
+| 01 | Full History Retrieval
+routers/document.py calls get_full_history() — NOT the windowed load_history(). Every turn in the session is included. Messages are formatted as a User:/Assistant: transcript capped at 12,000 characters to respect context limits. RAG context fetched from ChromaDB. |
+| --- | --- |
+| 02 | Structured JSON Generation (DOC_CONTENT_PROMPT)
+GPT-4o receives the full history transcript, RAG context (6,000 char cap), and user's document request. Returns pure JSON matching the document schema: title, subtitle, author, sections[] each with heading, level (1 or 2), and content[] items typed as paragraph, bullets, or table. Minimum 4 sections including Executive Summary and Recommendations. |
+| --- | --- |
+| 03 | Node.js .docx Assembly
+A temporary gen_{uuid}.js script is written to generated_docs/ and executed via subprocess. NODE_PATH is set to both backend/node_modules and global npm prefix for module resolution. cwd is set to backend root. The script uses docx@9.6.1 to build an AXA-branded document: AXA blue (#00008F) headings, header with title + 'AXA GovernGPT', footer with page numbers, zebra-striped tables with AXA blue headers, US Letter format (12240×15840 DXA), 1" margins. |
+| --- | --- |
+| 04 | Serve + Cleanup
+Output .docx saved to generated_docs/{title}_{10-char-uuid}.docx. Temp JS script deleted. Download URL /api/document/download/{filename} returned. Frontend renders AXA-branded download card in MessageBubble with title, section count, and Download .docx button. |
+| --- | --- |
+| Documentation Best Practice
+For best results, explicitly specify what to include rather than 'document everything':
+"Create a data governance report covering: (1) claims_casualty_bronze schema, (2) claim
+status distribution from SQL analysis, (3) monthly filing trends, (4) GDPR compliance gaps."
+This prevents the LLM from processing the full chat history blindly and reduces hallucination. |
+| --- |
+Component
+File
+Responsibility
+Session Grid
+session/SessionGrid.tsx
+Landing page — create/open/delete Knowledge Set projects
+Workspace
+Workspace.tsx
+Root layout: splits SourcePanel (left) and ChatWindow (right)
+Source Panel
+sources/SourcePanel.tsx
+File upload tab + Databricks tab container
+Upload Dropzone
+sources/UploadDropzone.tsx
+Drag-and-drop file ingestion, progress tracking
+Databricks Panel
+databricks/DatabricksPanel.tsx
+Connection management, catalog browse, SQL approval
+Catalog Browser
+databricks/CatalogBrowser.tsx
+Hierarchical catalog → schema → table tree (ingest-only, no auto-approve)
+Table Ingest Card
+databricks/TableIngestCard.tsx
+Shows ingested table stats + Use SQL / SQL On toggle
+Connect Modal
+databricks/ConnectModal.tsx
+New connection form (Field component defined at module level — prevents focus loss)
+Chat Window
+chat/ChatWindow.tsx
+Message list, input, settings, SQL agent toggle, doc detection
+Message Bubble
+chat/MessageBubble.tsx
+Renders: think-aloud, SQL results table, view SQL, governance note, source tags, doc download card
+Prompt Guide Panel
+chat/PromptGuidePanel.tsx
+Sequential prompting guide side panel (ⓘ button)
+State Slice
+Type
+Description
+sessions
+KnowledgeSet[]
+All project sessions with metadata
+files
+Record<sessionId, SourceFile[]>
+Uploaded file list and ingest status per session
+chats
+Record<sessionId, ChatMessage[]>
+Full message history per session (in-memory only)
+tokenUsage
+Record<sessionId, TokenUsage>
+Cumulative token counts for display
+databricksConnections
+DatabricksConnection[]
+Saved connections (shared across sessions)
+databricksIngestItems
+Record<sessionId, DatabricksIngestItem[]>
+Per-session ingested table cards with status
+approvedTables
+Record<sessionId, {connection_id, tables[]}>
+SQL-approved tables per session (persisted to localStorage)
+Method
+Endpoint
+Purpose
+Key Parameters
+POST
+/api/ingest
+Ingest uploaded files into knowledge set
+file (multipart), knowledge_set
+POST
+/api/query/
+Hybrid RAG + SQL Agent query
+question, knowledge_set, session_id, enable_sql_agent, approved_tables, excluded_tables
+GET
+/api/query/history/{session_id}
+Retrieve full conversation history
+session_id, knowledge_set
+DELETE
+/api/query/history/{session_id}
+Clear conversation memory
+session_id, knowledge_set
+POST
+/api/databricks/connect
+Save a new Databricks connection
+connection_name, workspace_url, http_path, pat, catalog
+GET
+/api/databricks/{conn_id}/catalogs
+List catalogs in connection
+connection_id
+GET
+/api/databricks/{conn_id}/schemas/{catalog}
+List schemas
+connection_id, catalog
+GET
+/api/databricks/{conn_id}/tables/{catalog}/{schema}
+List tables
+connection_id, catalog, schema
+POST
+/api/databricks/{conn_id}/ingest
+Profile + vectorise a Databricks table
+connection_id, knowledge_set, catalog, db_schema, table
+POST
+/api/sql-agent/approved-sources/sync
+Sync approved table list
+session_id, knowledge_set, connection_id, tables[]
+GET
+/api/sql-agent/approved-sources
+Get approved tables for session
+session_id, knowledge_set
+POST
+/api/document/generate
+Generate .docx from session context
+question, knowledge_set, session_id
+GET
+/api/document/download/{filename}
+Download generated .docx
+filename
+GET
+/health
+System health check
+—
+Table
+Key Columns
+Purpose
+conversation_history
+session_id, knowledge_set, role, content, run_id, token_count, created_at
+Full conversation memory — all turns, all sessions
+llm_responses
+run_id, question, answer, mode, sources_used, sql_intent, sql_executed, sql_row_count, tokens
+Audit log of all LLM responses
+databricks_connections
+connection_id, connection_name, workspace_url, encrypted_pat, http_path, catalog
+Saved Databricks connections (PAT AES-256 encrypted)
+approved_sources
+session_id, knowledge_set, connection_id, full_table, catalog, db_schema, table_name
+Per-session SQL-approved tables (backend mirror of Zustand store)
+sql_agent_log
+run_id, session_id, intent, sql, row_count, duration_seconds, has_error
+SQL execution audit trail
+document_chunks
+doc_id, source_file, source_type, sensitivity, contains_pii, department, governance_themes, keywords
+Metadata for every ingested chunk
+Tier
+Trigger Keywords
+Default Behaviour
+Restricted
+confidential, restricted, secret, internal only
+Highest governance overlay priority
+Confidential
+personal, private, sensitive, medical, claimant
+PII masking suggestions surfaced
+Internal
+internal, proprietary, not for distribution
+Standard governance note
+Public
+(no trigger matched)
+Minimal governance overhead
+Regulation
+Coverage in GovernGPT
+GDPR
+PII detection, data subject rights context, retention policy Q&A, sensitivity flagging
+Solvency II
+Risk data quality requirements, pillar III reporting context, SCR/MCR data lineage Q&A
+IFRS 17
+Insurance contract data modelling, GMM/PAA measurement approach context
+BCBS 239
+Data aggregation principles, risk reporting accuracy, timeliness requirements
+Phase
+SQL State
+Question Types
+Example Prompts
+01 — Dataset Exploration
+USE SQL OFF
+Schema, ownership, governance, DQ, compliance
+What are these documents about? / What key fields are in this dataset? / What governance frameworks apply?
+02 — SQL Analysis
+USE SQL ON
+Live data queries, distributions, aggregations, trends
+Show me first 10 rows / How many claims by status? / What is the average resolution time?
+03 — Documentation
+Either
+Document requests with explicit scope
+Create a governance report covering schema, DQ findings, SQL results, and GDPR gaps.
+| Anti-Patterns to Avoid
+✗ Asking SQL data queries with USE SQL OFF → falls to RAG, returns documentation-style answers
+✗ Asking governance questions with USE SQL ON → SQL agent may attempt to classify as SQL
+✗ Asking 'document everything' → LLM processes full history blindly; specify what to include
+✗ Removing a table from ingest without toggling SQL Off first → stale approval counts |
+| --- |
+Dependency
+Version
+Installation
+Python
+3.11+
+python.org
+Node.js
+18+ (22.x tested)
+nodejs.org
+npm docx package
+9.6.1
+npm install docx (in backend/ directory)
+pip packages
+see below
+pip install -r requirements.txt --break-system-packages
+Local embedding model
+all-MiniLM-L6-v2
+Download to backend/models/all-MiniLM-L6-v2/
+Databricks SQL Connector
+Latest
+pip install databricks-sql-connector
