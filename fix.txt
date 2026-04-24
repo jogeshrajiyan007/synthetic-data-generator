@@ -1,85 +1,242 @@
-ERROR:    Exception in ASGI application
-Traceback (most recent call last):
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 421, in run_asgi
-    result = await app(  # type: ignore[func-returns-value]
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 56, in __call__
-    return await self.app(scope, receive, send)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\fastapi\applications.py", line 1159, in __call__
-    await super().__call__(scope, receive, send)
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\starlette\applications.py", line 90, in __call__
-    await self.middleware_stack(scope, receive, send)
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\starlette\middleware\errors.py", line 186, in __call__
-    raise exc
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\starlette\middleware\errors.py", line 164, in __call__
-    await self.app(scope, receive, _send)
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\starlette\middleware\cors.py", line 96, in __call__
-    await self.simple_response(scope, receive, send, request_headers=headers)
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\starlette\middleware\cors.py", line 154, in simple_response
-    await self.app(scope, receive, send)
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\starlette\middleware\exceptions.py", line 63, in __call__
-    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
-    raise exc
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
-    await app(scope, receive, sender)
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\fastapi\middleware\asyncexitstack.py", line 18, in __call__
-    await self.app(scope, receive, send)
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\starlette\routing.py", line 660, in __call__
-    await self.middleware_stack(scope, receive, send)
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\starlette\routing.py", line 680, in app
-    await route.handle(scope, receive, send)
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\starlette\routing.py", line 276, in handle
-    await self.app(scope, receive, send)
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\fastapi\routing.py", line 134, in app
-    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
-    raise exc
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
-    await app(scope, receive, sender)
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\fastapi\routing.py", line 120, in app
-    response = await f(request)
-               ^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\fastapi\routing.py", line 674, in app
-    raw_response = await run_endpoint_function(
-                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\fastapi\routing.py", line 328, in run_endpoint_function
-    return await dependant.call(**values)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\backend\routers\query.py", line 53, in query_endpoint
-    result   = query_governance(
-               ^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\backend\services\rag.py", line 534, in query_governance
-    llm_response = llm.invoke(qa_messages)
-                   ^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\langchain_core\language_models\chat_models.py", line 455, in invoke
-    self.generate_prompt(
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\langchain_core\language_models\chat_models.py", line 1198, in generate_prompt
-    return self.generate(prompt_messages, stop=stop, callbacks=callbacks, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\langchain_core\language_models\chat_models.py", line 1005, in generate
-    self._generate_with_cache(
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\langchain_core\language_models\chat_models.py", line 1310, in _generate_with_cache
-    result = self._generate(
-             ^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\langchain_openai\chat_models\base.py", line 1504, in _generate
-    _handle_openai_api_error(e)
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\langchain_openai\chat_models\base.py", line 1499, in _generate
-    raw_response = self.client.with_raw_response.create(**payload)
-                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\openai\_legacy_response.py", line 367, in wrapped
-    return cast(LegacyAPIResponse[R], func(*args, **kwargs))
-                                      ^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\openai\_utils\_utils.py", line 287, in wrapper
-    return func(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\openai\resources\chat\completions\completions.py", line 1211, in create
-    return self._post(
-           ^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\openai\_base_client.py", line 1314, in post
-    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))
-                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\GovernGPT\venv\Lib\site-packages\openai\_base_client.py", line 1087, in request
-    raise self._make_status_error_from_response(err.response) from None
-openai.NotFoundError: Error code: 404 - {'code': 'NotFound', 'message': 'The requested resource was not found', 'details': []}
+WITH requisitions_applications AS (
+  SELECT DISTINCT
+    System_ID AS requisition_id,
+    job_id,
+    requisition_status,
+    requisition_creation_date,
+    requisition_approval_date,
+    requisition_effective_start_date,
+    requisition_effective_end_date,
+    requisition_updated_date,
+    requisition_filled_date,
+    requisition_assignment_category,
+    requisition_contract_type,
+    reason_of_hire,
+    confidential_flag,
+    number_of_openings,
+    Legal_Entity_External_ID,
+    Department_External_ID,
+    Business_Unit,
+    Worker_Category,
+    Local_Grade_External_ID,
+    global_grade_name,
+    Core_HR_Professional_Sub_Families,
+    DIM_APPLICATION.dim_application_key,
+    DIM_APPLICATION.application_id,
+    DIM_APPLICATION.application_status,
+    DIM_APPLICATION.application_effective_start_date,
+    DIM_APPLICATION.application_effective_end_date
+  FROM ghro.silver_requisition SR
+  LEFT JOIN ghro.dim_application DIM_APPLICATION
+    ON SR.system_id = DIM_APPLICATION.requisition_id
+),
+
+--------------------------------------------------------------------------------
+-- LOGIQUE: recréer systématiquement les dates à partir de application_effective_end_date
+--------------------------------------------------------------------------------
+
+-- 1) source propre des statuts avec l'ordre et la date effective
+status_dates AS (
+  SELECT
+    a.application_id,
+    LOWER(TRIM(a.application_status)) AS application_status,
+    s.application_status_order,
+    a.application_effective_end_date
+  FROM ghro.dim_application a
+  JOIN ghro.dim_application_status s
+    ON LOWER(TRIM(a.application_status)) = LOWER(TRIM(s.application_status))
+  WHERE a.application_effective_end_date IS NOT NULL
+),
+
+-- 2) récupérer une fois les ordres cibles pour lisibilité/perf
+target_orders AS (
+  SELECT
+    LOWER(TRIM(application_status)) AS application_status,
+    application_status_order
+  FROM ghro.dim_application_status
+  WHERE LOWER(TRIM(application_status)) IN ('hm interview to be scheduled', 'shared with hiring manager - non-redacted', 'shared with hiring manager - redacted', 'hm secondary review', 'hm reviewed; rejection requested', 'filled', 'hired', 'verbal offer accepted')
+),
+
+-- 3) FILLED : on récupère la 1ere date et status supérieur ou egal à 'filled' (ordre etablis grace à application_status_order)
+filled_status_dates AS (
+  SELECT
+    sd.application_id,
+    sd.application_status_order,
+    CASE WHEN sd.application_status_order >= (SELECT application_status_order FROM target_orders WHERE application_status = 'filled') THEN sd.application_effective_end_date END AS filled_date_computed,
+    CASE WHEN sd.application_status_order >= (SELECT application_status_order FROM target_orders WHERE application_status = 'filled') THEN sd.application_status END AS application_status_computed
+  FROM status_dates sd
+),
+
+filled_ranked AS (
+  SELECT
+    *,
+    ROW_NUMBER() OVER (PARTITION BY application_id ORDER BY application_status_order ASC) AS rn
+  FROM filled_status_dates
+  WHERE filled_date_computed IS NOT NULL AND YEAR(filled_date_computed) <> 4712 --we don't want to add the date on all rows, so we keep the 1st row where it appears. And we don't want to keep the dates on 4712 (only appears on withdrew employees)
+), 
+
+-- 4) HIRED : on récupère la 1ere date et status supérieur ou egal à 'hired' (ordre etablis grace à application_status_order)
+hired_status_dates AS (
+  SELECT
+    sd.application_id,
+    sd.application_status_order,
+    CASE WHEN sd.application_status_order >= (SELECT application_status_order FROM target_orders WHERE application_status = 'hired') THEN sd.application_effective_end_date END AS hired_date_computed,
+    CASE WHEN sd.application_status_order >= (SELECT application_status_order FROM target_orders WHERE application_status = 'hired') THEN sd.application_status END AS application_status_computed
+  FROM status_dates sd
+),
+
+hired_ranked AS (
+  SELECT
+    *,
+    ROW_NUMBER() OVER (PARTITION BY application_id ORDER BY application_status_order ASC) AS rn
+  FROM hired_status_dates
+  WHERE hired_date_computed IS NOT NULL AND YEAR(hired_date_computed) <> 4712 --we don't want to add the date on all rows, so we keep the 1st row where it appears. And we don't want to keep the dates on 4712 (only appears on withdrew employees)
+), 
+
+-- 5) RECRUIT : on récupère la 1ere date et status supérieur ou egal à 'verbal offer accepted' (ordre etablis grace à application_status_order)
+recruit_status_dates AS (
+  SELECT
+    sd.application_id,
+    sd.application_status_order,
+    CASE WHEN sd.application_status_order >= (SELECT application_status_order FROM target_orders WHERE application_status = 'verbal offer accepted') THEN sd.application_effective_end_date END AS recruit_date_computed,
+    CASE WHEN sd.application_status_order >= (SELECT application_status_order FROM target_orders WHERE application_status = 'verbal offer accepted') THEN sd.application_status END AS application_status_computed
+  FROM status_dates sd
+),
+
+recruit_ranked AS (
+  SELECT
+    *,
+    ROW_NUMBER() OVER (PARTITION BY application_id ORDER BY application_status_order ASC) AS rn
+  FROM recruit_status_dates
+  WHERE recruit_date_computed IS NOT NULL AND YEAR(recruit_date_computed) <> 4712 --we don't want to add the date on all rows, so we keep the 1st row where it appears. And we don't want to keep the dates on 4712 (only appears on withdrew employees)
+),
+
+-- 6) SHORTLIST : on récupère la 1ere date et status supérieur ou egal à 'hm interview to be scheduled' (ordre etablis grace à application_status_order)
+shortlist_status_dates AS (
+  SELECT
+    sd.application_id,
+    sd.application_status_order,
+    CASE WHEN sd.application_status_order >= (SELECT application_status_order FROM target_orders WHERE application_status = 'hm interview to be scheduled') THEN sd.application_effective_end_date END AS shortlist_date_computed,
+    CASE WHEN sd.application_status_order >= (SELECT application_status_order FROM target_orders WHERE application_status = 'hm interview to be scheduled') THEN sd.application_status END AS application_status_computed
+  FROM status_dates sd
+),
+
+shortlist_ranked AS (
+  SELECT
+    *,
+    ROW_NUMBER() OVER (PARTITION BY application_id ORDER BY application_status_order ASC) AS rn
+  FROM shortlist_status_dates
+  WHERE shortlist_date_computed IS NOT NULL AND YEAR(shortlist_date_computed) <> 4712 --we don't want to add the date on all rows, so we keep the 1st row where it appears. And we don't want to keep the dates on 4712 (only appears on withdrew employees)
+)
+-- 7) RATTACHER AUX APPLICATIONS/REQUISITIONS et calculer les time_to
+SELECT
+  r.*,
+  f.filled_date_computed,
+  h.hired_date_computed,
+  v.recruit_date_computed,
+  s.shortlist_date_computed,
+  rank() over(partition by r.job_id order by f.filled_date_computed desc) as rank_filled,
+  /* TIME TO FILL (net of ON HOLD) */
+  CASE
+    WHEN f.filled_date_computed IS NOT NULL
+     AND r.requisition_approval_date IS NOT NULL
+    THEN
+      DATEDIFF(f.filled_date_computed, r.requisition_approval_date)
+      -
+      COALESCE((
+        SELECT SUM(
+                 DATEDIFF(
+                   LEAST(dr.requisition_effective_end_date, CURRENT_DATE),
+                   dr.requisition_effective_start_date
+                 )
+               )
+        FROM ghro.dim_requisition dr
+        WHERE dr.job_id = r.job_id
+          AND dr.requisition_status = 'Hold'
+          AND dr.requisition_effective_start_date IS NOT NULL
+          AND dr.requisition_effective_end_date IS NOT NULL
+      ), 0)
+  END AS time_to_fill_days,
+
+  /* TIME TO HIRE (net of ON HOLD) */
+  CASE
+    WHEN h.hired_date_computed IS NOT NULL
+     AND r.requisition_approval_date IS NOT NULL
+    THEN
+      DATEDIFF(h.hired_date_computed, r.requisition_approval_date)
+      -
+      COALESCE((
+        SELECT SUM(
+                 DATEDIFF(
+                   LEAST(dr.requisition_effective_end_date, CURRENT_DATE),
+                   dr.requisition_effective_start_date
+                 )
+               )
+        FROM ghro.dim_requisition dr
+        WHERE dr.job_id = r.job_id
+          AND dr.requisition_status = 'Hold'
+          AND dr.requisition_effective_start_date IS NOT NULL
+          AND dr.requisition_effective_end_date IS NOT NULL
+      ), 0)
+  END AS time_to_hire_days,
+
+  /* TIME TO RECRUIT (net of ON HOLD) */
+  CASE
+    WHEN v.recruit_date_computed IS NOT NULL
+     AND r.requisition_approval_date IS NOT NULL
+    THEN
+      DATEDIFF(v.recruit_date_computed, r.requisition_approval_date)
+      -
+      COALESCE((
+        SELECT SUM(
+                 DATEDIFF(
+                   dr.requisition_effective_end_date,
+                   dr.requisition_effective_start_date
+                 )
+               )
+        FROM ghro.dim_requisition dr
+        WHERE dr.job_id = r.job_id
+          AND dr.requisition_status = 'Hold'
+          AND dr.requisition_effective_start_date IS NOT NULL
+          AND dr.requisition_effective_end_date IS NOT NULL
+      ), 0)
+  END AS time_to_recruit_days,
+
+  /* TIME TO SHORTLIST (net of ON HOLD) */
+  CASE
+    WHEN s.shortlist_date_computed IS NOT NULL
+     AND r.requisition_approval_date IS NOT NULL
+    THEN
+      DATEDIFF(s.shortlist_date_computed, r.requisition_approval_date)
+      -
+      COALESCE((
+        SELECT avg(
+                 DATEDIFF(
+                   dr.requisition_effective_end_date,
+                   dr.requisition_effective_start_date
+                 )
+               )
+        FROM ghro.dim_requisition dr
+        WHERE dr.job_id = r.job_id
+          AND dr.requisition_status = 'Hold'
+          AND dr.requisition_effective_start_date IS NOT NULL
+          AND dr.requisition_effective_end_date IS NOT NULL
+      ), 0)
+  END AS time_to_shortlist_days
+
+FROM requisitions_applications r
+
+LEFT JOIN ghro.dim_application_status DIM_APP_STATUS
+  ON r.application_status = DIM_APP_STATUS.application_status
+LEFT JOIN (SELECT * FROM filled_ranked WHERE rn = 1) f
+  ON r.application_id = f.application_id
+ AND f.application_status_order <= DIM_APP_STATUS.application_status_order
+LEFT JOIN (SELECT * FROM hired_ranked WHERE rn = 1) h
+  ON r.application_id = h.application_id
+ AND h.application_status_order <= DIM_APP_STATUS.application_status_order
+LEFT JOIN (SELECT * FROM recruit_ranked WHERE rn = 1) v
+  ON r.application_id = v.application_id
+ AND v.application_status_order <= DIM_APP_STATUS.application_status_order
+LEFT JOIN (SELECT * FROM shortlist_ranked WHERE rn = 1) s
+  ON r.application_id = s.application_id
+ AND s.application_status_order <= DIM_APP_STATUS.application_status_order
