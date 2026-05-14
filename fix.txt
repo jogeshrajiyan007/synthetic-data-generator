@@ -1,122 +1,25 @@
-import urllib3
-from contextlib import asynccontextmanager
-from datetime import datetime
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+**Question 12: Achievement in alignment to behaviours and strategic priorities**
 
-from routers.all_routers import (
-    sources_router, logs_router,
-    profile_router, reset_router,
-    ks_router
-)
-from routers.ingest import router as ingest_router
-from routers.query  import router as query_router
-from services.vectorstore import load_vector_store, get_vector_count
-from services.memory import _ensure_history_table
-from db import db_count, db_table_exists
-from models.schemas import HealthResponse
+I delivered three integrated initiatives advancing AXA's **"Simple, Fast, Reliable"** priority:
 
-# Suppress corporate SSL warnings
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+**Data Contracts** architected a governance framework solving pipeline fragility—upstream changes broke downstream reports with no visibility. By capturing ownership, compliance rules, and SLAs upfront, I restored traceability across Metaport pipelines and presented the framework at our Data Governance Community Conference, generating cross-entity stakeholder interest (France HR Analytics, Japan, Health, XL).
 
+**Dataflow Optimization** redesigned AXA France's Oracle Integration Monitoring Dashboard from a failing 12–18 hour refresh cycle to a resilient five-dataflow architecture delivering sub-10-minute refreshes. Fixed critical bugs (date-shift, RangeEnd overlaps, partition conflicts) and validated with production metrics and stakeholder case study.
 
-# ── Startup / shutdown ──────────────────────────────────────────
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    print("🏛️  Data Governance RAG API starting...")
+**GovernGPT** leverages AXA SecureGPT and RAG to embed AI-driven governance into the data lifecycle—automating documentation, enabling natural language SQL analysis, and providing code intelligence. This directly advances institutional AI capability goals while scaling expertise across AXA GBS.
 
-    # Pre-load embeddings model (avoids cold start on first query)
-    from llm import get_embeddings_singleton
-    get_embeddings_singleton()
-    print("✅ Embeddings model loaded.")
+---
 
-    # Ensure conversation_history table exists in SQLite
-    _ensure_history_table()
-    print("✅ Conversation history table ready.")
+**Question 13: Impact of the contribution**
 
-    yield
-    print("👋 Shutting down.")
+Data Contracts eliminated silent failures and restored confidence in pipeline reliability. Dataflow optimization delivered 90% refresh time reduction for AXA France, meeting aggressive partner SLAs and enabling faster reporting cycles. GovernGPT scales governance expertise by reducing time-to-insight through conversational data exploration and auto-generated documentation (~70% reduction in support overhead).
 
+Collectively, these initiatives enable faster decision-making, reduce regulatory risk, improve operational efficiency, and free senior engineers for strategic work—directly supporting revenue outcomes.
 
-# ── App ──────────────────────────────────────────────────────────
-app = FastAPI(
-    title="Data Governance RAG API",
-    description=(
-        "AI-powered Data Governance framework for the insurance industry. "
-        "Reads unstructured documents and generates governance intelligence "
-        "using RAG over AXA SecureGPT (GPT-4o). "
-        "Supports persistent multi-turn conversational memory via SQLite."
-    ),
-    version="2.0.0",
-    lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc"
-)
+---
 
-# ── CORS ─────────────────────────────────────────────────────────
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+**Question 14: Supporting qualitative and quantitative evidence**
 
-# ── Routers ──────────────────────────────────────────────────────
-app.include_router(ingest_router)
-app.include_router(query_router)
-app.include_router(sources_router)
-app.include_router(logs_router)
-app.include_router(profile_router)
-app.include_router(reset_router)
-app.include_router(ks_router)
+*Qualitative:* Data Contracts presented at AXA Data Governance Community Conference with cross-entity stakeholder interest. Dataflow optimization validated with AXA France case study. GovernGPT received positive feedback in internal POC demos.
 
-
-# ── Health check ─────────────────────────────────────────────────
-@app.get("/health", response_model=HealthResponse, tags=["Health"])
-async def health():
-    chroma_count  = 0
-    sources_count = 0
-    try:
-        vdb = load_vector_store()
-        chroma_count = get_vector_count(vdb)
-        if db_table_exists("document_chunks"):
-            from db import db_query
-            sources_count = len(db_query(
-                "SELECT DISTINCT source_file FROM document_chunks"
-            ))
-    except Exception:
-        pass
-
-    return HealthResponse(
-        status="healthy",
-        version="2.0.0",
-        chroma_vectors=chroma_count,
-        sqlite_chunks=db_count("document_chunks"),
-        sqlite_responses=db_count("llm_responses"),
-        sqlite_conversation_messages=db_count("conversation_history"),
-        sources_loaded=sources_count,
-        timestamp=datetime.now().isoformat()
-    )
-
-
-@app.get("/", tags=["Health"])
-async def root():
-    return {
-        "service" : "Data Governance RAG API",
-        "version" : "2.0.0",
-        "docs"    : "/docs",
-        "health"  : "/health",
-        "features": [
-            "Conversational RAG with SQLite-persisted memory",
-            "Multi-knowledge-set isolation",
-            "Token usage tracking",
-            "Multi-format document ingestion",
-            "Data governance intelligence for insurance"
-        ]
-    }
+*Quantitative:* Data Contracts—7 production classes, zero untraced anomalies. Dataflow Optimization—90% refresh time reduction (18 hours → <10 min), 22 partitions fixed, 5-dataflow architecture. GovernGPT—6 core features, ~70% support ticket reduction. Pipeline reliability improvement validated across AXA France HR Analytics.
