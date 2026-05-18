@@ -1,25 +1,22 @@
-**Question 12: Achievement in alignment to behaviours and strategic priorities**
+## Error Type
+Runtime TypeError
 
-I delivered three integrated initiatives advancing AXA's **"Simple, Fast, Reliable"** priority:
+## Error Message
+Cannot read properties of undefined (reading 'length')
 
-**Data Contracts** architected a governance framework solving pipeline fragility—upstream changes broke downstream reports with no visibility. By capturing ownership, compliance rules, and SLAs upfront, I restored traceability across Metaport pipelines and presented the framework at our Data Governance Community Conference, generating cross-entity stakeholder interest (France HR Analytics, Japan, Health, XL).
 
-**Dataflow Optimization** redesigned AXA France's Oracle Integration Monitoring Dashboard from a failing 12–18 hour refresh cycle to a resilient five-dataflow architecture delivering sub-10-minute refreshes. Fixed critical bugs (date-shift, RangeEnd overlaps, partition conflicts) and validated with production metrics and stakeholder case study.
+    at ProjectsPage (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/src_0v_1rl2._.js:1639:41)
+    at Object.react_stack_bottom_frame (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:15037:24)
+    at renderWithHooks (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:4620:24)
+    at updateFunctionComponent (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:6081:21)
+    at beginWork (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:6691:24)
+    at runWithFiberInDEV (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:965:74)
+    at performUnitOfWork (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:9555:97)
+    at workLoopSync (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:9449:40)
+    at renderRootSync (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:9433:13)
+    at performWorkOnRoot (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:9098:47)
+    at performWorkOnRootViaSchedulerTask (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:10255:9)
+    at MessagePort.performWorkUntilDeadline (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_0rpq4pf._.js:2647:64)
+    at ClientPageRoot (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_12w91iz._.js:11029:50)
 
-**GovernGPT** leverages AXA SecureGPT and RAG to embed AI-driven governance into the data lifecycle—automating documentation, enabling natural language SQL analysis, and providing code intelligence. This directly advances institutional AI capability goals while scaling expertise across AXA GBS.
-
----
-
-**Question 13: Impact of the contribution**
-
-Data Contracts eliminated silent failures and restored confidence in pipeline reliability. Dataflow optimization delivered 90% refresh time reduction for AXA France, meeting aggressive partner SLAs and enabling faster reporting cycles. GovernGPT scales governance expertise by reducing time-to-insight through conversational data exploration and auto-generated documentation (~70% reduction in support overhead).
-
-Collectively, these initiatives enable faster decision-making, reduce regulatory risk, improve operational efficiency, and free senior engineers for strategic work—directly supporting revenue outcomes.
-
----
-
-**Question 14: Supporting qualitative and quantitative evidence**
-
-*Qualitative:* Data Contracts presented at AXA Data Governance Community Conference with cross-entity stakeholder interest. Dataflow optimization validated with AXA France case study. GovernGPT received positive feedback in internal POC demos.
-
-*Quantitative:* Data Contracts—7 production classes, zero untraced anomalies. Dataflow Optimization—90% refresh time reduction (18 hours → <10 min), 22 partitions fixed, 5-dataflow architecture. GovernGPT—6 core features, ~70% support ticket reduction. Pipeline reliability improvement validated across AXA France HR Analytics.
+Next.js version: 16.2.4 (Turbopack)
