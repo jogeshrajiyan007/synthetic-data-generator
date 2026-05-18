@@ -1,15 +1,11 @@
 ## Error Type
-Runtime TypeError
+Runtime Error
 
 ## Error Message
-Cannot read properties of undefined (reading 'length')
+Element type is invalid. Received a promise that resolves to: [object Module]. Lazy element type must resolve to a class or function.
 
 
-    at ProjectsPage (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/src_0v_1rl2._.js:1639:41)
-    at Object.react_stack_bottom_frame (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:15037:24)
-    at renderWithHooks (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:4620:24)
-    at updateFunctionComponent (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:6081:21)
-    at beginWork (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:6691:24)
+    at beginWork (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:6687:27)
     at runWithFiberInDEV (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:965:74)
     at performUnitOfWork (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:9555:97)
     at workLoopSync (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:9449:40)
@@ -17,6 +13,10 @@ Cannot read properties of undefined (reading 'length')
     at performWorkOnRoot (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:9098:47)
     at performWorkOnRootViaSchedulerTask (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_react-dom_058-ah~._.js:10255:9)
     at MessagePort.performWorkUntilDeadline (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_next_dist_compiled_0rpq4pf._.js:2647:64)
+    at LoadableComponent (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_0uc-o9v._.js:5184:57)
+    at <unknown> (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/src_0s57t25._.js:1007:278)
+    at Array.map (<anonymous>:null:null)
+    at ProjectDashboard (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/src_0s57t25._.js:1007:66)
     at ClientPageRoot (file://C:/Users/Jogesh Rajiyan/Documents/StealthProject-Sandbox/frontend-governgpt/.next/dev/static/chunks/node_modules_12w91iz._.js:11029:50)
 
 Next.js version: 16.2.4 (Turbopack)
