@@ -1,97 +1,164 @@
-For a stakeholder demo, keep it concise but force the model to generate rich descriptions:
-
-
----
-
-Insurance Data Warehouse Star Schema Design Prompt
-
-Analyze all uploaded insurance datasets and design a complete enterprise-grade Star Schema.
-
-For each source dataset:
-
-Identify the business process (Policy, Claims, Billing, Payments, Underwriting, Customer, Agent, Coverage, etc.)
-
-Explain what business entity the dataset represents
-
-Recommend whether it should become a Fact, Dimension, Bridge, or Reference table
-
-
-For each Fact Table provide:
-
-Table Name
-
-Business Purpose (why the table exists in an insurance data warehouse)
-
-Grain (what exactly one row represents)
-
-Detailed Fact Table Description (insurance process captured, business events tracked, reporting and analytics use cases)
-
-Measures/Metrics with:
-
-Column Name
-
-Data Type
-
-Business Definition
-
-Insurance Meaning
-
-Calculation Logic (if derived)
-
-Additive / Semi-Additive / Non-Additive classification
-
-
-Foreign Keys and referenced dimensions
-
-Example business questions answered
-
-Recommended partitioning and clustering strategy with justification
-
-
-For each Dimension Table provide:
-
-Table Name
-
-Business Purpose
-
-Detailed Dimension Description (entity represented and its role in insurance reporting)
-
-Natural Key and Surrogate Key
-
-Attributes with:
-
-Column Name
-
-Data Type
-
-Business Meaning
-
-Example Value
-
-Reporting Usage
-
-
-Recommended SCD Type (1/2/3) with business justification
-
-Hierarchies (if applicable)
-
-Example business questions answered
-
-
-Additional Requirements
-
-Identify conformed dimensions shared across fact tables.
-
-Highlight insurance KPIs enabled by the model (Written Premium, Earned Premium, Loss Ratio, Claim Frequency, Claim Severity, Retention Rate, etc.).
-
-Explain all assumptions made from the source data.
-
-Present the final output in a professional data-modeling document format suitable for architecture review.
-
-
-Important: Do not provide generic table names or brief descriptions. Every fact, dimension, measure, and attribute must include insurance-domain context, business purpose, and reporting significance.
-
-
----
-
-This version is short enough for a demo slide while still pushing the model to generate detailed insurance-specific documentation.
+4243-b272-c5ddca10dd6d/stages/s_mqc3wcnx_pnz3 HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 420, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\fastapi\applications.py", line 1163, in __call__
+    await super().__call__(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\middleware\errors.py", line 186, in __call__
+    raise exc
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\middleware\errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\middleware\cors.py", line 96, in __call__
+    await self.simple_response(scope, receive, send, request_headers=headers)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\middleware\cors.py", line 154, in simple_response
+    await self.app(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\middleware\exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\fastapi\middleware\asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\fastapi\routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\fastapi\routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\fastapi\routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\fastapi\routing.py", line 328, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\backend\routers\marketplace.py", line 986, in update_run_stage_status
+    all_done = (completed + failed) >= total
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: '>=' not supported between instances of 'int' and 'str'
+INFO:     127.0.0.1:64114 - "GET /api/marketplace/products/46602978-e583-40ad-896a-301f70b0df77/pipeline/runs/08d6beb1-35d2-4243-b272-c5ddca10dd6d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64090 - "PATCH /api/marketplace/products/46602978-e583-40ad-896a-301f70b0df77/pipeline/runs/08d6beb1-35d2-4243-b272-c5ddca10dd6d/stages/s_mqc3wcnx_pnz3 HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 420, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\fastapi\applications.py", line 1163, in __call__
+    await super().__call__(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\middleware\errors.py", line 186, in __call__
+    raise exc
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\middleware\errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\middleware\cors.py", line 96, in __call__
+    await self.simple_response(scope, receive, send, request_headers=headers)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\middleware\cors.py", line 154, in simple_response
+    await self.app(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\middleware\exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\fastapi\middleware\asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\fastapi\routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\fastapi\routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\fastapi\routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\fastapi\routing.py", line 328, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\backend\routers\marketplace.py", line 986, in update_run_stage_status
+    all_done = (completed + failed) >= total
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: '>=' not supported between instances of 'int' and 'str'
+INFO:     127.0.0.1:64117 - "GET /api/marketplace/products/46602978-e583-40ad-896a-301f70b0df77/pipeline/runs/08d6beb1-35d2-4243-b272-c5ddca10dd6d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64079 - "PATCH /api/marketplace/products/46602978-e583-40ad-896a-301f70b0df77/pipeline/runs/08d6beb1-35d2-4243-b272-c5ddca10dd6d/stages/s_mqc3wcnx_pnz3 HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 420, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\fastapi\applications.py", line 1163, in __call__
+    await super().__call__(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\middleware\errors.py", line 186, in __call__
+    raise exc
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\middleware\errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\middleware\cors.py", line 96, in __call__
+    await self.simple_response(scope, receive, send, request_headers=headers)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\middleware\cors.py", line 154, in simple_response
+    await self.app(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\middleware\exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\fastapi\middleware\asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\fastapi\routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\fastapi\routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\fastapi\routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\fastapi\routing.py", line 328, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\backend\routers\marketplace.py", line 986, in update_run_stage_status
+    all_done = (completed + failed) >= total
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: '>=' not supported between instances of 'int' and 'str'
