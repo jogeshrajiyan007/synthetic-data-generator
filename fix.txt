@@ -1,122 +1,15 @@
-#### About the Uploaded Documents/ Datasets
+Over the last few weeks, I have been experimenting with ModelMasterAI within Metaport to explore how AI can augment (not replace) traditional modeling tools like erwin.
 
-What are these documents about? Provide a high-level summary.
+The goal is to provide an AI copilot for data modelers that can accelerate model design and continuously improve model quality. Current capabilities include:
 
-Provide a comprehensive information about the dataset, 
-showing what is the columns and their datatypes involved, is the coulmn PII, column description
+• AI-predicted dimensional models using a hybrid architecture (deterministic ML + SecureGPT) rather than relying entirely on LLMs. This approach minimizes token consumption, avoids SecureGPT token limitations, and produces more explainable and consistent results.
 
-The business has provided the details regarding the derived columns they are expecting can you analyze them.
+• Automated model health checks to identify issues such as missing SCD2 audit columns, PII exposure, many-to-many relationships, grain inconsistencies, and opportunities to optimize star/snowflake schemas.
 
+• Interactive model canvas with relationship visualization, recommendations, auto-layout, versioning, and conversational model modifications.
 
-#### Data Modelling 
+• Inspired by the recent industry trend around Vibe Coding, I also experimented with a Vibe Data Modeling interface, powered by a multi-agent framework that can interpret natural language requests and build or modify models directly on the canvas in real time.
 
-### Insurance Data Warehouse Star Schema Design Prompt
+Interestingly, Databricks recently showcased a similar vision around "Vibe Your Data Model" at the 2026 Data + AI Summit, reinforcing that conversational and AI-assisted modeling is becoming an emerging area in the industry. Our objective is not to challenge erwin's strengths, but to complement existing modeling practices with AI-driven recommendations, continuous quality checks, and conversational model evolution.
 
-Analyze all uploaded insurance datasets and design a complete enterprise-grade Star Schema.
-
-For each source dataset:
-1. Identify the business process (Policy, Claims, Billing, Payments, Underwriting, Customer, Agent, Coverage, etc.)
-2. Explain what business entity the dataset represents
-3. Recommend whether it should become a Fact, Dimension, Bridge, or Reference table
-
-For each Fact Table provide:
-
-1. Table Name
-2. Business Purpose (why the table exists in an insurance data warehouse)
-3. Grain (what exactly one row represents)
-4. Detailed Fact Table Description (insurance process captured, business events tracked, reporting and analytics use cases)
-
-Measures/Metrics with:
-1. Column Name
-2. Data Type
-3. Business Definition
-4. Insurance Meaning
-5. Calculation Logic (if derived)
-6. Additive / Semi-Additive / Non-Additive classification
-
-Foreign Keys and referenced dimensions
-Example business questions answered
-Recommended partitioning and clustering strategy with justification
-
-For each Dimension Table provide:
-
-1. Table Name
-2. Business Purpose
-3. Detailed Dimension Description (entity represented and its role in insurance reporting)
-4. Natural Key and Surrogate Key
-
-Attributes with:
-1. Column Name
-2. Data Type
-3. Business Meaning
-4. Example Value
-5. Reporting Usage
-
-Recommended SCD Type (1/2/3) with business justification
-Hierarchies (if applicable)
-Example business questions answered
-
-Additional Requirements
-1. Identify conformed dimensions shared across fact tables.
-2. Highlight insurance KPIs enabled by the model (Written Premium, Earned Premium, Loss Ratio, Claim Frequency, Claim Severity, Retention Rate, etc.).
-3. Explain all assumptions made from the source data.
-4. Present the final output in a professional data-modeling document format suitable for architecture review.
-
-Important: Do not provide generic table names or brief descriptions. Every fact, dimension, measure, and attribute must include insurance-domain context, business purpose, and reporting significance.
-
-
-Identify all business entities across the uploaded datasets and define their relationships. For each entity: - Entity name and description - Key attributes and identifiers - Cardinality of relationships (1:1, 1:N, M:N) - Whether the relationship is identifying or non-identifying - Any associative entities needed for M:N resolution Present findings as a written ER narrative and a list of all relationships in the format: [Entity A] — [Cardinality] — [Entity B] : [Relationship description]
-
-Generate a complete Source-to-Target Mapping (STTM) for all uploaded datasets. For every source column, produce a mapping row with: | Source File | Source Column | Source Data Type | Transformation Logic | Target Table | Target Column | Target Data Type | Key Type | Nullable | Notes | Transformation logic must specify one of: - Direct mapping (no change) - Type cast (from → to) - Derived / calculated (formula) - Lookup / reference join (join condition) - Null handling strategy - Standardisation rule (date format, casing, trim)
-
-
-Create a document for the Star schema Data Moodelling design that we discussed
-
-
-#### SQL Analysis
-
-
-Perform a join between customers and polices and identify those customers holding more than one policy.
- 
-Perform a join between customers, policies and claims and rank the top 5 customers having the highest amount claimed: Columns to show customer_id, first_name, last_name, SUM of amount_claimed
- 
-Perform a join between customers, policies and claims and rank the top 5 customers having the lowest amount claimed: Columns to show customer_id, first_name, last_name, SUM of amount_claimed
- 
-Identify the lifespan of each policy and show the top 5 policies having shorter lifespan and its coverage_type and also the customer details like first_name, last_name,customer_id
-
-Which age groups purchase more policies? Use column dob to calculate age.
-
-Show Countrywise Policyholder/customer distribution
-
-Perform a MoM analysis over the Claims amount_claimed in the year 2025
-
-
-
-Quotes: quote_id	customer_id	quote_date	premium_quoted	status	coverage_type
-Claims: claim_id	policy_id	claim_date	amount_claimed	amount_paid	status
-Customers: first_name	last_name	dob	email	phone_number	gender	address_line1	address_line2	city	state	zip_code	country	customer_id	status
-Policies: policy_id	customer_id	start_date	end_date	premium	coverage_type	status
-
-customer_20250501.csv
-customer_20250502.csv
-customer_20250503.csv
-customer_20250504.csv
-customer_20250505.csv
-
-claims_20250501.csv
-claims_20250502.csv
-claims_20250503.csv
-claims_20250504.csv
-claims_20250505.csv
-
-quotes_20250501.csv
-quotes_20250502.csv
-quotes_20250503.csv
-quotes_20250504.csv
-quotes_20250505.csv
-
-policies_20250501.csv
-policies_20250502.csv
-policies_20250503.csv
-policies_20250504.csv
-policies_20250505.csv
+Would be happy to walk through the prototype and discuss how this capability could evolve further within Metaport.
