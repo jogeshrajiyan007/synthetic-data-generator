@@ -1,121 +1,113 @@
-2026-06-19T02:31:32 ERROR django.request: Internal Server Error: /api/databricks/connections
-Traceback (most recent call last):
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\django\core\handlers\exception.py", line 55, in inner
-    response = get_response(request)
-               ^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\django\core\handlers\base.py", line 198, in _get_response
-    response = wrapped_callback(request, *callback_args, **callback_kwargs)
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\asgiref\sync.py", line 325, in __call__
-    return call_result.result()
-           ^^^^^^^^^^^^^^^^^^^^
-  File "C:\ProgramData\miniforge3\Lib\concurrent\futures\_base.py", line 449, in result
-    return self.__get_result()
-           ^^^^^^^^^^^^^^^^^^^
-  File "C:\ProgramData\miniforge3\Lib\concurrent\futures\_base.py", line 401, in __get_result
-    raise self._exception
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\asgiref\sync.py", line 365, in main_wrap
-    result = await awaitable
-             ^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\ninja\operation.py", line 649, in async_view_wrapper
-    return await self._async_view(request, *args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\ninja\operation.py", line 682, in _async_view
-    return await cast(AsyncOperation, operation).run(request, *a, **kw)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\ninja\operation.py", line 496, in run
-    return self.api.on_exception(request, e)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\ninja\main.py", line 617, in on_exception
-    return handler(request, exc)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\ninja\errors.py", line 129, in _default_exception
-    raise exc  # let django deal with it
-    ^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\ninja\operation.py", line 493, in run
-    result = await self.view_func(request, **values)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\backend\api\views\databricks.py", line 176, in get_connections
-    rows = list_connections(knowledge_set)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\backend\services\databricks\client.py", line 134, in list_connections
-    return list(qs.order_by("-created_at").values(*fields))
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\django\db\models\query.py", line 390, in __iter__
-    self._fetch_all()
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\django\db\models\query.py", line 2000, in _fetch_all
-    self._result_cache = list(self._iterable_class(self))
-                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\django\db\models\query.py", line 222, in __iter__
-    for row in compiler.results_iter(
-               ^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\django\db\models\sql\compiler.py", line 1573, in results_iter
-    results = self.execute_sql(
-              ^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\django\db\models\sql\compiler.py", line 1622, in execute_sql
-    cursor = self.connection.cursor()
-             ^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\django\utils\asyncio.py", line 24, in inner
-    raise SynchronousOnlyOperation(message)
-django.core.exceptions.SynchronousOnlyOperation: You cannot call this from an async context - use a thread or sync_to_async.
-[19/Jun/2026 02:31:32] "GET /api/databricks/connections HTTP/1.1" 500 145
-2026-06-19T02:31:32 ERROR django.request: Internal Server Error: /api/databricks/connections
-Traceback (most recent call last):
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\django\core\handlers\exception.py", line 55, in inner
-    response = get_response(request)
-               ^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\django\core\handlers\base.py", line 198, in _get_response
-    response = wrapped_callback(request, *callback_args, **callback_kwargs)
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\asgiref\sync.py", line 325, in __call__
-    return call_result.result()
-           ^^^^^^^^^^^^^^^^^^^^
-  File "C:\ProgramData\miniforge3\Lib\concurrent\futures\_base.py", line 449, in result
-    return self.__get_result()
-           ^^^^^^^^^^^^^^^^^^^
-  File "C:\ProgramData\miniforge3\Lib\concurrent\futures\_base.py", line 401, in __get_result
-    raise self._exception
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\asgiref\sync.py", line 365, in main_wrap
-    result = await awaitable
-             ^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\ninja\operation.py", line 649, in async_view_wrapper
-    return await self._async_view(request, *args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\ninja\operation.py", line 682, in _async_view
-    return await cast(AsyncOperation, operation).run(request, *a, **kw)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\ninja\operation.py", line 496, in run
-    return self.api.on_exception(request, e)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\ninja\main.py", line 617, in on_exception
-    return handler(request, exc)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\ninja\errors.py", line 129, in _default_exception
-    raise exc  # let django deal with it
-    ^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\ninja\operation.py", line 493, in run
-    result = await self.view_func(request, **values)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\backend\api\views\databricks.py", line 176, in get_connections
-    rows = list_connections(knowledge_set)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\backend\services\databricks\client.py", line 134, in list_connections
-    return list(qs.order_by("-created_at").values(*fields))
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\django\db\models\query.py", line 390, in __iter__
-    self._fetch_all()
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\django\db\models\query.py", line 2000, in _fetch_all
-    self._result_cache = list(self._iterable_class(self))
-                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\django\db\models\query.py", line 222, in __iter__
-    for row in compiler.results_iter(
-               ^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\django\db\models\sql\compiler.py", line 1573, in results_iter
-    results = self.execute_sql(
-              ^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\django\db\models\sql\compiler.py", line 1622, in execute_sql
-    cursor = self.connection.cursor()
-             ^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\Jogesh Rajiyan\Documents\StealthProject-Sandbox\sandbox\Lib\site-packages\django\utils\asyncio.py", line 24, in inner
-    raise SynchronousOnlyOperation(message)
-django.core.exceptions.SynchronousOnlyOperation: You cannot call this from an async context - use a thread or sync_to_async.
+Create a modern enterprise architecture flow diagram titled:
+
+"Agentic Data Quality Architecture — SecureGPT Control Plane"
+
+Subtitle:
+Detection → Diagnosis → Recommendation → Governance → Execution → Validation
+
+Use horizontal phases with the AI Orchestrator at the center controlling all agents.
+
+LEFT SIDE:
+• Monitoring Trigger (Schedule/Event/Pipeline Hook)
+• Data Contract (Schema, Rules, SLA, Semantics)
+• Audit DB (Immutable logs of requests and responses)
+
+CENTER:
+Large box:
+AI Orchestrator (SecureGPT)
+Responsibilities:
+- Fan-out
+- Context Management
+- Synthesis
+- Memory
+- Audit Logging
+
+PHASE 1 – DETECTION (Green)
+AI Orchestrator performs parallel fan-out to:
+- Profiling Agent
+- Rule Agent
+- Duplicate Agent
+- Anomaly Agent
+
+All agent outputs return to:
+Orchestrator Synthesis
+
+Decision:
+"Anomaly Detected?"
+
+NO:
+→ Steady State
+→ Log clean run
+→ Schedule next scan
+
+YES:
+Continue to next phase.
+
+PHASE 2 – DIAGNOSIS (Orange)
+AI Orchestrator invokes:
+RCA Agent
+
+Output:
+Root Cause Payload
+
+Return results to:
+Orchestrator Synthesis
+
+PHASE 3 – RECOMMENDATION (Orange)
+AI Orchestrator invokes:
+Remediation Agent
+
+Output:
+Fix Recommendations + Confidence Score
+
+Return results to:
+Orchestrator Synthesis
+
+PHASE 4 – GOVERNANCE (Yellow)
+Confidence Engine
+
+Decision branches:
+>95% confidence:
+Auto-fix
+
+80–95% confidence:
+One-click approval
+
+<80% confidence:
+Human investigation
+
+All paths flow through:
+Human Approval Gateway
+
+PHASE 5 – EXECUTION (Blue)
+Execution Engine
+
+Possible targets:
+- Databricks Workflows
+- Airflow
+- ADF
+- Informatica
+- APIs
+
+PHASE 6 – VALIDATION (Green)
+AI Orchestrator re-runs Detection Phase using the same agents:
+- Profiling Agent
+- Rule Agent
+- Duplicate Agent
+- Anomaly Agent
+
+Decision:
+Metrics Healthy?
+
+YES:
+Close Incident
+
+NO:
+Escalate to Human
+
+Style:
+Use a dark enterprise theme.
+Represent each phase as a horizontal swimlane.
+Keep the AI Orchestrator as the central hub; agents never call each other directly.
+Use green for detection and validation, orange for diagnosis and recommendation, yellow for governance, blue for execution.
+Show clear arrows and avoid crossing lines.
