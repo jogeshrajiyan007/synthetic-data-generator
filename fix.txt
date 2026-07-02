@@ -1,73 +1,62 @@
-import httpx
-from langchain_openai import AzureChatOpenAI
-from langchain_huggingface import HuggingFaceEmbeddings
-from auth import token_manager
-from config import (
-    CHAT_MODEL, API_BASE_URL, API_VERSION,
-    EMBEDDING_MODELS, DEFAULT_EMBED_MODEL,
-)
+import os
+import socket
+import pymssql
+from contextlib import contextmanager
 
+class AppLogger:
+    def __init__(self):
+        server = os.getenv('DB_SERVER')
+        database = os.getenv('DB_NAME')
+        user = os.getenv('DB_USER')
+        password = os.getenv('DB_PASSWORD')
+        self.conn_params = {
+            'server': server,
+            'user': user,
+            'password': password,
+            'database': database
+        }
 
-def _deployment_url(base_url: str) -> str:
-    """
-    AzureChatOpenAI with base_url appends /chat/completions directly.
-    SecureGPT Hub requires the deployment name in the path:
-      {base_url}/deployments/{model}/chat/completions
-    """
-    model = CHAT_MODEL or ''
-    if model and f'/deployments/{model}' not in base_url:
-        return base_url.rstrip('/') + f'/deployments/{model}'
-    return base_url
+    def _validate_env_vars(self):
+        required_vars = ['OWNER_NAME', 'APP_NAME']
+        missing = [var for var in required_vars if not os.getenv(var)]
+        if missing:
+            raise ValueError(f"Missing env vars: {', '.join(missing)}")
 
+    @contextmanager
+    def get_db(self):
+        conn = pymssql.connect(**self.conn_params)
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
 
-class SecureGPTChat(AzureChatOpenAI):
-    def __init__(self, api_key: str, base_url: str, max_tokens: int = 4096):
-        super().__init__(
-            model=CHAT_MODEL,
-            api_key=api_key,
-            api_version=API_VERSION,
-            base_url=_deployment_url(base_url),
-            validate_base_url=False,
-            http_client=httpx.Client(verify=False),
-            http_async_client=httpx.AsyncClient(verify=False),
-            temperature=0,
-            top_p=0.2,
-            max_tokens=max_tokens,
-        )
-
-
-def get_llm() -> SecureGPTChat:
-    """Returns a SecureGPT (Azure OpenAI) LLM instance."""
-    token = token_manager.get_token()
-    return SecureGPTChat(api_key=token, base_url=API_BASE_URL)
-
-
-def get_llm_for_docs() -> SecureGPTChat:
-    """Returns an LLM instance for document generation."""
-    token = token_manager.get_token()
-    return SecureGPTChat(api_key=token, base_url=API_BASE_URL, max_tokens=4096)
-
-
-def get_llm_large_output() -> SecureGPTChat:
-    """
-    Returns an LLM instance — SecureGPT is capped at 4096 output tokens.
-    Use per-table prompts (compact DSL) to stay within this limit.
-    """
-    token = token_manager.get_token()
-    return SecureGPTChat(api_key=token, base_url=API_BASE_URL, max_tokens=4096)
-
-
-# ── Module-level embedding singletons (loaded once, keyed by model key) ──────
-_embeddings: dict[str, HuggingFaceEmbeddings] = {}
-
-
-def get_embeddings_singleton(model_key: str = DEFAULT_EMBED_MODEL) -> HuggingFaceEmbeddings:
-    global _embeddings
-    if model_key not in _embeddings:
-        cfg = EMBEDDING_MODELS.get(model_key) or EMBEDDING_MODELS[DEFAULT_EMBED_MODEL]
-        _embeddings[model_key] = HuggingFaceEmbeddings(
-            model_name=cfg["path"],
-            model_kwargs={"device": "cpu"},
-            encode_kwargs={"normalize_embeddings": True},
-        )
-    return _embeddings[model_key]
+    def log(self, 
+            owner_name: str, 
+            appname: str, 
+            hostname: str, 
+            model_name: str, 
+            request_id: str, 
+            request_created: int, 
+            completion_tokens: int, 
+            prompt_tokens: int, 
+            total_tokens: int, 
+            response_time: float) -> bool:
+        try:
+            with self.get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO logger.app_log (
+                            owner_name, appname, hostname, model_name,
+                            request_id, request_created, completion_tokens,
+                            prompt_tokens, total_tokens, response_time
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        owner_name, appname, hostname, model_name,
+                        request_id, request_created, completion_tokens,
+                        prompt_tokens, total_tokens, response_time
+                    ))
+            return True
+        except Exception as e:
+            print(f"Error: {e}")
+            return False
