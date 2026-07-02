@@ -1,116 +1,73 @@
-import os
 import httpx
-import socket
-import time
-from datetime import datetime, timedelta
-import datetime
-from dotenv import load_dotenv
-import requests
 from langchain_openai import AzureChatOpenAI
+from langchain_huggingface import HuggingFaceEmbeddings
+from auth import token_manager
+from config import (
+    CHAT_MODEL, API_BASE_URL, API_VERSION,
+    EMBEDDING_MODELS, DEFAULT_EMBED_MODEL,
+)
 
-def get_token(CLIENT_ID, CLIENT_SECRET):
-    url = SECUREGPT_API_TOKEN_URL
-    headersList = {"Content-Type": "application/x-www-form-urlencoded"}
-    payload = f"grant_type=client_credentials&client_id={CLIENT_ID}&client_secret={CLIENT_SECRET}&scope=urn:grp:chatgpt"
-    response = requests.request(method='POST', url=url, data=payload, headers=headersList)
-    if response.status_code != 200:
-        raise Exception(f'Request failed with status {response.status_code}, {response.text}')
-    return response.json()["access_token"]
+
+def _deployment_url(base_url: str) -> str:
+    """
+    AzureChatOpenAI with base_url appends /chat/completions directly.
+    SecureGPT Hub requires the deployment name in the path:
+      {base_url}/deployments/{model}/chat/completions
+    """
+    model = CHAT_MODEL or ''
+    if model and f'/deployments/{model}' not in base_url:
+        return base_url.rstrip('/') + f'/deployments/{model}'
+    return base_url
+
 
 class SecureGPTChat(AzureChatOpenAI):
-    def __init__(
-        self,
-        *,
-        api_key: str | None = None,
-        base_url: str | None = None,
-        temperature: float | None = None,
-        
-    ) -> None:
+    def __init__(self, api_key: str, base_url: str, max_tokens: int = 4096):
         super().__init__(
-            model= "gpt-4.1-2025-04-14", # "gpt-4o-2024-05-13",#"gpt-35-turbo-0301",
+            model=CHAT_MODEL,
             api_key=api_key,
-            api_version="2024-10-21",
-            base_url = base_url,
+            api_version=API_VERSION,
+            base_url=_deployment_url(base_url),
             validate_base_url=False,
-            http_client = httpx.Client(verify=False),
-            default_headers={"Authorization": f"Bearer {api_key}"},
+            http_client=httpx.Client(verify=False),
+            http_async_client=httpx.AsyncClient(verify=False),
             temperature=0,
-            top_p = 0.2,
-
+            top_p=0.2,
+            max_tokens=max_tokens,
         )
 
-if __name__ == '__main__':
 
-    print("=== Script Starting ===")
+def get_llm() -> SecureGPTChat:
+    """Returns a SecureGPT (Azure OpenAI) LLM instance."""
+    token = token_manager.get_token()
+    return SecureGPTChat(api_key=token, base_url=API_BASE_URL)
 
-    try:
-#         print("Loading Env...")
-#         load_dotenv(dotenv_path='.env.prod')
 
-        SECUREGPT_API_TOKEN_URL = SECUREGPT_API_TOKEN_URL
-        SECUREGPT_API_BASE_URL = SECUREGPT_API_BASE_URL
-        CLIENT_ID = CLIENT_ID
-        CLIENT_SECRET = CLIENT_SECRET
-    except Exception as e:
-        print(f"Error while loading dotenv: {e}")
-    
+def get_llm_for_docs() -> SecureGPTChat:
+    """Returns an LLM instance for document generation."""
+    token = token_manager.get_token()
+    return SecureGPTChat(api_key=token, base_url=API_BASE_URL, max_tokens=4096)
 
-    try:
-        print("Creating SecureGPT Token...")
-        _access_token =get_token(CLIENT_ID, CLIENT_SECRET)
-    except Exception as e:
-        print(f"Error during access token generation: {e}")
 
-    try:
-        print("Initializing LLM...")
-        print(SECUREGPT_API_BASE_URL)
-        llm = SecureGPTChat(
-            api_key = _access_token,
-            base_url = SECUREGPT_API_BASE_URL,
-            temperature=0,
+def get_llm_large_output() -> SecureGPTChat:
+    """
+    Returns an LLM instance — SecureGPT is capped at 4096 output tokens.
+    Use per-table prompts (compact DSL) to stay within this limit.
+    """
+    token = token_manager.get_token()
+    return SecureGPTChat(api_key=token, base_url=API_BASE_URL, max_tokens=4096)
+
+
+# ── Module-level embedding singletons (loaded once, keyed by model key) ──────
+_embeddings: dict[str, HuggingFaceEmbeddings] = {}
+
+
+def get_embeddings_singleton(model_key: str = DEFAULT_EMBED_MODEL) -> HuggingFaceEmbeddings:
+    global _embeddings
+    if model_key not in _embeddings:
+        cfg = EMBEDDING_MODELS.get(model_key) or EMBEDDING_MODELS[DEFAULT_EMBED_MODEL]
+        _embeddings[model_key] = HuggingFaceEmbeddings(
+            model_name=cfg["path"],
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True},
         )
-    except Exception as e:
-        print(f"Error during SecurtGPTChat initialization: {e}")
-
-    try:
-        print("Testing sample example...")
-        question = "Tell me a joke"
-
-        start_time = time.perf_counter()
-        response= llm.invoke(question)
-        print(response.content)
-        response_time = int((time.perf_counter() - start_time) * 100) / 100
-
-        model_name = response.response_metadata['model_name']
-        input_tokens = response.usage_metadata['input_tokens']
-        output_tokens = response.usage_metadata['output_tokens']
-        total_tokens = response.usage_metadata['total_tokens']
-        # prompt_token, completion_token, total_token = count_tokens(file_content, response)
-
-        # print("Tokens .......... ", prompt_token, completion_token, total_token)
-
-    except Exception as e:
-        print(f"Error during LLM Question: {e}")
-
-    
-    try:
-        print("Logging results...")
-        # Log the request using the AppLogger            
-        logger = AppLogger()
-        logger.log(
-            owner_name=OWNER_NAME,
-            appname=APP_NAME,
-            hostname=socket.gethostname(),
-            model_name=model_name,
-            request_id=None,
-            request_created=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            completion_tokens=output_tokens,
-            prompt_tokens=input_tokens,
-            total_tokens=total_tokens,
-            response_time=response_time
-        )
-
-    except Exception as e:
-        print(f"Error during logger: {e}")
-
-    print("=== Script Completed ===")
+    return _embeddings[model_key]
