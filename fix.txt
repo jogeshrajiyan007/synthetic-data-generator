@@ -1,91 +1,337 @@
-C:\Users\B700WM\AppData\Local\miniforge3\Lib\wsgiref\handlers.py:183: Warning: StreamingHttpResponse must consume asynchronous iterators in order to serve them synchronously. Use a synchronous iterator instead.
-  for data in self.result:
-2026-07-04T13:14:02 DEBUG asyncio: Using proactor: IocpProactor
-2026-07-04T13:14:02 DEBUG openai._base_client: Request options: {'method': 'post', 'url': '/chat/completions', 'headers': {'X-Stainless-Raw-Response': 'true', 'api-key': '<redacted>'}, 'files': None, 'idempotency_key': 'stainless-python-retry-861b1008-0e25-4c2a-a3e9-ccb9be6dfb49', 'security': {'bearer_auth': True}, 'content': None, 'json_data': {'messages': [{'content': '# Domain + Entity + Event Discovery — Instructions\n\nYou are a senior data warehouse architect performing the FIRST reasoning step of a Kimball\ndimensional modeling pipeline: understanding the business BEFORE anything is classified as a\nfact or a dimension table. Follow `docs/KIMBALL_DIMENSIONAL_MODELING_GUIDE.md` section 1\n(Four-Step Design Process) and rule `PROC1`: a table\'s shape is evidence, not a verdict.\n\nYou receive: a compact cross-table schema profile — every source table\'s name, description, and\ncolumn evidence (primary/foreign key candidates, measure candidates, date columns, categorical\ncolumns, audit columns) produced by deterministic profiling. You do NOT see raw row data.\n\nYou do not know what industry or domain this data belongs to in advance. Infer it from the\nevidence. Do not assume any specific vocabulary — a "Customer" or an "Order" is only correct if\nthe evidence supports it; the same reasoning must work equally well for insurance, retail,\nbanking, healthcare, logistics, or any other domain.\n\n## Your task\n\n1. **Domain** — name the business domain in 1-3 words (e.g. "Insurance", "Retail Order\n   Management"). This is a label for human readability, not used for any structural decision.\n2. **Entities** — the real-world business objects the data describes (a customer, a product, an\n   employee, a location, ...). For each: the canonical name, any aliases you notice across\n   tables (e.g. "Customer" vs "Policyholder" vs "Client"), which source table(s) primarily\n   describe it, and your reasoning.\n3. **Events** — the business processes/measurement events that PRODUCE the fact data (a claim is\n   submitted, an order is shipped, a payment is made). For each: the canonical name, which\n   source table most directly records it, and which of that table\'s measure-candidate columns\n   are evidence of this event (its `measures_hint`).\n\nAn entity and an event are different things: an entity is *who/what*, an event is *something\nthat happened, at a point in time, that produced a measurement*. A table can describe an entity\neven if it never becomes a dimension table on its own (see `CONFORM1` — some entities are only\never attributes of another table). A table can describe an event even if it also carries\ndescriptive columns that look entity-like (`DEGEN1` — a table can be genuinely event-shaped and\nstill reference another event\'s natural key for lineage).\n\n## Rules\n\n- Give every domain/entity/event a `confidence` in [0,1] and one sentence of `reasoning` that\n  cites the actual evidence (column names, table names) that led you there — never a vague\n  restatement.\n- Do not invent an entity or event that has no supporting table/column evidence.\n- Do not decide fact vs dimension here — that is a later, deterministic phase. You are naming\n  what the business does and who/what it involves, nothing more.\n- If the evidence is genuinely ambiguous for a table (could be more than one entity or event),\n  say so in `reasoning` and lower `confidence` rather than picking arbitrarily.\n\nReturn ONLY valid JSON, no markdown, no commentary.\n\n## Output Schema\n\n```json\n{\n  "domain": {"value": "Insurance", "confidence": 0.9, "reasoning": "policy/claim/premium vocabulary across tables"},\n  "entities": [\n    {"name": "Customer", "confidence": 0.9, "aliases": ["Policyholder"], "reasoning": "customers table has name/email/address columns typical of a person entity", "source_tables": ["customers"]}\n  ],\n  "events": [\n    {"name": "Claim Submitted", "confidence": 0.85, "reasoning": "claims table has amount_claimed, amount_paid measures and a claim_date", "source_table": "claims", "measures_hint": ["amount_claimed", "amount_paid"]}\n  ]\n}\n```\n', 'role': 'system'}, {'content': 'Source tables (cross-table evidence):\n[{"tbl":"az__training_hr__agbsdmg","pname":"EmployeeTrainingsHr","desc":"This table contains detailed records of employee training activities, including ","pk":[],"fk":["training_id","employee_id","course_id"],"measure":[],"date":["assigned_date","start_date","completion_date"],"cat":[],"n":18},{"tbl":"az__recuitment_hr__agbsdmg","pname":"EmployeeRecruitmentHr","desc":"This table contains detailed records of candidates who have applied for job open","pk":[],"fk":["candidate_id","job_requisition_id","interviewer_id"],"measure":[],"date":["candidate_name","application_date","interview_date","offer_date","joining_date"],"cat":[],"n":20},{"tbl":"az__performance_hr__agbsdmg","pname":"EmployeePerformanceReview","desc":"This table contains detailed records of employee performance reviews, including ","pk":[],"fk":["review_id","employee_id","reviewer_id"],"measure":[],"date":["review_date"],"cat":[],"n":17},{"tbl":"az__attendance_hr__agbsdmg","pname":"EmployeeAttendanceHr","desc":"This table contains detailed attendance records for employees, including check-i","pk":[],"fk":["attendance_id","employee_id"],"measure":[],"date":["attendance_date"],"cat":[],"n":16},{"tbl":"az__employee_hr__agbsdmg","pname":"EmployeesMaster","desc":"This table contains core HR information for employees, including personal detail","pk":["employee_id"],"fk":["manager_id"],"measure":[],"date":["date_of_birth","hire_date"],"cat":[],"n":22}]', 'role': 'user'}], 'model': 'gpt-4.1-2025-04-14', 'max_completion_tokens': 4096, 'stream': False, 'temperature': 0.0, 'top_p': 0.2}}
-2026-07-04T13:14:02 DEBUG openai._base_client: Sending HTTP Request: POST https://api-int.se.axa-go.applications.services.axa-tech.intraxa/ago-m365-securegpt-hub-v1-vrs/providers/openai/deployments/gpt-4.1-2025-04-14/chat/completions?api-version=2024-10-21
-2026-07-04T13:14:02 DEBUG httpcore.connection: connect_tcp.started host='api-int.se.axa-go.applications.services.axa-tech.intraxa' port=443 local_address=None timeout=None socket_options=None
-2026-07-04T13:14:02 DEBUG httpcore.connection: connect_tcp.complete return_value=<httpcore._backends.sync.SyncStream object at 0x000001FEC0D432C0>
-2026-07-04T13:14:02 DEBUG httpcore.connection: start_tls.started ssl_context=<ssl.SSLContext object at 0x000001FED5143150> server_hostname='api-int.se.axa-go.applications.services.axa-tech.intraxa' timeout=None
-2026-07-04T13:14:02 DEBUG httpcore.connection: start_tls.complete return_value=<httpcore._backends.sync.SyncStream object at 0x000001FEC0D42000>
-2026-07-04T13:14:02 DEBUG httpcore.http11: send_request_headers.started request=<Request [b'POST']>
-2026-07-04T13:14:02 DEBUG httpcore.http11: send_request_headers.complete
-2026-07-04T13:14:02 DEBUG httpcore.http11: send_request_body.started request=<Request [b'POST']>
-2026-07-04T13:14:02 DEBUG httpcore.http11: send_request_body.complete
-2026-07-04T13:14:02 DEBUG httpcore.http11: receive_response_headers.started request=<Request [b'POST']>
-2026-07-04T13:14:08 DEBUG httpcore.http11: receive_response_headers.complete return_value=(b'HTTP/1.1', 200, b'', [(b'content-security-policy', b"upgrade-insecure-requests;default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline'"), (b'cross-origin-opener-policy', b'same-origin'), (b'cross-origin-resource-policy', b'same-origin'), (b'origin-agent-cluster', b'?1'), (b'x-content-type-options', b'nosniff'), (b'x-dns-prefetch-control', b'off'), (b'x-download-options', b'noopen'), (b'x-frame-options', b'DENY'), (b'x-permitted-cross-domain-policies', b'none'), (b'x-xss-protection', b'0'), (b'access-control-allow-origin', b'*'), (b'x-request-id', b'b3ffb74d6d045668620e3703bf96f6e8:01f7ca4c3348194a'), (b'x-trace-id', b'b3ffb74d6d045668620e3703bf96f6e8'), (b'x-target-id', b'eyJyZWdpb24iOiJlcyIsImRlcGxveW1lbnRNb2RlIjoiQXp1cmVPcGVuQWlEYXRhWm9uZVN0YW5kYXJkIn0='), (b'azureai-fe-is-streaming', b'False'), (b'azureml-model-session', b'd20260624110322-2c214418'), (b'skip-error-remapping', b'true'), (b'x-accel-buffering', b'no'), (b'x-ms-is-spilled-over', b'false'), (b'x-ms-rai-invoked', b'true'), (b'x-ms-served-model', b'gpt-4.1-2025-04-14'), (b'x-ratelimit-abusepenalty-active', b'False'), (b'x-ratelimit-key', b'gpt-4.1-2025-04-14-9d524e2d'), (b'x-ratelimit-limit-requests', b'2000'), (b'x-ratelimit-limit-tokens', b'2000000'), (b'x-ratelimit-remaining-requests', b'1999'), (b'x-ratelimit-remaining-tokens', b'1998779'), (b'x-ratelimit-renewalperiod-requests', b'60'), (b'x-ratelimit-renewalperiod-tokens', b'60'), (b'x-ratelimit-reset-requests', b'0'), (b'x-ratelimit-reset-tokens', b'0'), (b'apim-request-id', b'38393f76-c7c7-40f6-af92-71bf8fb952bf'), (b'x-ms-deployment-name', b'gpt-4.1-2025-04-14-9d524e2d'), (b'x-ms-region', b'Spain Central'), (b'x-time-to-first-byte', b'5157.509912967682'), (b'x-response-id', b'58888b37-e72b-41d6-81b3-e20b71c6551f'), (b'Set-Cookie', b'a6fdee852b3c68361e6a7ac0f8033306=cf41ce885e9599822ed2781362c85232; Path=/ago-m365-securegpt-hub-v1-vrs/providers/openai/deployments/gpt-4.1-2025-04-14/chat; HttpOnly; Domain=api-int.se.axa-go.applications.services.axa-tech.intraxa'), (b'Strict-Transport-Security', b'max-age=15552000; includeSubDomains'), (b'Referrer-Policy', b'strict-origin-when-cross-origin'), (b'Content-Encoding', b'gzip'), (b'Content-Type', b'application/json'), (b'Transfer-Encoding', b'chunked'), (b'Date', b'Sat, 04 Jul 2026 07:44:07 GMT'), (b'Keep-Alive', b'timeout=60'), (b'Connection', b'keep-alive'), (b'Server', b'server')])
-2026-07-04T13:14:08 INFO httpx: HTTP Request: POST https://api-int.se.axa-go.applications.services.axa-tech.intraxa/ago-m365-securegpt-hub-v1-vrs/providers/openai/deployments/gpt-4.1-2025-04-14/chat/completions?api-version=2024-10-21 "HTTP/1.1 200 "
-2026-07-04T13:14:08 DEBUG httpcore.http11: receive_response_body.started request=<Request [b'POST']>
-2026-07-04T13:14:08 DEBUG httpcore.http11: receive_response_body.complete
-2026-07-04T13:14:08 DEBUG httpcore.http11: response_closed.started
-2026-07-04T13:14:08 DEBUG httpcore.http11: response_closed.complete
-2026-07-04T13:14:08 DEBUG openai._base_client: HTTP Response: POST https://api-int.se.axa-go.applications.services.axa-tech.intraxa/ago-m365-securegpt-hub-v1-vrs/providers/openai/deployments/gpt-4.1-2025-04-14/chat/completions?api-version=2024-10-21 "200 " Headers({'content-security-policy': "upgrade-insecure-requests;default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline'", 'cross-origin-opener-policy': 'same-origin', 'cross-origin-resource-policy': 'same-origin', 'origin-agent-cluster': '?1', 'x-content-type-options': 'nosniff', 'x-dns-prefetch-control': 'off', 'x-download-options': 'noopen', 'x-frame-options': 'DENY', 'x-permitted-cross-domain-policies': 'none', 'x-xss-protection': '0', 'access-control-allow-origin': '*', 'x-request-id': 'b3ffb74d6d045668620e3703bf96f6e8:01f7ca4c3348194a', 'x-trace-id': 'b3ffb74d6d045668620e3703bf96f6e8', 'x-target-id': 'eyJyZWdpb24iOiJlcyIsImRlcGxveW1lbnRNb2RlIjoiQXp1cmVPcGVuQWlEYXRhWm9uZVN0YW5kYXJkIn0=', 'azureai-fe-is-streaming': 'False', 'azureml-model-session': 'd20260624110322-2c214418', 'skip-error-remapping': 'true', 'x-accel-buffering': 'no', 'x-ms-is-spilled-over': 'false', 'x-ms-rai-invoked': 'true', 'x-ms-served-model': 'gpt-4.1-2025-04-14', 'x-ratelimit-abusepenalty-active': 'False', 'x-ratelimit-key': 'gpt-4.1-2025-04-14-9d524e2d', 'x-ratelimit-limit-requests': '2000', 'x-ratelimit-limit-tokens': '2000000', 'x-ratelimit-remaining-requests': '1999', 'x-ratelimit-remaining-tokens': '1998779', 'x-ratelimit-renewalperiod-requests': '60', 'x-ratelimit-renewalperiod-tokens': '60', 'x-ratelimit-reset-requests': '0', 'x-ratelimit-reset-tokens': '0', 'apim-request-id': '38393f76-c7c7-40f6-af92-71bf8fb952bf', 'x-ms-deployment-name': 'gpt-4.1-2025-04-14-9d524e2d', 'x-ms-region': 'Spain Central', 'x-time-to-first-byte': '5157.509912967682', 'x-response-id': '58888b37-e72b-41d6-81b3-e20b71c6551f', 'set-cookie': 'a6fdee852b3c68361e6a7ac0f8033306=cf41ce885e9599822ed2781362c85232; Path=/ago-m365-securegpt-hub-v1-vrs/providers/openai/deployments/gpt-4.1-2025-04-14/chat; HttpOnly; Domain=api-int.se.axa-go.applications.services.axa-tech.intraxa', 'strict-transport-security': 'max-age=15552000; includeSubDomains', 'referrer-policy': 'strict-origin-when-cross-origin', 'content-encoding': 'gzip', 'content-type': 'application/json', 'transfer-encoding': 'chunked', 'date': 'Sat, 04 Jul 2026 07:44:07 GMT', 'keep-alive': 'timeout=60', 'connection': 'keep-alive', 'server': 'server'})
-2026-07-04T13:14:08 DEBUG openai._base_client: request_id: b3ffb74d6d045668620e3703bf96f6e8:01f7ca4c3348194a
-2026-07-04T13:14:08 DEBUG openai._base_client: Request options: {'method': 'post', 'url': '/chat/completions', 'headers': {'X-Stainless-Raw-Response': 'true', 'api-key': '<redacted>'}, 'files': None, 'idempotency_key': 'stainless-python-retry-807252af-4f52-4e2c-a38f-9f12a21feb58', 'security': {'bearer_auth': True}, 'content': None, 'json_data': {'messages': [{'content': '# Grain Discovery — Instructions\n\nYou are declaring the GRAIN of candidate fact tables, per `docs/KIMBALL_DIMENSIONAL_MODELING_GUIDE.md`\nsection 3. The grain is declared BEFORE dimensions/measures are finalized — it is the single most\nimportant sentence in a dimensional model. Rule `GRAIN-FAIL`: if you cannot determine the grain\nwith reasonable confidence from the evidence given, say so — do not guess.\n\nYou receive a batch of candidate fact tables in one call. For each: the business event it was\nmatched to (from Business Understanding), and its key/measure/date-column evidence (business\nkeys, foreign keys, date columns, measure columns).\n\n## Your task\n\nFor each candidate, write ONE grain sentence: "One row represents one X" — at the most atomic\nlevel the evidence supports. Base it on the table\'s own key/FK/date columns (e.g. a table with a\npolicy FK, a customer FK, and a claim date is "one row per policy per customer per claim date"),\nnot on the event name alone.\n\nGive each a `confidence` in [0,1]. If the columns don\'t clearly support a single atomic grain (for\nexample, the table looks like it mixes two different measurement events), set confidence low and\nexplain in `reasoning` rather than picking an arbitrary grain.\n\nReturn ONLY valid JSON, no markdown, no commentary.\n\n## Output Schema\n\n```json\n{\n  "grains": [\n    {"table": "claims", "grain": "One row represents one claim line item per policy per claim date", "confidence": 0.85, "reasoning": "policy_id, claim_date, and a line-item measure are all present"}\n  ]\n}\n```\n', 'role': 'system'}, {'content': 'Candidate fact tables:\n[{"table":"az__training_hr__agbsdmg","event":"Employee Training Activity","pk":[],"fk":["training_id","employee_id","course_id"],"date":["assigned_date","start_date","completion_date"],"measure":[]},{"table":"az__recuitment_hr__agbsdmg","event":"Job Application Process","pk":[],"fk":["candidate_id","job_requisition_id","interviewer_id"],"date":["candidate_name","application_date","interview_date","offer_date","joining_date"],"measure":[]},{"table":"az__performance_hr__agbsdmg","event":"Employee Performance Review","pk":[],"fk":["review_id","employee_id","reviewer_id"],"date":["review_date"],"measure":[]},{"table":"az__attendance_hr__agbsdmg","event":"Employee Attendance","pk":[],"fk":["attendance_id","employee_id"],"date":["attendance_date"],"measure":[]}]', 'role': 'user'}], 'model': 'gpt-4.1-2025-04-14', 'max_completion_tokens': 4096, 'stream': False, 'temperature': 0.0, 'top_p': 0.2}}
-2026-07-04T13:14:08 DEBUG openai._base_client: Sending HTTP Request: POST https://api-int.se.axa-go.applications.services.axa-tech.intraxa/ago-m365-securegpt-hub-v1-vrs/providers/openai/deployments/gpt-4.1-2025-04-14/chat/completions?api-version=2024-10-21
-2026-07-04T13:14:08 DEBUG httpcore.connection: connect_tcp.started host='api-int.se.axa-go.applications.services.axa-tech.intraxa' port=443 local_address=None timeout=None socket_options=None
-2026-07-04T13:14:08 DEBUG httpcore.connection: connect_tcp.complete return_value=<httpcore._backends.sync.SyncStream object at 0x000001FEC0DAEFF0>
-2026-07-04T13:14:08 DEBUG httpcore.connection: start_tls.started ssl_context=<ssl.SSLContext object at 0x000001FED512ACD0> server_hostname='api-int.se.axa-go.applications.services.axa-tech.intraxa' timeout=None
-2026-07-04T13:14:08 DEBUG httpcore.connection: start_tls.complete return_value=<httpcore._backends.sync.SyncStream object at 0x000001FEC0DAC980>
-2026-07-04T13:14:08 DEBUG httpcore.http11: send_request_headers.started request=<Request [b'POST']>
-2026-07-04T13:14:08 DEBUG httpcore.http11: send_request_headers.complete
-2026-07-04T13:14:08 DEBUG httpcore.http11: send_request_body.started request=<Request [b'POST']>
-2026-07-04T13:14:08 DEBUG httpcore.http11: send_request_body.complete
-2026-07-04T13:14:08 DEBUG httpcore.http11: receive_response_headers.started request=<Request [b'POST']>
-2026-07-04T13:14:11 DEBUG httpcore.http11: receive_response_headers.complete return_value=(b'HTTP/1.1', 200, b'', [(b'content-security-policy', b"upgrade-insecure-requests;default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline'"), (b'cross-origin-opener-policy', b'same-origin'), (b'cross-origin-resource-policy', b'same-origin'), (b'origin-agent-cluster', b'?1'), (b'x-content-type-options', b'nosniff'), (b'x-dns-prefetch-control', b'off'), (b'x-download-options', b'noopen'), (b'x-frame-options', b'DENY'), (b'x-permitted-cross-domain-policies', b'none'), (b'x-xss-protection', b'0'), (b'access-control-allow-origin', b'*'), (b'x-request-id', b'da09d85373b9d0f858a0e4dc4a809976:4474a9de2d90f1a0'), (b'x-trace-id', b'da09d85373b9d0f858a0e4dc4a809976'), (b'x-target-id', b'eyJyZWdpb24iOiJlcyIsImRlcGxveW1lbnRNb2RlIjoiQXp1cmVPcGVuQWlEYXRhWm9uZVN0YW5kYXJkIn0='), (b'azureai-fe-is-streaming', b'False'), (b'azureml-model-session', b'd20260624160632-83b896e6'), (b'skip-error-remapping', b'true'), (b'x-accel-buffering', b'no'), (b'x-ms-is-spilled-over', b'false'), (b'x-ms-rai-invoked', b'true'), (b'x-ms-served-model', b'gpt-4.1-2025-04-14'), (b'x-ratelimit-abusepenalty-active', b'False'), (b'x-ratelimit-key', b'gpt-4.1-2025-04-14-9d524e2d'), (b'x-ratelimit-limit-requests', b'2000'), (b'x-ratelimit-limit-tokens', b'2000000'), (b'x-ratelimit-remaining-requests', b'1999'), (b'x-ratelimit-remaining-tokens', b'1999438'), (b'x-ratelimit-renewalperiod-requests', b'60'), (b'x-ratelimit-renewalperiod-tokens', b'60'), (b'x-ratelimit-reset-requests', b'0'), (b'x-ratelimit-reset-tokens', b'0'), (b'apim-request-id', b'44f4b641-750a-4ebd-b66c-97679ff5184b'), (b'x-ms-deployment-name', b'gpt-4.1-2025-04-14-9d524e2d'), (b'x-ms-region', b'Spain Central'), (b'x-time-to-first-byte', b'2695.6830250024796'), (b'x-response-id', b'56d1f4a3-a8f7-4551-be47-af3c828ffc59'), (b'Set-Cookie', b'a6fdee852b3c68361e6a7ac0f8033306=cf41ce885e9599822ed2781362c85232; Path=/ago-m365-securegpt-hub-v1-vrs/providers/openai/deployments/gpt-4.1-2025-04-14/chat; HttpOnly; Domain=api-int.se.axa-go.applications.services.axa-tech.intraxa'), (b'Strict-Transport-Security', b'max-age=15552000; includeSubDomains'), (b'Referrer-Policy', b'strict-origin-when-cross-origin'), (b'Content-Encoding', b'gzip'), (b'Content-Type', b'application/json'), (b'Transfer-Encoding', b'chunked'), (b'Date', b'Sat, 04 Jul 2026 07:44:11 GMT'), (b'Keep-Alive', b'timeout=60'), (b'Connection', b'keep-alive'), (b'Server', b'server')])
-2026-07-04T13:14:11 INFO httpx: HTTP Request: POST https://api-int.se.axa-go.applications.services.axa-tech.intraxa/ago-m365-securegpt-hub-v1-vrs/providers/openai/deployments/gpt-4.1-2025-04-14/chat/completions?api-version=2024-10-21 "HTTP/1.1 200 "
-2026-07-04T13:14:11 DEBUG httpcore.http11: receive_response_body.started request=<Request [b'POST']>
-2026-07-04T13:14:11 DEBUG httpcore.http11: receive_response_body.complete
-2026-07-04T13:14:11 DEBUG httpcore.http11: response_closed.started
-2026-07-04T13:14:11 DEBUG httpcore.http11: response_closed.complete
-2026-07-04T13:14:11 DEBUG openai._base_client: HTTP Response: POST https://api-int.se.axa-go.applications.services.axa-tech.intraxa/ago-m365-securegpt-hub-v1-vrs/providers/openai/deployments/gpt-4.1-2025-04-14/chat/completions?api-version=2024-10-21 "200 " Headers({'content-security-policy': "upgrade-insecure-requests;default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline'", 'cross-origin-opener-policy': 'same-origin', 'cross-origin-resource-policy': 'same-origin', 'origin-agent-cluster': '?1', 'x-content-type-options': 'nosniff', 'x-dns-prefetch-control': 'off', 'x-download-options': 'noopen', 'x-frame-options': 'DENY', 'x-permitted-cross-domain-policies': 'none', 'x-xss-protection': '0', 'access-control-allow-origin': '*', 'x-request-id': 'da09d85373b9d0f858a0e4dc4a809976:4474a9de2d90f1a0', 'x-trace-id': 'da09d85373b9d0f858a0e4dc4a809976', 'x-target-id': 'eyJyZWdpb24iOiJlcyIsImRlcGxveW1lbnRNb2RlIjoiQXp1cmVPcGVuQWlEYXRhWm9uZVN0YW5kYXJkIn0=', 'azureai-fe-is-streaming': 'False', 'azureml-model-session': 'd20260624160632-83b896e6', 'skip-error-remapping': 'true', 'x-accel-buffering': 'no', 'x-ms-is-spilled-over': 'false', 'x-ms-rai-invoked': 'true', 'x-ms-served-model': 'gpt-4.1-2025-04-14', 'x-ratelimit-abusepenalty-active': 'False', 'x-ratelimit-key': 'gpt-4.1-2025-04-14-9d524e2d', 'x-ratelimit-limit-requests': '2000', 'x-ratelimit-limit-tokens': '2000000', 'x-ratelimit-remaining-requests': '1999', 'x-ratelimit-remaining-tokens': '1999438', 'x-ratelimit-renewalperiod-requests': '60', 'x-ratelimit-renewalperiod-tokens': '60', 'x-ratelimit-reset-requests': '0', 'x-ratelimit-reset-tokens': '0', 'apim-request-id': '44f4b641-750a-4ebd-b66c-97679ff5184b', 'x-ms-deployment-name': 'gpt-4.1-2025-04-14-9d524e2d', 'x-ms-region': 'Spain Central', 'x-time-to-first-byte': '2695.6830250024796', 'x-response-id': '56d1f4a3-a8f7-4551-be47-af3c828ffc59', 'set-cookie': 'a6fdee852b3c68361e6a7ac0f8033306=cf41ce885e9599822ed2781362c85232; Path=/ago-m365-securegpt-hub-v1-vrs/providers/openai/deployments/gpt-4.1-2025-04-14/chat; HttpOnly; Domain=api-int.se.axa-go.applications.services.axa-tech.intraxa', 'strict-transport-security': 'max-age=15552000; includeSubDomains', 'referrer-policy': 'strict-origin-when-cross-origin', 'content-encoding': 'gzip', 'content-type': 'application/json', 'transfer-encoding': 'chunked', 'date': 'Sat, 04 Jul 2026 07:44:11 GMT', 'keep-alive': 'timeout=60', 'connection': 'keep-alive', 'server': 'server'})
-2026-07-04T13:14:11 DEBUG openai._base_client: request_id: da09d85373b9d0f858a0e4dc4a809976:4474a9de2d90f1a0
-2026-07-04T13:14:11 INFO services.mm_classifiers: LOOKUP eligibility: column='course_name' cardinality=None eligible=False confidence=0.00 reason=matches the free-text veto vocabulary (name/email/notes/address/...)
-2026-07-04T13:14:11 INFO services.mm_classifiers: LOOKUP eligibility: column='learning_provider' cardinality=None eligible=False confidence=0.00 reason=cardinality unavailable and column name doesn't match the dimension-keyword vocabulary
-2026-07-04T13:14:11 INFO services.mm_classifiers: LOOKUP eligibility: column='completion_status' cardinality=None eligible=True confidence=0.60 reason=cardinality unavailable (no profiling data) — promoted on name match against the dimension-keyword vocabulary, at reduced confidence
-2026-07-04T13:14:11 INFO services.mm_classifiers: LOOKUP eligibility: column='completion_status' cardinality=None eligible=True confidence=0.60 reason=cardinality unavailable (no profiling data) — promoted on name match against the dimension-keyword vocabulary, at reduced confidence
-2026-07-04T13:14:11 INFO services.mm_classifiers: LOOKUP eligibility: column='delivery_mode' cardinality=None eligible=True confidence=0.60 reason=cardinality unavailable (no profiling data) — promoted on name match against the dimension-keyword vocabulary, at reduced confidence
-2026-07-04T13:14:11 INFO services.mm_classifiers: LOOKUP eligibility: column='delivery_mode' cardinality=None eligible=True confidence=0.60 reason=cardinality unavailable (no profiling data) — promoted on name match against the dimension-keyword vocabulary, at reduced confidence
-2026-07-04T13:14:12 INFO services.mm_classifiers: LOOKUP eligibility: column='highest_qualification' cardinality=None eligible=False confidence=0.00 reason=cardinality unavailable and column name doesn't match the dimension-keyword vocabulary
-2026-07-04T13:14:12 INFO services.mm_classifiers: LOOKUP eligibility: column='offer_status' cardinality=None eligible=True confidence=0.60 reason=cardinality unavailable (no profiling data) — promoted on name match against the dimension-keyword vocabulary, at reduced confidence
-2026-07-04T13:14:12 INFO services.mm_classifiers: LOOKUP eligibility: column='hired_flag' cardinality=None eligible=True confidence=0.60 reason=cardinality unavailable (no profiling data) — promoted on name match against the dimension-keyword vocabulary, at reduced confidence
-2026-07-04T13:14:12 INFO services.mm_classifiers: LOOKUP eligibility: column='hired_flag' cardinality=None eligible=True confidence=0.60 reason=cardinality unavailable (no profiling data) — promoted on name match against the dimension-keyword vocabulary, at reduced confidence
-2026-07-04T13:14:12 INFO services.mm_classifiers: LOOKUP eligibility: column='designation' cardinality=None eligible=False confidence=0.00 reason=cardinality unavailable and column name doesn't match the dimension-keyword vocabulary
-2026-07-04T13:14:12 INFO services.mm_classifiers: LOOKUP eligibility: column='review_cycle' cardinality=None eligible=False confidence=0.00 reason=cardinality unavailable and column name doesn't match the dimension-keyword vocabulary
-2026-07-04T13:14:12 INFO services.mm_classifiers: LOOKUP eligibility: column='overall_rating' cardinality=None eligible=True confidence=0.60 reason=cardinality unavailable (no profiling data) — promoted on name match against the dimension-keyword vocabulary, at reduced confidence
-2026-07-04T13:14:12 INFO services.mm_classifiers: LOOKUP eligibility: column='review_status' cardinality=None eligible=True confidence=0.60 reason=cardinality unavailable (no profiling data) — promoted on name match against the dimension-keyword vocabulary, at reduced confidence
-2026-07-04T13:14:12 INFO services.mm_classifiers: LOOKUP eligibility: column='review_status' cardinality=None eligible=True confidence=0.60 reason=cardinality unavailable (no profiling data) — promoted on name match against the dimension-keyword vocabulary, at reduced confidence
-2026-07-04T13:14:13 INFO services.mm_classifiers: LOOKUP eligibility: column='check_in' cardinality=1 eligible=True confidence=0.95 reason=verified low cardinality (1)
-2026-07-04T13:14:13 INFO services.mm_classifiers: LOOKUP eligibility: column='check_out' cardinality=1 eligible=True confidence=0.95 reason=verified low cardinality (1)
-2026-07-04T13:14:13 INFO services.mm_classifiers: LOOKUP eligibility: column='working_hours' cardinality=32 eligible=True confidence=0.95 reason=verified low cardinality (32)
-2026-07-04T13:14:13 INFO services.mm_classifiers: LOOKUP eligibility: column='working_hours' cardinality=32 eligible=True confidence=0.95 reason=verified low cardinality (32)
-2026-07-04T13:14:13 INFO services.mm_classifiers: LOOKUP eligibility: column='attendance_status' cardinality=3 eligible=True confidence=0.95 reason=verified low cardinality (3)
-2026-07-04T13:14:13 INFO services.mm_classifiers: LOOKUP eligibility: column='attendance_status' cardinality=3 eligible=True confidence=0.95 reason=verified low cardinality (3)
-2026-07-04T13:14:13 INFO services.mm_classifiers: LOOKUP eligibility: column='leave_type' cardinality=4 eligible=True confidence=0.95 reason=verified low cardinality (4)
-2026-07-04T13:14:13 INFO services.mm_classifiers: LOOKUP eligibility: column='leave_type' cardinality=4 eligible=True confidence=0.95 reason=verified low cardinality (4)
-2026-07-04T13:14:13 INFO services.mm_classifiers: LOOKUP eligibility: column='leave_duration' cardinality=2 eligible=True confidence=0.95 reason=verified low cardinality (2)
-2026-07-04T13:14:13 INFO services.mm_classifiers: LOOKUP eligibility: column='shift' cardinality=3 eligible=True confidence=0.95 reason=verified low cardinality (3)
-2026-07-04T13:14:13 INFO services.mm_classifiers: LOOKUP eligibility: column='shift' cardinality=3 eligible=True confidence=0.95 reason=verified low cardinality (3)
-2026-07-04T13:14:14 INFO services.mm_classifiers: LOOKUP eligibility: column='work_mode' cardinality=3 eligible=True confidence=0.95 reason=verified low cardinality (3)
-2026-07-04T13:14:14 INFO services.mm_classifiers: LOOKUP eligibility: column='work_mode' cardinality=3 eligible=True confidence=0.95 reason=verified low cardinality (3)
-2026-07-04T13:14:14 INFO services.mm_classifiers: LOOKUP eligibility: column='late_minutes' cardinality=46 eligible=True confidence=0.95 reason=verified low cardinality (46)
-2026-07-04T13:14:14 INFO services.mm_classifiers: LOOKUP eligibility: column='late_minutes' cardinality=46 eligible=True confidence=0.95 reason=verified low cardinality (46)
-2026-07-04T13:14:14 INFO services.mm_classifiers: LOOKUP eligibility: column='overtime_hours' cardinality=32 eligible=True confidence=0.95 reason=verified low cardinality (32)
-2026-07-04T13:14:14 INFO services.mm_classifiers: LOOKUP eligibility: column='first_name' cardinality=15 eligible=False confidence=0.00 reason=matches the free-text veto vocabulary (name/email/notes/address/...)
-2026-07-04T13:14:14 INFO services.mm_classifiers: LOOKUP eligibility: column='last_name' cardinality=10 eligible=False confidence=0.00 reason=matches the free-text veto vocabulary (name/email/notes/address/...)
-2026-07-04T13:14:14 INFO services.mm_classifiers: LOOKUP eligibility: column='business_unit' cardinality=1 eligible=True confidence=0.95 reason=verified low cardinality (1)
-2026-07-04T13:14:14 INFO services.mm_classifiers: LOOKUP eligibility: column='designation' cardinality=8 eligible=True confidence=0.95 reason=verified low cardinality (8)
-2026-07-04T13:14:14 INFO services.mm_classifiers: LOOKUP eligibility: column='designation' cardinality=8 eligible=True confidence=0.95 reason=verified low cardinality (8)
-2026-07-04T13:14:14 INFO services.mm_classifiers: LOOKUP eligibility: column='manager_id' cardinality=20 eligible=True confidence=0.95 reason=verified low cardinality (20)
-2026-07-04T13:14:14 INFO services.mm_classifiers: LOOKUP eligibility: column='employment_type' cardinality=2 eligible=True confidence=0.95 reason=verified low cardinality (2)
-2026-07-04T13:14:14 INFO services.mm_classifiers: LOOKUP eligibility: column='employment_type' cardinality=2 eligible=True confidence=0.95 reason=verified low cardinality (2)
-2026-07-04T13:14:14 INFO services.mm_classifiers: LOOKUP eligibility: column='work_location' cardinality=6 eligible=True confidence=0.95 reason=verified low cardinality (6)
-2026-07-04T13:14:14 INFO services.mm_classifiers: LOOKUP eligibility: column='grade' cardinality=4 eligible=True confidence=0.95 reason=verified low cardinality (4)
-2026-07-04T13:14:14 INFO services.mm_classifiers: LOOKUP eligibility: column='grade' cardinality=4 eligible=True confidence=0.95 reason=verified low cardinality (4)
-2026-07-04T13:14:14 INFO services.mm_classifiers: LOOKUP eligibility: column='employment_status' cardinality=1 eligible=True confidence=0.95 reason=verified low cardinality (1)
-2026-07-04T13:14:15 INFO services.mm_dimension_normalization: Dimension Normalization: reused existing 'Dim_EmployeesMaster' for 'Fact_EmployeeTrainingsHr.employee_id'
-2026-07-04T13:14:15 INFO services.mm_dimension_normalization: Dimension Normalization: reused existing 'Dim_EmployeesMaster' for 'Fact_EmployeeRecruitmentHr.gender'
-2026-07-04T13:14:15 INFO services.mm_dimension_normalization: Dimension Normalization: reused existing 'Dim_EmployeesMaster' for 'Fact_EmployeeRecruitmentHr.department'
-2026-07-04T13:14:15 INFO services.mm_dimension_normalization: Dimension Normalization: reused existing 'Dim_EmployeesMaster' for 'Fact_EmployeePerformanceReview.employee_id'
-2026-07-04T13:14:15 INFO services.mm_dimension_normalization: Dimension Normalization: reused existing 'Dim_EmployeesMaster' for 'Fact_EmployeeAttendanceHr.employee_id'
-2026-07-04T13:14:15 INFO services.mm_conformed_dims: Real Dim_Date created — derived calendar columns only, no fabricated business attributes
-2026-07-04T13:14:15 INFO services.mm_generic_dims: generate_generic_dimensions: skipped (source-faithful mode; set MM_ENABLE_GENERIC_DIMS=1 to enable)
+2026-07-05T04:06:22 ERROR services.mm_agentic_supervisor: MmAgentEventLog write failed: board=f5254048-72cb-47ff-9c2f-042316d16328 run=10b9e5cd-981e-4b59-ba4b-4ea95412b94b agent=validation_agent
+Traceback (most recent call last):
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\asgiref\sync.py", line 361, in main_wrap
+    raise exc_info[1]
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\http\response.py", line 514, in __iter__
+    return iter(self.streaming_content)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: 'async_generator' object is not iterable
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\B700WM\OneDrive - AXA\POC\backend-agentic-governance\services\mm_agentic_supervisor.py", line 230, in _write_agent_event_sync
+    MmAgentEventLog.objects.create(
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\manager.py", line 87, in manager_method
+    return getattr(self.get_queryset(), name)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\query.py", line 669, in create
+    obj.save(force_insert=True, using=self.db)
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 874, in save
+    self.save_base(
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 966, in save_base
+    updated = self._save_table(
+              ^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 1169, in _save_table
+    results = self._do_insert(
+              ^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 1220, in _do_insert
+    return manager._insert(
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\manager.py", line 87, in manager_method
+    return getattr(self.get_queryset(), name)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\query.py", line 1918, in _insert
+    return query.get_compiler(using=using).execute_sql(returning_fields)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\sql\compiler.py", line 1923, in execute_sql
+    with self.connection.cursor() as cursor:
+         ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\utils\asyncio.py", line 24, in inner
+    raise SynchronousOnlyOperation(message)
+django.core.exceptions.SynchronousOnlyOperation: You cannot call this from an async context - use a thread or sync_to_async.
+2026-07-05T04:06:22 ERROR services.mm_agentic_supervisor: MmAgentEventLog write failed: board=f5254048-72cb-47ff-9c2f-042316d16328 run=10b9e5cd-981e-4b59-ba4b-4ea95412b94b agent=validation_agent
+Traceback (most recent call last):
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\asgiref\sync.py", line 361, in main_wrap
+    raise exc_info[1]
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\http\response.py", line 514, in __iter__
+    return iter(self.streaming_content)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: 'async_generator' object is not iterable
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\B700WM\OneDrive - AXA\POC\backend-agentic-governance\services\mm_agentic_supervisor.py", line 230, in _write_agent_event_sync
+    MmAgentEventLog.objects.create(
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\manager.py", line 87, in manager_method
+    return getattr(self.get_queryset(), name)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\query.py", line 669, in create
+    obj.save(force_insert=True, using=self.db)
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 874, in save
+    self.save_base(
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 966, in save_base
+    updated = self._save_table(
+              ^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 1169, in _save_table
+    results = self._do_insert(
+              ^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 1220, in _do_insert
+    return manager._insert(
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\manager.py", line 87, in manager_method
+    return getattr(self.get_queryset(), name)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\query.py", line 1918, in _insert
+    return query.get_compiler(using=using).execute_sql(returning_fields)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\sql\compiler.py", line 1923, in execute_sql
+    with self.connection.cursor() as cursor:
+         ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\utils\asyncio.py", line 24, in inner
+    raise SynchronousOnlyOperation(message)
+django.core.exceptions.SynchronousOnlyOperation: You cannot call this from an async context - use a thread or sync_to_async.
+2026-07-05T04:06:22 ERROR services.mm_agentic_supervisor: MmAgentEventLog write failed: board=f5254048-72cb-47ff-9c2f-042316d16328 run=10b9e5cd-981e-4b59-ba4b-4ea95412b94b agent=relationship_agent
+Traceback (most recent call last):
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\asgiref\sync.py", line 361, in main_wrap
+    raise exc_info[1]
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\http\response.py", line 514, in __iter__
+    return iter(self.streaming_content)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: 'async_generator' object is not iterable
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\B700WM\OneDrive - AXA\POC\backend-agentic-governance\services\mm_agentic_supervisor.py", line 230, in _write_agent_event_sync
+    MmAgentEventLog.objects.create(
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\manager.py", line 87, in manager_method
+    return getattr(self.get_queryset(), name)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\query.py", line 669, in create
+    obj.save(force_insert=True, using=self.db)
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 874, in save
+    self.save_base(
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 966, in save_base
+    updated = self._save_table(
+              ^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 1169, in _save_table
+    results = self._do_insert(
+              ^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 1220, in _do_insert
+    return manager._insert(
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\manager.py", line 87, in manager_method
+    return getattr(self.get_queryset(), name)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\query.py", line 1918, in _insert
+    return query.get_compiler(using=using).execute_sql(returning_fields)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\sql\compiler.py", line 1923, in execute_sql
+    with self.connection.cursor() as cursor:
+         ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\utils\asyncio.py", line 24, in inner
+    raise SynchronousOnlyOperation(message)
+django.core.exceptions.SynchronousOnlyOperation: You cannot call this from an async context - use a thread or sync_to_async.
+2026-07-05T04:06:22 ERROR services.mm_agentic_supervisor: MmAgentEventLog write failed: board=f5254048-72cb-47ff-9c2f-042316d16328 run=10b9e5cd-981e-4b59-ba4b-4ea95412b94b agent=relationship_agent
+Traceback (most recent call last):
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\asgiref\sync.py", line 361, in main_wrap
+    raise exc_info[1]
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\http\response.py", line 514, in __iter__
+    return iter(self.streaming_content)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: 'async_generator' object is not iterable
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\B700WM\OneDrive - AXA\POC\backend-agentic-governance\services\mm_agentic_supervisor.py", line 230, in _write_agent_event_sync
+    MmAgentEventLog.objects.create(
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\manager.py", line 87, in manager_method
+    return getattr(self.get_queryset(), name)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\query.py", line 669, in create
+    obj.save(force_insert=True, using=self.db)
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 874, in save
+    self.save_base(
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 966, in save_base
+    updated = self._save_table(
+              ^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 1169, in _save_table
+    results = self._do_insert(
+              ^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 1220, in _do_insert
+    return manager._insert(
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\manager.py", line 87, in manager_method
+    return getattr(self.get_queryset(), name)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\query.py", line 1918, in _insert
+    return query.get_compiler(using=using).execute_sql(returning_fields)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\sql\compiler.py", line 1923, in execute_sql
+    with self.connection.cursor() as cursor:
+         ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\utils\asyncio.py", line 24, in inner
+    raise SynchronousOnlyOperation(message)
+django.core.exceptions.SynchronousOnlyOperation: You cannot call this from an async context - use a thread or sync_to_async.
+2026-07-05T04:06:22 ERROR services.mm_agentic_supervisor: MmAgentEventLog write failed: board=f5254048-72cb-47ff-9c2f-042316d16328 run=10b9e5cd-981e-4b59-ba4b-4ea95412b94b agent=relationship_agent
+Traceback (most recent call last):
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\asgiref\sync.py", line 361, in main_wrap
+    raise exc_info[1]
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\http\response.py", line 514, in __iter__
+    return iter(self.streaming_content)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: 'async_generator' object is not iterable
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\B700WM\OneDrive - AXA\POC\backend-agentic-governance\services\mm_agentic_supervisor.py", line 230, in _write_agent_event_sync
+    MmAgentEventLog.objects.create(
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\manager.py", line 87, in manager_method
+    return getattr(self.get_queryset(), name)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\query.py", line 669, in create
+    obj.save(force_insert=True, using=self.db)
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 874, in save
+    self.save_base(
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 966, in save_base
+    updated = self._save_table(
+              ^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 1169, in _save_table
+    results = self._do_insert(
+              ^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 1220, in _do_insert
+    return manager._insert(
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\manager.py", line 87, in manager_method
+    return getattr(self.get_queryset(), name)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\query.py", line 1918, in _insert
+    return query.get_compiler(using=using).execute_sql(returning_fields)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\sql\compiler.py", line 1923, in execute_sql
+    with self.connection.cursor() as cursor:
+         ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\utils\asyncio.py", line 24, in inner
+    raise SynchronousOnlyOperation(message)
+django.core.exceptions.SynchronousOnlyOperation: You cannot call this from an async context - use a thread or sync_to_async.
+2026-07-05T04:06:22 ERROR services.mm_agentic_supervisor: MmAgentEventLog write failed: board=f5254048-72cb-47ff-9c2f-042316d16328 run=10b9e5cd-981e-4b59-ba4b-4ea95412b94b agent=validation_agent
+Traceback (most recent call last):
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\asgiref\sync.py", line 361, in main_wrap
+    raise exc_info[1]
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\http\response.py", line 514, in __iter__
+    return iter(self.streaming_content)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: 'async_generator' object is not iterable
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\B700WM\OneDrive - AXA\POC\backend-agentic-governance\services\mm_agentic_supervisor.py", line 230, in _write_agent_event_sync
+    MmAgentEventLog.objects.create(
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\manager.py", line 87, in manager_method
+    return getattr(self.get_queryset(), name)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\query.py", line 669, in create
+    obj.save(force_insert=True, using=self.db)
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 874, in save
+    self.save_base(
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 966, in save_base
+    updated = self._save_table(
+              ^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 1169, in _save_table
+    results = self._do_insert(
+              ^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 1220, in _do_insert
+    return manager._insert(
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\manager.py", line 87, in manager_method
+    return getattr(self.get_queryset(), name)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\query.py", line 1918, in _insert
+    return query.get_compiler(using=using).execute_sql(returning_fields)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\sql\compiler.py", line 1923, in execute_sql
+    with self.connection.cursor() as cursor:
+         ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\utils\asyncio.py", line 24, in inner
+    raise SynchronousOnlyOperation(message)
+django.core.exceptions.SynchronousOnlyOperation: You cannot call this from an async context - use a thread or sync_to_async.
+2026-07-05T04:06:22 ERROR services.mm_agentic_supervisor: MmAgentEventLog write failed: board=f5254048-72cb-47ff-9c2f-042316d16328 run=10b9e5cd-981e-4b59-ba4b-4ea95412b94b agent=validation_agent
+Traceback (most recent call last):
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\asgiref\sync.py", line 361, in main_wrap
+    raise exc_info[1]
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\http\response.py", line 514, in __iter__
+    return iter(self.streaming_content)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: 'async_generator' object is not iterable
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\B700WM\OneDrive - AXA\POC\backend-agentic-governance\services\mm_agentic_supervisor.py", line 230, in _write_agent_event_sync
+    MmAgentEventLog.objects.create(
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\manager.py", line 87, in manager_method
+    return getattr(self.get_queryset(), name)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\query.py", line 669, in create
+    obj.save(force_insert=True, using=self.db)
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 874, in save
+    self.save_base(
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 966, in save_base
+    updated = self._save_table(
+              ^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 1169, in _save_table
+    results = self._do_insert(
+              ^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 1220, in _do_insert
+    return manager._insert(
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\manager.py", line 87, in manager_method
+    return getattr(self.get_queryset(), name)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\query.py", line 1918, in _insert
+    return query.get_compiler(using=using).execute_sql(returning_fields)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\sql\compiler.py", line 1923, in execute_sql
+    with self.connection.cursor() as cursor:
+         ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\utils\asyncio.py", line 24, in inner
+    raise SynchronousOnlyOperation(message)
+django.core.exceptions.SynchronousOnlyOperation: You cannot call this from an async context - use a thread or sync_to_async.
+2026-07-05T04:06:22 ERROR services.mm_agentic_supervisor: MmAgentEventLog write failed: board=f5254048-72cb-47ff-9c2f-042316d16328 run=10b9e5cd-981e-4b59-ba4b-4ea95412b94b agent=validation_agent
+Traceback (most recent call last):
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\asgiref\sync.py", line 361, in main_wrap
+    raise exc_info[1]
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\http\response.py", line 514, in __iter__
+    return iter(self.streaming_content)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: 'async_generator' object is not iterable
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\B700WM\OneDrive - AXA\POC\backend-agentic-governance\services\mm_agentic_supervisor.py", line 230, in _write_agent_event_sync
+    MmAgentEventLog.objects.create(
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\manager.py", line 87, in manager_method
+    return getattr(self.get_queryset(), name)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\query.py", line 669, in create
+    obj.save(force_insert=True, using=self.db)
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 874, in save
+    self.save_base(
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 966, in save_base
+    updated = self._save_table(
+              ^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 1169, in _save_table
+    results = self._do_insert(
+              ^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\base.py", line 1220, in _do_insert
+    return manager._insert(
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\manager.py", line 87, in manager_method
+    return getattr(self.get_queryset(), name)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\query.py", line 1918, in _insert
+    return query.get_compiler(using=using).execute_sql(returning_fields)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\db\models\sql\compiler.py", line 1923, in execute_sql
+    with self.connection.cursor() as cursor:
+         ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC\sandbox\Lib\site-packages\django\utils\asyncio.py", line 24, in inner
+    raise SynchronousOnlyOperation(message)
+django.core.exceptions.SynchronousOnlyOperation: You cannot call this from an async context - use a thread or sync_to_async.
+2026-07-05T04:06:23 INFO services.mm_generic_dims: generate_generic_dimensions: skipped (source-faithful mode; set MM_ENABLE_GENERIC_DIMS=1 to enable)
