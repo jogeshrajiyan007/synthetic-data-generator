@@ -1,17 +1,49 @@
-Dear Leadership Team,
-
-I hope you are doing well.
-
-I would like to request your consideration for a change in my Reporting Manager to Shuvendu.
-
-As I align my career roadmap towards AI, solutioning, and platform expertise, I believe that stronger technical mentorship will be important for my continued growth. Based on my interactions, I feel Shuvendu's experience and technical leadership would provide the guidance I need to develop in these areas.
-
-I would also like to clarify that this request is not due to any concern with my current Reporting Manager. He has been extremely supportive, has always encouraged me to perform my best, and I am truly grateful for his guidance. This request is purely driven by my career aspirations and the type of mentorship I believe will best support my next phase of growth.
-
-I would greatly appreciate your consideration of this request.
-
-Thank you for your time and understanding.
-
-Kind regards,
-
-[Your Name]
+026-07-12T09:27:43 INFO services.semantic_sql.relationship_agent: [relationship_agent] 6 name-match candidates beyond the LLM budget were not confirmed (left unvalidated)
+2026-07-12T09:27:43 INFO services.semantic_sql.relationship_agent: [relationship_agent] 3 validated joins across 5 tables (refusal=True)
+2026-07-12T09:27:43 ERROR services.rag: Failed to persist llm_responses row (run_id=f7a0b9b0-a69f-41f1-b524-bdc34335ab8a)
+Traceback (most recent call last):
+  File "C:\Users\B700WM\OneDrive - AXA\POC-QA\backend-agentic-governance\services\rag.py", line 274, in _save_llm_response
+    LlmResponse.objects.create(**row)
+  File "C:\Users\B700WM\OneDrive - AXA\POC-QA\sandbox\Lib\site-packages\django\db\models\manager.py", line 87, in manager_method
+    return getattr(self.get_queryset(), name)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC-QA\sandbox\Lib\site-packages\django\db\models\query.py", line 669, in create
+    obj.save(force_insert=True, using=self.db)
+  File "C:\Users\B700WM\OneDrive - AXA\POC-QA\sandbox\Lib\site-packages\django\db\models\base.py", line 874, in save
+    self.save_base(
+  File "C:\Users\B700WM\OneDrive - AXA\POC-QA\sandbox\Lib\site-packages\django\db\models\base.py", line 966, in save_base
+    updated = self._save_table(
+              ^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC-QA\sandbox\Lib\site-packages\django\db\models\base.py", line 1169, in _save_table
+    results = self._do_insert(
+              ^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC-QA\sandbox\Lib\site-packages\django\db\models\base.py", line 1220, in _do_insert
+    return manager._insert(
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC-QA\sandbox\Lib\site-packages\django\db\models\manager.py", line 87, in manager_method
+    return getattr(self.get_queryset(), name)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC-QA\sandbox\Lib\site-packages\django\db\models\query.py", line 1918, in _insert
+    return query.get_compiler(using=using).execute_sql(returning_fields)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC-QA\sandbox\Lib\site-packages\django\db\models\sql\compiler.py", line 1923, in execute_sql
+    with self.connection.cursor() as cursor:
+         ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC-QA\sandbox\Lib\site-packages\django\utils\asyncio.py", line 24, in inner
+    raise SynchronousOnlyOperation(message)
+django.core.exceptions.SynchronousOnlyOperation: You cannot call this from an async context - use a thread or sync_to_async.
+2026-07-12T09:27:43 ERROR services.semantic_sql.orchestrator: [orchestrator] persistence failed (non-fatal)
+Traceback (most recent call last):
+  File "C:\Users\B700WM\OneDrive - AXA\POC-QA\backend-agentic-governance\services\semantic_sql\orchestrator.py", line 480, in _persist
+    save_turn(session_id=ctx.session_id, knowledge_set=ctx.knowledge_set,
+  File "C:\Users\B700WM\OneDrive - AXA\POC-QA\backend-agentic-governance\services\memory.py", line 61, in save_turn
+    with transaction.atomic():
+         ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC-QA\sandbox\Lib\site-packages\django\db\transaction.py", line 198, in __enter__
+    if not connection.get_autocommit():
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\B700WM\OneDrive - AXA\POC-QA\sandbox\Lib\site-packages\django\db\backends\base\base.py", line 454, in get_autocommit
+    self.ensure_connection()
+  File "C:\Users\B700WM\OneDrive - AXA\POC-QA\sandbox\Lib\site-packages\django\utils\asyncio.py", line 24, in inner
+    raise SynchronousOnlyOperation(message)
+django.core.exceptions.SynchronousOnlyOperation: You cannot call this from an async context - use a thread or sync_to_async.
