@@ -1,14 +1,135 @@
-styles = """
-style planner fill:#7C3AED,stroke:#C4B5FD,stroke-width:4px,color:#FFFFFF
-
-style dataset_understanding fill:#2563EB,stroke:#93C5FD,stroke-width:3px,color:#FFFFFF
-
-style schema_agent fill:#10B981,stroke:#6EE7B7,color:#FFFFFF
-style business_context_agent fill:#F59E0B,stroke:#FCD34D,color:#000000
-style grain_agent fill:#06B6D4,stroke:#67E8F9,color:#FFFFFF
-style relationship_agent fill:#EC4899,stroke:#F9A8D4,color:#FFFFFF
-style validation_agent fill:#8B5CF6,stroke:#C4B5FD,color:#FFFFFF
-style critic_agent fill:#EF4444,stroke:#FCA5A5,color:#FFFFFF
-
-style finish fill:#059669,stroke:#6EE7B7,stroke-width:3px,color:#FFFFFF
-"""
+Length of Tenure by Team
+Status of Clinician (Active/ Sick/New Start/Leave)
+Team resourcing based on clinician status
+Team Count
+Total Staff
+Active Staff
+Staff in Sick Leave
+Staff in Holiday
+New Start
+Other Leave
+Month on month category changes: Call Quality
+Month on month category changes: One Team
+Month on month category changes: Courage
+Month on month category changes: Decision Making
+Month on month category changes: Customer First
+Month on month category changes: Integrity
+Month on month category changes: Communication
+Month on month category changes: Complaince
+Month on month category changes: Leadership
+Month on month category changes: OwnIt
+Month on month category changes: Stakeholder Management
+Month on month category changes: Knowledge
+Month on month category changes: Claims Cost Management
+Month on month category changes: Workforce Planning
+Highest Performing Month
+Lowest Performing Month
+Month over Month Change
+Worst Performing Category
+Overall Rating against the Max Score (breakdown by month)
+Average Rating
+Overall Rating
+% Hitting Target
+% Below Target
+Overall Team Rating
+Team Average Rating
+Top 3 Performance Categories
+Bottom 3 Performance Categories
+Case Volume by Team: Argyle
+Case Volume by Team: Windmere
+Case Volume by Team: Neville
+Case Volume by Team: Redland
+Case Volume by Team: The Exeter
+Total Team capacity against current cases
+Current Active Cases
+Current Monitoring Cases
+Total current Capacity vs Total Available Capacity
+Phone (ST) [Handled = Answered + Contacted]
+Inbound Phone (ST) [Answered]
+Outbound Phone (ST) [Contacted]
+Number of ST
+Average calls per STM
+Phone (NCM) [Handled = Answered + Contacted]
+Inbound Phone (NCM) [Answered]
+Outbound Phone (NCM) [Contacted]
+Number of NCM
+Average calls per NCM
+Average inbound calls per NCM
+Outlook (Received 24hrs)
+Outlook (Recieved 8:30am to 5pm)
+Total emails Sent
+ST Available
+Outlook (ST Completed emails)
+Outlook (NCM Completed emails)
+Average Emails per ST
+Average Emails per NCM
+MOL (ST)
+ST Available
+MOL (NCM)
+NCM Available
+Average MOL per ST
+Average MOL per NCM
+Workflow Touched Items (Events) ST
+Workflow Completed ST
+Workflow Referred (Transfer) ST
+Workflow Closed
+Workflow Changed Expiry Date
+Workflow Diaried ST (Date moved)
+Number of agents worked per day
+Average Workflow per ST (Events/ FTE)
+Workflow Completed NCM
+Workflow Referred (Transfer) NCM
+Workflow Closed
+Workflow Changed Expiry Date
+Workflow Diaried NCM (Date moved)
+Number of agents worked per day
+Average Workflow per NCM
+Salesforce Tasks (ST)
+ST Available
+Salesforce Tasks (NCM)
+NCM Available
+Average Salesforce Tasks per ST
+Average Salesforce Tasks per NCM
+Call Quality - First Time Resolution
+Claims accuracy
+Case Management
+SLA
+ContactChannel (Telephone/ MOL)
+ClaimNumber
+ConversationId
+ConversationStartTime
+ConversationTimeSecs
+MemberId
+StandardisedSegment
+PolicySubType
+CurrentCondition (Symptoms)
+CurrentConditionCategory(MSK/Cancer/Other)
+System(CIMA/ACS)
+Cancer Claim
+DaysSinceClaimOpened
+DaysSincePreviousContact
+ClaimantAge_ClaimOpenDate
+AgeCurrent
+Tenure_Years
+Relationship(Policy Holder / Partner)
+PremiumAnnualGrossIPT
+PremiumAnnualNetIPT
+Gender
+CancellationDate
+UkRegion
+ClaimTotalPaid
+ExGratiaAmountPaid
+ComplaintArea
+ComplaintReceiptDate
+VulnerableCustomer
+ContactSequenceNumber
+JourneyInterval
+ClaimOpenDate
+ConversationTopicId
+time_of_contact
+Topic
+Sub_Topic
+coverage_pct
+talk_time_mins
+sentiment
+resolved (true/false)
