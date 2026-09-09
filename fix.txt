@@ -1,1 +1,260 @@
-MembershipNumber: string (nullable = true) |-- ContactChannel: string (nullable = true) |-- ClaimNumber: string (nullable = true) |-- ConversationId: string (nullable = true) |-- ConversationStartTime: timestamp (nullable = true) |-- ConversationTimeSecs: double (nullable = true) |-- ConversationContent: string (nullable = true) |-- source_agent_id: string (nullable = true) |-- AgentName: string (nullable = true) |-- AgentMasterKey: long (nullable = true) |-- MemberId: string (nullable = true) |-- StandardisedSegment: string (nullable = true) |-- PolicySubType: string (nullable = true) |-- CurrentCondition: string (nullable = true) |-- CurrentConditionCategory: string (nullable = true) |-- System: string (nullable = true) |-- MSKClaim: integer (nullable = true) |-- DaysSinceClaimOpened: long (nullable = true) |-- DaysSincePreviousContact: long (nullable = true) |-- ClaimantAge_ClaimOpenDate: long (nullable = true) |-- AgeCurrent: string (nullable = true) |-- JoinDate: date (nullable = true) |-- Tenure_Years: decimal(28,6) (nullable = true) |-- Relationship: string (nullable = true) |-- PremiumAnnualGrossIPT: string (nullable = true) |-- PremiumAnnualNetIPT: string (nullable = true) |-- Gender: string (nullable = true) |-- CancellationDate: date (nullable = true) |-- UkRegion: string (nullable = true) |-- ClaimTotalPaid: double (nullable = true) |-- ExGratiaAmountPaid: long (nullable = true) |-- ComplaintArea: string (nullable = true) |-- ComplaintReceiptDate: timestamp (nullable = true) |-- VulnerableCustomer: string (nullable = true) |-- ContactSequenceNumber: integer (nullable = true) |-- MessageCreatedBy: string (nullable = true) |-- ConversationCost: double (nullable = true) |-- JourneyInterval: string (nullable = true) |-- ClaimOpenDate: date (nullable = true) |-- ConversationTopicId: string (nullable = true) |-- time_of_contact: string (nullable = true) |-- Topic: string (nullable = true) |-- Sub_Topic: string (nullable = true) |-- coverage_pct: double (nullable = true) |-- talk_time_mins: double (nullable = true) |-- sentiment: double (nullable = true) |-- resolved: boolean (nullable = true)
+Create or replace temporary table MOL as
+SELECT DISTINCT b.CaseNumber
+,b.PolicyNumber
+,a.CaseID
+,b.subject
+,b.CaseRequestType
+,a.SecureMessageID
+,e.IsCreatedByCustomer AS CustomerMessage
+, e.AH_MessageContent__c
+,case
+      when e.iscreatedbycustomer = 'Yes' then 'Member'
+      when e.iscreatedbycustomer = 'No' then 'Agent'
+      else 'OTHER'
+    end as MessageCreatedBy
+,CONCAT(
+      case
+        when e.iscreatedbycustomer = 'Yes' then 'Customer'
+        when e.iscreatedbycustomer = 'No' then 'Agent'
+        else 'OTHER'
+      end,
+      ':',
+      a.MessageTimestamp,
+      e.AH_MessageContent__c
+    ) as MessageContent,
+    CONCAT_WS(
+      '||',
+      COLLECT_LIST(
+        CONCAT(
+          a.MessageTimestamp,
+          ': ',
+          CASE
+            WHEN e.iscreatedbycustomer = 'Yes' THEN 'Customer'
+            WHEN e.iscreatedbycustomer = 'No' THEN 'Agent'
+            ELSE 'OTHER'
+          END,
+          ':',
+          e.AH_MessageContent__c
+        )
+      ) OVER (
+          PARTITION BY b.casenumber
+          ORDER BY a.MessageTimestamp
+          ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+        )
+    ) AS ConversationContent
+,CASE
+      WHEN e.AH_MessageContent__c LIKE 'Your claim:%' THEN 'Agent'
+      WHEN e.AH_MessageContent__c LIKE '%Using our online outpatients service%' THEN 'Agent'
+      WHEN e.iscreatedbycustomer = 'Yes' THEN 'Customer'
+      WHEN e.iscreatedbycustomer = 'No' THEN 'Agent'
+      ELSE 'OTHER'
+    END as MessageCreatedBy2
+,CONCAT_WS(
+      '||',
+      COLLECT_LIST(
+        CONCAT(
+          a.MessageTimestamp,
+          ': ',
+          CASE
+            WHEN e.AH_MessageContent__c LIKE 'Your claim:%' THEN 'Agent'
+            WHEN e.AH_MessageContent__c LIKE '%Using our online outpatients service%' THEN 'Agent'
+            WHEN e.iscreatedbycustomer = 'Yes' THEN 'Customer'
+            WHEN e.iscreatedbycustomer = 'No' THEN 'Agent'
+            ELSE 'OTHER'
+          END,
+          ': ',
+          e.AH_MessageContent__c
+        )
+      ) OVER (
+          PARTITION BY b.casenumber
+          ORDER BY a.MessageTimestamp
+          ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+        )
+    ) AS ConversationContent2
+,CONCAT_WS(
+      '||',
+      COLLECT_LIST(
+        CONCAT(
+          CASE
+            WHEN e.AH_MessageContent__c LIKE 'Your claim:%' THEN 'Agent'
+            WHEN e.AH_MessageContent__c LIKE '%Using our online outpatients service%' THEN 'Agent'
+            WHEN e.iscreatedbycustomer = 'Yes' THEN 'Customer'
+            WHEN e.iscreatedbycustomer = 'No' THEN 'Agent'
+            ELSE 'OTHER'
+          END,
+          ':',
+          a.MessageTimestamp,
+          ': ',
+          e.AH_MessageContent__c
+        )
+      ) OVER (
+          PARTITION BY b.casenumber
+          ORDER BY a.MessageTimestamp
+          ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+        )
+    ) AS ConversationContent3
+,'MOL' AS ContactChannel
+, a.MessageTimestamp
+,a.ResponseTimestamp
+, a.MessageSequenceNumberInCase
+, a.CustomerMessageSequenceNumberInCase
+, a.ResponseAgentID
+, c.AgentName
+,f.HasTransferFlag
+, SUM(f.HandleTimeSecs) AS HandleTimeSecs
+,SUM(f.AgentResponseTimeSecs) AS wait_time
+FROM axahealth_dataplatform_pr_gold.processed_layer.fact_secure_message_event a
+LEFT JOIN axahealth_dataplatform_pr_gold.base_layer.secure_message_case b
+ON a.SecureMessageCaseKey = b.SecureMessageCaseKey
+LEFT JOIN axahealth_dataplatform_pr_gold.processed_layer.dim_worker_people c
+      ON a.PeopleKey = c.PeopleKey
+LEFT JOIN axahealth_dataplatform_pr_silver.salesforce.message__c e
+ON a.SecureMessageID = e.Id
+LEFT JOIN axahealth_dataplatform_pr_gold.processed_layer.fact_secure_message_case_agent_work f
+ON b.SecureMessageCaseKey = f.SecureMessageCaseKey AND c.PeopleKey = f.PeopleKey
+WHERE b.IsCreatedByCustomer = "Yes" AND CustomerMessageSequenceNumberInCase IS NOT NULL AND MessageTimestamp > "2025-07-01"
+GROUP BY ALL
+ 
+Create or replace temporary view MOLUniqueMessages as
+select
+  casenumber,
+  policynumber,
+  AH_MessageContent__c,
+  min(MessageTimeStamp) as MinMessageTimestamp
+from
+  MOL
+group by
+  all;
+ 
+select
+  *
+from
+  MOLUniqueMessages
+where
+  casenumber = '11887956'
+ 
+Create or replace temporary table MOLClean as
+select
+  a.*
+from
+  MOL a
+    inner join MOLUniqueMessages b
+      on a.casenumber = b.casenumber
+      and a.AH_MessageContent__c = b.AH_MessageContent__c
+      and a.MessageTimestamp = b.MinMessageTimestamp;
+ 
+select
+  *
+from
+  MOLClean
+where
+  casenumber = '11887956'
+ 
+Create or replace temporary table MOLCustomerMessage as
+select
+CaseNumber
+,SecureMessageId
+,MessageTimestamp
+,MessageSequenceNumberInCase
+,AH_MessageContent__c
+,CustomerMessageSequenceNumberInCase
+,ContactChannel
+, LAG(MessageTimestamp) OVER(Partition by casenumber ORDER BY MessageTimestamp,MessageSequenceNumberInCase) AS PreviousMessageTimestamp
+, timestampdiff(second,
+LAG(MessageTimestamp) OVER(Partition by casenumber ORDER BY MessageTimestamp,MessageSequenceNumberInCase),MessageTimestamp
+) AS GapFromPreviousMessageSecs
+from
+  MOLClean
+ORDER BY MessageTimestamp, MessageSequenceNumberInCase
+ 
+CREATE OR REPLACE TEMPORARY TABLE ContactEpisodeTable AS
+WITH ContactCandidate AS(
+    SELECT *
+,CASE WHEN GapFromPreviousMessageSecs IS NULL THEN 1
+    WHEN GapFromPreviousMessageSecs >= 24 * 60 * 60 THEN 1
+    ELSE 0
+END AS NewContactCandidate
+FROM MOLCustomerMessage
+)
+SELECT *
+,SUM(NewContactCandidate) OVER(PARTITION BY CaseNumber ORDER BY MessageTimestamp, MessageSequenceNumberInCase ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS ContactEpisode
+FROM ContactCandidate
+ORDER BY Casenumber
+;
+SELECT * FROM ContactEpisodeTable WHERE casenumber = "11887956";
+ 
+CREATE OR REPLACE TEMPORARY VIEW EpisodeLevel AS
+SELECT CaseNumber
+,ContactEpisode
+,COUNT(SecureMessageId) AS MessageCount
+,MIN(MessageTimeStamp) AS EpisodeStart
+,MAX(MessageTimestamp) AS EpisodeEnd
+,CONCAT_WS('\n', transform(array_sort(collect_list(struct(MessageTimestamp, MessageSequenceNumberInCase, AH_MessageContent__c))), x -> x.AH_MessageContent__c)) AS EpisodeConversation
+FROM ContactEpisodeTable
+GROUP BY CaseNumber, ContactEpisode
+ORDER BY CaseNumber, ContactEpisode
+ 
+CREATE OR REPLACE TEMPORARY VIEW EpisodeLinks AS
+SELECT *
+, LAG(ContactEpisode) OVER(PARTITION BY CaseNumber ORDER BY ContactEpisode) AS PreviousContactEpisode
+, LAG(EpisodeEnd) OVER(PARTITION BY CaseNumber ORDER BY ContactEpisode) AS PreviousEpisodeEnd
+FROM EpisodeLevel
+ 
+CREATE OR REPLACE TEMPORARY VIEW EpisodeLinksWithGap AS
+SELECT *
+, ROUND((UNIX_TIMESTAMP(EpisodeStart) - UNIX_TIMESTAMP(PreviousEpisodeEnd)) / 3600.0,2) AS GapHours
+FROM EpisodeLinks
+ 
+CREATE OR REPLACE TEMPORARY VIEW EpisodeAnalysis AS
+SELECT CaseNumber
+,ContactEpisode
+,EpisodeStart
+,EpisodeEnd
+,PreviousContactEpisode
+,PreviousEpisodeEnd
+,GapHours
+,MessageCount
+, CASE WHEN PreviousContactEpisode IS NULL THEN 0 ELSE 1 END AS HasPreviousEpisode
+, CASE WHEN PreviousContactEpisode IS NULL THEN 'FIRST_CONTACT'
+        WHEN GapHours <= 48 THEN 'REPEAT_CANDIDATE'
+        ELSE 'LONG_GAP_CANDIDATE'
+    END AS RepeatCandidateType
+FROM EpisodeLinksWithGap;
+ 
+SELECT * FROM episodeanalysis WHERE casenumber = "11887956" ORDER BY ContactEpisode;
+ 
+CREATE OR REPLACE TEMPORARY VIEW ContactSequences AS
+WITH SequenceFlags AS (
+    SELECT *
+    , CASE WHEN PreviousContactEpisode IS NULL THEN 1
+        WHEN GapHours > 48 THEN 1 ELSE 0
+        END AS NewSequenceFlag
+    FROM episodeanalysis
+),
+SequenceNumbered AS (
+    SELECT *
+    , SUM(NewSequenceFlag) OVER(PARTITION BY CaseNumber ORDER BY ContactEpisode ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS ContactSequence
+    FROM sequenceflags
+)
+ 
+SELECT * FROM sequencenumbered;
+ 
+SELECT * FROM ContactSequences WHERE Casenumber = "11887956"
+ 
+CREATE OR REPLACE TEMPORARY VIEW RepeatContactSequences AS
+ 
+SELECT CaseNumber,
+        ContactSequence,
+        MIN(ContactEpisode) AS SequenceStartEpisode,
+        MAX(ContactEpisode) AS SequenceEndEpisode,
+        MIN(EpisodeStart) AS SequenceStart,
+        MAX(EpisodeEnd) AS SequenceEnd,
+        COUNT(*) AS EpisodeCount,
+        SUM(MessageCount) AS MessageCount,
+        ROUND((UNIX_TIMESTAMP(MAX(EpisodeEnd)) - UNIX_TIMESTAMP(MIN(EpisodeStart)))/3600.0,2) AS SequenceDurationHours
+FROM ContactSequences
+GROUP BY CaseNumber, ContactSequence
+;
+ 
+SELECT * FROM repeatcontactsequences WHERE casenumber = "11887956"
+ 
