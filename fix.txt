@@ -1,307 +1,40 @@
-from pyspark.sql import functions as F
-from pyspark.sql.window import Window
-
-episode_summary = (
-    ContactEpisodeTable
-    .groupBy(
-        "CaseNumber",
-        "ClaimNumber",
-        "ContactEpisode"
-    )
-    .agg(
-        F.min("CustomerMessageTimestamp").alias("EpisodeStart"),
-        F.max("CustomerMessageTimestamp").alias("EpisodeEnd"),
-        F.count("*").alias("ContactsInEpisode")
-    )
-)
-
-display(
-    episode_summary
-    .orderBy("CaseNumber", "ClaimNumber", "EpisodeStart")
-)
-
-
-
-episode_window = Window.partitionBy(
-    "CaseNumber",
-    "ClaimNumber"
-).orderBy(
-    "EpisodeStart"
-)
-
-episode_gaps = (
-    episode_summary
-    .withColumn(
-        "PreviousEpisodeEnd",
-        F.lag("EpisodeEnd").over(episode_window)
-    )
-    .withColumn(
-        "GapHoursFromPreviousEpisode",
-        (
-            F.col("EpisodeStart").cast("long")
-            - F.col("PreviousEpisodeEnd").cast("long")
-        ) / 3600
-    )
-)
-
-display(
-    episode_gaps
-    .select(
-        "CaseNumber",
-        "ClaimNumber",
-        "ContactEpisode",
-        "EpisodeStart",
-        "EpisodeEnd",
-        "PreviousEpisodeEnd",
-        "GapHoursFromPreviousEpisode"
-    )
-    .orderBy("CaseNumber", "ClaimNumber", "EpisodeStart")
-)
-
-
-
-sequence_gap_distribution = (
-    episode_gaps
-    .filter(
-        F.col("GapHoursFromPreviousEpisode").isNotNull()
-    )
-    .withColumn(
-        "GapBucketHours",
-        F.floor("GapHoursFromPreviousEpisode")
-    )
-    .groupBy("GapBucketHours")
-    .count()
-    .withColumnRenamed("count", "GapCount")
-    .orderBy("GapBucketHours")
-)
-
-display(sequence_gap_distribution)
-
-
-
-
-import matplotlib.pyplot as plt
-
-gap_pd = (
-    sequence_gap_distribution
-    .filter(F.col("GapBucketHours") <= 168)
-    .toPandas()
-)
-
-plt.figure(figsize=(14, 6))
-
-plt.bar(
-    gap_pd["GapBucketHours"],
-    gap_pd["GapCount"],
-    width=0.8
-)
-
-plt.axvline(
-    48,
-    linestyle="--",
-    label="Current Sequence = 48h"
-)
-
-plt.xlabel("Gap between Episodes (hours)")
-plt.ylabel("Number of Episode Gaps")
-plt.title("MOL Inter-Episode Gap Distribution")
-
-plt.legend()
-plt.tight_layout()
-plt.show()
-
-
-
-
-sequence_thresholds = [
-    24,
-    36,
-    48,
-    60,
-    72,
-    96,
-    120,
-    168
-]
-
-sequence_results = []
-
-for threshold in sequence_thresholds:
-
-    result = (
-        episode_gaps
-        .filter(
-            F.col("GapHoursFromPreviousEpisode").isNotNull()
-        )
-        .withColumn(
-            "NewSequence",
-            F.when(
-                F.col("GapHoursFromPreviousEpisode") >= threshold,
-                1
-            ).otherwise(0)
-        )
-        .agg(
-            F.count("*").alias("TotalEpisodeGaps"),
-            F.sum("NewSequence").alias("NewSequenceStarts")
-        )
-        .withColumn(
-            "SequenceStartPct",
-            F.round(
-                F.col("NewSequenceStarts") /
-                F.col("TotalEpisodeGaps") * 100,
-                2
-            )
-        )
-        .withColumn(
-            "SequenceThresholdHours",
-            F.lit(threshold)
-        )
-    )
-
-    sequence_results.append(result)
-
-sequence_sensitivity = sequence_results[0]
-
-for r in sequence_results[1:]:
-    sequence_sensitivity = sequence_sensitivity.unionByName(r)
-
-display(
-    sequence_sensitivity
-    .select(
-        "SequenceThresholdHours",
-        "TotalEpisodeGaps",
-        "NewSequenceStarts",
-        "SequenceStartPct"
-    )
-    .orderBy("SequenceThresholdHours")
-)
-
-
-
-
-
-sequence_sensitivity_results = []
-
-for threshold in sequence_thresholds:
-
-    w = Window.partitionBy(
-        "CaseNumber",
-        "ClaimNumber"
-    ).orderBy("EpisodeStart")
-
-    df = (
-        episode_gaps
-        .withColumn(
-            "NewSequence",
-            F.when(
-                F.col("PreviousEpisodeEnd").isNull(),
-                1
-            ).when(
-                F.col("GapHoursFromPreviousEpisode") >= threshold,
-                1
-            ).otherwise(0)
-        )
-        .withColumn(
-            "SequenceNumber",
-            F.sum("NewSequence").over(w)
-        )
-    )
-
-    sequence_summary = (
-        df
-        .groupBy(
-            "CaseNumber",
-            "ClaimNumber",
-            "SequenceNumber"
-        )
-        .agg(
-            F.count("*").alias("EpisodesInSequence")
-        )
-    )
-
-    result = (
-        sequence_summary
-        .agg(
-            F.count("*").alias("SequenceCount"),
-
-            F.round(
-                F.avg("EpisodesInSequence"),
-                3
-            ).alias("AvgEpisodesPerSequence"),
-
-            F.expr(
-                "percentile_approx(EpisodesInSequence, 0.5)"
-            ).alias("MedianEpisodesPerSequence"),
-
-            F.sum(
-                F.when(
-                    F.col("EpisodesInSequence") == 1,
-                    1
-                ).otherwise(0)
-            ).alias("SingleEpisodeSequences")
-        )
-        .withColumn(
-            "SequenceThresholdHours",
-            F.lit(threshold)
-        )
-        .withColumn(
-            "SingleEpisodeSequencePct",
-            F.round(
-                F.col("SingleEpisodeSequences") /
-                F.col("SequenceCount") * 100,
-                2
-            )
-        )
-    )
-
-    sequence_sensitivity_results.append(result)
-
-sequence_sensitivity_final = sequence_sensitivity_results[0]
-
-for r in sequence_sensitivity_results[1:]:
-    sequence_sensitivity_final = (
-        sequence_sensitivity_final.unionByName(r)
-    )
-
-display(
-    sequence_sensitivity_final
-    .select(
-        "SequenceThresholdHours",
-        "SequenceCount",
-        "AvgEpisodesPerSequence",
-        "MedianEpisodesPerSequence",
-        "SingleEpisodeSequencePct"
-    )
-    .orderBy("SequenceThresholdHours")
-)
-
-
-
-
-seq_pd = (
-    sequence_sensitivity_final
-    .orderBy("SequenceThresholdHours")
-    .toPandas()
-)
-
-plt.figure(figsize=(12, 6))
-
-plt.plot(
-    seq_pd["SequenceThresholdHours"],
-    seq_pd["AvgEpisodesPerSequence"],
-    marker="o"
-)
-
-plt.axvline(
-    48,
-    linestyle="--",
-    label="48h"
-)
-
-plt.xlabel("Sequence Threshold (hours)")
-plt.ylabel("Average Episodes per Sequence")
-plt.title("MOL Sequence Threshold Sensitivity")
-
-plt.legend()
-plt.tight_layout()
-plt.show()
+Contact
+Time
+Gap
+Episode
+Sequence
+C1
+Mon 09:00
+—
+E1
+S1
+C2
+Mon 15:00
+6h
+E1
+S1
+C3
+Tue 10:00
+19h
+E1
+S1
+C4
+Wed 09:00
+23h
+E1
+S1
+C5
+Thu 10:00
+25h
+E2
+S1
+C6
+Fri 09:00
+23h
+E2
+S1
+C7
+Mon 10:00
+73h
+E3
+S2
