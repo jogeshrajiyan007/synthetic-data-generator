@@ -1,206 +1,60 @@
-def build_fcr_mol_prompt(
-    customer_conversation: str,
-    agent_conversation: str
-) -> str:
+# ============================================================
+# TEST — 10 MOL INTERACTIONS
+# ============================================================
 
-    customer_conversation = str(customer_conversation or "").strip()
-    agent_conversation = str(agent_conversation or "").strip()
+test_sdf = (
+    mol_sdf
+    .select(
+        "casenumber",
+        "CustomerEpisodeConversation",
+        "AgentEpisodeConversation"
+    )
+    .where(
+        F.col("CustomerEpisodeConversation").isNotNull()
+    )
+    .limit(10)
+)
 
-    return f"""
-You are an expert Customer Service, First Contact Resolution (FCR),
-and Failure Demand Analyst working with AXA Health interaction data.
+test_df = test_sdf.toPandas()
 
-Analyse the customer and agent portions of the same interaction.
+test_results = []
 
-Your objective is to:
+for _, row in test_df.iterrows():
 
-1. Identify the meaningful customer topics.
-2. Understand the customer's underlying reason for contact.
-3. Classify the demand type for each topic.
-4. Determine whether the demand represents genuine Failure Demand.
-5. Determine whether the customer's issue was resolved during this interaction.
-6. Use the agent conversation as evidence of what AXA actually did in response.
+    transcript = build_mol_transcript(
+        row["CustomerEpisodeConversation"],
+        row["AgentEpisodeConversation"]
+    )
 
-IMPORTANT:
+    prompt = build_mol_prompt(transcript)
 
-Repeat contact does NOT automatically mean Failure Demand.
+    (
+        analysis,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        latency,
+        error
+    ) = call_mol_model(prompt)
 
-Only classify a topic as True Failure Demand when there is evidence that
-the customer is contacting AXA because a previous interaction failed,
-was incomplete, was incorrect, was missed, or required the customer
-to contact AXA again unnecessarily.
+    test_results.append({
 
-============================================================
-DEMAND CLASSIFICATION
-============================================================
+        "casenumber": row["casenumber"],
 
-1. True Failure Demand
+        "analysis": analysis,
 
-Use this when there is evidence that the customer has returned because
-a previous AXA interaction did not successfully resolve the issue.
+        "prompt_tokens": prompt_tokens,
 
-Examples:
+        "completion_tokens": completion_tokens,
 
-- Previous promised action was not completed.
-- Customer was told something would happen but it did not.
-- Customer has to contact AXA again because information/action was missed.
-- Customer explicitly says they contacted AXA previously and the problem
-  remains unresolved.
-- Agent identifies that a previous AXA action was missed or incorrect.
+        "total_tokens": total_tokens,
 
-DO NOT classify as True Failure Demand merely because:
+        "latency": latency,
 
-- ContactEpisode > 1
-- The customer contacted AXA previously.
-- The customer is checking progress.
-- The customer is providing additional information.
-- The process naturally requires multiple interactions.
+        "error": error
+    })
 
-There must be evidence of failure or unnecessary repeat contact.
 
-============================================================
-2. Expected Process Demand
-============================================================
+test_results_df = pd.DataFrame(test_results)
 
-Use when the interaction is a normal part of the expected AXA process.
-
-Examples:
-
-- Checking claim progress.
-- Providing requested documentation.
-- Providing additional information.
-- Asking what happens next.
-- Normal administrative processing.
-- Routine follow-up.
-- Confirming information.
-- Progress updates that are expected as part of the process.
-
-============================================================
-3. External Dependency Demand
-============================================================
-
-Use when resolution depends on another party, organisation,
-event, or information outside the direct control of the AXA advisor.
-
-Examples:
-
-- Hospital
-- Consultant
-- GP
-- Medical provider
-- Appointment availability
-- Medical report
-- Third-party organisation
-- External authorisation
-- Waiting for another party to provide information.
-
-============================================================
-4. Customer Choice Demand
-============================================================
-
-Use when the customer is making a preference, choice, or optional request
-rather than correcting a service failure.
-
-Examples:
-
-- Choosing a provider.
-- Requesting an alternative provider.
-- Changing a preference.
-- Requesting a different appointment option.
-- Voluntary change initiated by the customer.
-
-============================================================
-FCR / FAILURE DEMAND REASONING
-============================================================
-
-Use the following reasoning:
-
-Repeat Contact
-      |
-      v
-Was there a previous interaction about the same issue?
-      |
-      +---- NO ----> Not True Failure Demand
-      |
-      YES
-      |
-      v
-Is there evidence that the previous interaction failed,
-was incomplete, incorrect, missed, or created unnecessary
-additional work for the customer?
-      |
-      +---- YES ---> True Failure Demand
-      |
-      +---- NO ----> Do NOT classify as True Failure Demand
-
-The evidence must come from the conversation wherever possible.
-
-============================================================
-TOPIC IDENTIFICATION
-============================================================
-
-Identify all meaningful customer topics.
-
-Do not create topics for:
-
-- Greetings
-- Pleasantries
-- Small talk
-- Administrative statements with no customer intent
-
-Combine conversation elements that relate to the same underlying issue.
-
-Create multiple topics only when the customer genuinely has
-different intents/issues.
-
-For each topic provide:
-
-- topic
-- subtopic
-- demand_type
-- demand_reason
-- evidence
-- resolution_status
-- confidence
-
-============================================================
-RESOLUTION
-============================================================
-
-Determine resolution based on the outcome of the interaction.
-
-Resolved:
-The customer's issue/request was successfully addressed.
-
-Partially Resolved:
-Some aspects were addressed, but an outstanding action,
-dependency or issue remains.
-
-Unresolved:
-The customer's issue remains unresolved at the end of the interaction.
-
-Not Applicable:
-There is no meaningful resolution requirement.
-
-Use the AGENT conversation to determine what AXA actually did,
-not merely what the customer requested.
-
-============================================================
-CUSTOMER CONVERSATION
-============================================================
-
-{customer_conversation}
-
-============================================================
-AGENT CONVERSATION
-============================================================
-
-{agent_conversation}
-
-============================================================
-OUTPUT
-============================================================
-
-Return ONLY valid JSON matching the supplied schema.
-Do not include markdown, commentary or text outside the JSON object.
-""".strip()
+display(test_results_df)
