@@ -1,68 +1,259 @@
-# ============================================================
-# STANDALONE TEST — call_model()
-# ============================================================
+axahealth_dataplatform_pd_lab.jogesh_rajiyan_axahealth.fcr_mol_interaction_analytics
 
-import json
-import time
+root
+ |-- contactchannel: string (nullable = true)
+ |-- CaseNumber: string (nullable = true)
+ |-- policynumber: string (nullable = true)
+ |-- claimNumber: string (nullable = true)
+ |-- memberid: string (nullable = true)
+ |-- membershipnumber: string (nullable = true)
+ |-- standardisedsegment: string (nullable = true)
+ |-- policysubtype: string (nullable = true)
+ |-- currentcondition: string (nullable = true)
+ |-- currentconditioncategory: string (nullable = true)
+ |-- system: string (nullable = true)
+ |-- relationship: string (nullable = true)
+ |-- gender: string (nullable = true)
+ |-- complaintarea: string (nullable = true)
+ |-- complaintreceiptdate: timestamp (nullable = true)
+ |-- vulnerablecustomer: string (nullable = true)
+ |-- ukregion: string (nullable = true)
+ |-- cancellationdate: date (nullable = true)
+ |-- mskclaim: integer (nullable = true)
+ |-- ClaimantAge_ClaimOpendate: long (nullable = true)
+ |-- Agecurrent: string (nullable = true)
+ |-- joindate: date (nullable = true)
+ |-- tenure_years: decimal(28,6) (nullable = true)
+ |-- dayssinceclaimopened: double (nullable = true)
+ |-- ContactEpisode: long (nullable = true)
+ |-- ContactSequence: long (nullable = true)
+ |-- conversationstarttimestamp: timestamp (nullable = true)
+ |-- EpisodeStart: timestamp (nullable = true)
+ |-- EpisodeEnd: timestamp (nullable = true)
+ |-- PreviousContactEpisode: long (nullable = true)
+ |-- PreviousEpisodeEnd: timestamp (nullable = true)
+ |-- GapHours: decimal(24,2) (nullable = true)
+ |-- conversationtimeinsecs: double (nullable = true)
+ |-- premiumannualgrossipt: double (nullable = true)
+ |-- premiumannualnetipt: double (nullable = true)
+ |-- claimtotalpaid: double (nullable = true)
+ |-- exgratiaamountpaid: double (nullable = true)
+ |-- MessageCount: long (nullable = true)
+ |-- AgentResponseCount: long (nullable = true)
+ |-- CustomerEpisodeConversation: string (nullable = true)
+ |-- AgentEpisodeConversation: string (nullable = true)
+ |-- AgentResponsible: string (nullable = true)
+ |-- HasPreviousEpisode: integer (nullable = true)
+ |-- RepeatCandidateType: string (nullable = true)
+ |-- IsRepeatContact: boolean (nullable = true)
+ |-- IsRepeatWithinSequence: boolean (nullable = true)
+ |-- IsSequenceStart: boolean (nullable = true)
+ |-- SequenceStartEpisode: long (nullable = true)
+ |-- SequenceEndEpisode: long (nullable = true)
+ |-- SequenceEnd: timestamp (nullable = true)
+ |-- EpisodeCount: long (nullable = true)
+ |-- SequenceMessageCount: long (nullable = true)
+ |-- SequenceDurationHours: decimal(24,2) (nullable = true)
 
-# Small synthetic transcript for testing
-test_transcript = """
-Telephone Call Start: 2026-09-21T10:30:00
+DEMAND_TYPES = [
+    "True Failure Demand",
+    "Expected Process Demand",
+    "External Dependancy Demand",
+    "Customer Choice Demand"
+]
 
-Customer: I have already submitted a claim for my shoulder injury last week.
-Customer: I just want to know whether the claim has been received and what
-happens next.
+JSON_SCHEMA = {
+    "name": "mol_demand_analysis",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "topics":{
+                "type": "array",
+                "items":{
+                    "type":"object",
+                    "properties":{
+                        "topic": {
+                            "type":"string"
+                        },
+                        "subtopic":{
+                            "type":"string"
+                        },
+                        "demand_type":{
+                            "type":"string",
+                            "enum": DEMAND_TYPES
+                        },
+                        "demand_reason":{
+                            "type":"reason"
+                        },
+                        "evidence":{
+                            "type":"string"
+                        },
+                        "resolution_status":{
+                            "type": "string",
+                            "enum":["Resolved", "Partially Resolved", "Unresolved", "Not Applicable"]
+                        },
+                        "confidence":{
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1
+                        }
+                    },
+                    "required": [
+                        "topic",
+                        "subtopic",
+                        "demand_type",
+                        "demand_reason",
+                        "evidence",
+                        "resolution_status",
+                        "confidence"
+                    ],
+                    "additionalProperties": False
+                },
+                "minItems": 1
+            },
+            "overall_demand_type":{
+                "type":"string",
+                "enum":DEMAND_TYPES
+            },
+            "overall_resolution":{
+                "type":"string",
+                "enum":["Resolved", "Partially Resolved", "Unresolved", "Not Applicable"]
+            }
+        },
+        "required":[
+            "topics",
+            "overall_demand_type",
+            "overall_resolution"
+        ],
+        "additionalProperties": False
+    }
+}
 
-Agent: Yes, I can confirm that we have received your claim.
-Agent: It is currently being reviewed and you should receive an update shortly.
-
-Customer: Okay, thank you. That answers my question.
-"""
-
-print("Testing call_model()...")
-print("-" * 60)
-
-start = time.time()
-
-try:
-    # Build the same prompt used by the production workflow
-    prompt = build_prompt(test_transcript)
-
-    # Directly test call_model()
-    result, meta = call_model(
-        prompt,
-        max_tokens=800,
-        retries=3
-    )
-
-    elapsed = time.time() - start
-
-    print("✅ call_model() SUCCESS")
-    print(f"Elapsed time:      {elapsed:.2f}s")
-    print(f"API latency:       {meta.get('api_latency', 0):.2f}s")
-    print(f"Attempt:           {meta.get('attempt')}")
-    print(f"Request ID:        {meta.get('request_id')}")
-    print(f"Prompt tokens:     {meta.get('prompt_tokens')}")
-    print(f"Completion tokens: {meta.get('completion_tokens')}")
-    print(f"Total tokens:      {meta.get('total_tokens')}")
+def build_mol_prompt(transcript:str) -> str:
     
-    print("\n--- MODEL RESPONSE ---")
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return f"""
+    You are an expert customer service and First Contact Resolution (FCR) Analyst working with AXA Health interaction data.
 
-    # Basic sanity checks
-    assert isinstance(result, dict), "Model response is not a dictionary"
-    assert "topics" in result, "Missing 'topics' in response"
-    assert "overall_resolution" in result, "Missing 'overall_resolution'"
+    Analyse the following customer + agent conversation.
 
-    print("\n✅ Response structure looks valid.")
+    Your task is to identify ALL meaningful customer topics and subtopics discussed in the interaction and classify the type of demand represented by each topic.
 
-except Exception as e:
-    elapsed = time.time() - start
+    -------------------------------------------------------------------------------------
+    DEMAND CLASSIFICATION
+    -------------------------------------------------------------------------------------
 
-    print("❌ call_model() FAILED")
-    print(f"Elapsed time: {elapsed:.2f}s")
-    print(f"Error type: {type(e).__name__}")
-    print(f"Error: {e}")
+    1. True Failure Demand
 
-    import traceback
-    traceback.print_exc()
+    Use this ONLY when there is evidence that the customer is contacting AXA again because something was not resolved, was incorrectly handled, was missed, or the customer was required to make another contact unnecessarily.
+
+    Examples:
+    - "I contacted you last week and this still hasn't been fixed."
+    - Customer was promised an action that did not happen.
+    - Customer has to contact AXA again because the previous interaction failed to resolve the issue.
+
+    IMPORTANT:
+    Do NOT classify something as True Failure Demand merely because the customer is making a repeat contact.
+
+    There must be evidence of a failed or incomplete resolution.
+
+    -------------------------------------------------------------------------------------
+
+    2. Expected Process Demand
+
+    The customer is contacting AXA because a normal part of the service/process requires another interaction.
+
+    Examples:
+    - Providing additional information.
+    - Checking the progress of a claim.
+    - Asking what happens next in a process.
+    - Routine documentation or administrative steps.
+    - Normal follow-up required by the process.
+
+    This is not necessarily a failure.
+
+    -------------------------------------------------------------------------------------
+
+    3. External Dependency Demand
+
+    The customer needs something that depends on another party or event outside the advisor's direct control.
+
+    Examples:
+    - Hospital
+    - Consultant
+    - GP
+    - Provider
+    - Third-party organisation
+    - Appointment availability
+    - Medical Report
+    - External authorisation
+    - Waiting for another partyto provide information
+
+    The contact may be legitimate even when the customer has contacted AXA previously.
+
+    -------------------------------------------------------------------------------------
+
+    4. Customer Choice Demand
+
+    The customer is making a choice, preference or optional request rather than correcting a service failure.
+
+    Examples:
+    - Choosing a provider.
+    - Asking for alternative options.
+    - Changing an appointment preference.
+    - Requesting a different option when the existing option is already available.
+    - Voluntary changes initiated by the customer.
+
+    -------------------------------------------------------------------------------------
+
+    IMPORTANT FCR RULE
+
+    Repeat contact does NOT automatically mean Failure Demand.
+
+    The classification must distinguish:
+
+    Repeat Contact
+            ↓
+    Was the previous issue actually unresolved?
+            ↓
+    Yes → possible True Failure Demand
+    No → leitimate repeat contact
+
+    Therefore, only assign True Failure Demand when the conversation contains evidence supporting the failure.
+
+    -------------------------------------------------------------------------------------
+    TOPIC IDENTIFICATION
+    -------------------------------------------------------------------------------------
+
+    Identify every meaningful topic discussed.
+
+    For each topic provide:
+
+    - Topic
+    - Specific subtopic
+    - Demand Type
+    - Short explanation for why the demand type applies
+    - Supporting evidence from the conversation
+    - Resolution status
+    - Confidence
+
+    Do not create artificial topics for greetings, pleasantries or irrelavant conversation.
+
+    If several parts of the conversation belon to the same topic, combine them.
+
+    If genuinely different customer intents occur, return multiple topics.
+
+    -------------------------------------------------------------------------------------
+    OVERALL DEMAND TYPE
+    -------------------------------------------------------------------------------------
+
+    Select the demand type that best represents the main reason for the customer's contact.
+
+    Do not choose True Failure Demand simply because the interaction contains a repeat contact.
+
+    -------------------------------------------------------------------------------------
+    CONVERSATION
+    ------------------------------------------------------------------------------------- 
+
+    {transcript}
+
+    """.strip()
