@@ -1,259 +1,206 @@
-axahealth_dataplatform_pd_lab.jogesh_rajiyan_axahealth.fcr_mol_interaction_analytics
+def build_fcr_mol_prompt(
+    customer_conversation: str,
+    agent_conversation: str
+) -> str:
 
-root
- |-- contactchannel: string (nullable = true)
- |-- CaseNumber: string (nullable = true)
- |-- policynumber: string (nullable = true)
- |-- claimNumber: string (nullable = true)
- |-- memberid: string (nullable = true)
- |-- membershipnumber: string (nullable = true)
- |-- standardisedsegment: string (nullable = true)
- |-- policysubtype: string (nullable = true)
- |-- currentcondition: string (nullable = true)
- |-- currentconditioncategory: string (nullable = true)
- |-- system: string (nullable = true)
- |-- relationship: string (nullable = true)
- |-- gender: string (nullable = true)
- |-- complaintarea: string (nullable = true)
- |-- complaintreceiptdate: timestamp (nullable = true)
- |-- vulnerablecustomer: string (nullable = true)
- |-- ukregion: string (nullable = true)
- |-- cancellationdate: date (nullable = true)
- |-- mskclaim: integer (nullable = true)
- |-- ClaimantAge_ClaimOpendate: long (nullable = true)
- |-- Agecurrent: string (nullable = true)
- |-- joindate: date (nullable = true)
- |-- tenure_years: decimal(28,6) (nullable = true)
- |-- dayssinceclaimopened: double (nullable = true)
- |-- ContactEpisode: long (nullable = true)
- |-- ContactSequence: long (nullable = true)
- |-- conversationstarttimestamp: timestamp (nullable = true)
- |-- EpisodeStart: timestamp (nullable = true)
- |-- EpisodeEnd: timestamp (nullable = true)
- |-- PreviousContactEpisode: long (nullable = true)
- |-- PreviousEpisodeEnd: timestamp (nullable = true)
- |-- GapHours: decimal(24,2) (nullable = true)
- |-- conversationtimeinsecs: double (nullable = true)
- |-- premiumannualgrossipt: double (nullable = true)
- |-- premiumannualnetipt: double (nullable = true)
- |-- claimtotalpaid: double (nullable = true)
- |-- exgratiaamountpaid: double (nullable = true)
- |-- MessageCount: long (nullable = true)
- |-- AgentResponseCount: long (nullable = true)
- |-- CustomerEpisodeConversation: string (nullable = true)
- |-- AgentEpisodeConversation: string (nullable = true)
- |-- AgentResponsible: string (nullable = true)
- |-- HasPreviousEpisode: integer (nullable = true)
- |-- RepeatCandidateType: string (nullable = true)
- |-- IsRepeatContact: boolean (nullable = true)
- |-- IsRepeatWithinSequence: boolean (nullable = true)
- |-- IsSequenceStart: boolean (nullable = true)
- |-- SequenceStartEpisode: long (nullable = true)
- |-- SequenceEndEpisode: long (nullable = true)
- |-- SequenceEnd: timestamp (nullable = true)
- |-- EpisodeCount: long (nullable = true)
- |-- SequenceMessageCount: long (nullable = true)
- |-- SequenceDurationHours: decimal(24,2) (nullable = true)
+    customer_conversation = str(customer_conversation or "").strip()
+    agent_conversation = str(agent_conversation or "").strip()
 
-DEMAND_TYPES = [
-    "True Failure Demand",
-    "Expected Process Demand",
-    "External Dependancy Demand",
-    "Customer Choice Demand"
-]
-
-JSON_SCHEMA = {
-    "name": "mol_demand_analysis",
-    "schema": {
-        "type": "object",
-        "properties": {
-            "topics":{
-                "type": "array",
-                "items":{
-                    "type":"object",
-                    "properties":{
-                        "topic": {
-                            "type":"string"
-                        },
-                        "subtopic":{
-                            "type":"string"
-                        },
-                        "demand_type":{
-                            "type":"string",
-                            "enum": DEMAND_TYPES
-                        },
-                        "demand_reason":{
-                            "type":"reason"
-                        },
-                        "evidence":{
-                            "type":"string"
-                        },
-                        "resolution_status":{
-                            "type": "string",
-                            "enum":["Resolved", "Partially Resolved", "Unresolved", "Not Applicable"]
-                        },
-                        "confidence":{
-                            "type": "number",
-                            "minimum": 0,
-                            "maximum": 1
-                        }
-                    },
-                    "required": [
-                        "topic",
-                        "subtopic",
-                        "demand_type",
-                        "demand_reason",
-                        "evidence",
-                        "resolution_status",
-                        "confidence"
-                    ],
-                    "additionalProperties": False
-                },
-                "minItems": 1
-            },
-            "overall_demand_type":{
-                "type":"string",
-                "enum":DEMAND_TYPES
-            },
-            "overall_resolution":{
-                "type":"string",
-                "enum":["Resolved", "Partially Resolved", "Unresolved", "Not Applicable"]
-            }
-        },
-        "required":[
-            "topics",
-            "overall_demand_type",
-            "overall_resolution"
-        ],
-        "additionalProperties": False
-    }
-}
-
-def build_mol_prompt(transcript:str) -> str:
-    
     return f"""
-    You are an expert customer service and First Contact Resolution (FCR) Analyst working with AXA Health interaction data.
+You are an expert Customer Service, First Contact Resolution (FCR),
+and Failure Demand Analyst working with AXA Health interaction data.
 
-    Analyse the following customer + agent conversation.
+Analyse the customer and agent portions of the same interaction.
 
-    Your task is to identify ALL meaningful customer topics and subtopics discussed in the interaction and classify the type of demand represented by each topic.
+Your objective is to:
 
-    -------------------------------------------------------------------------------------
-    DEMAND CLASSIFICATION
-    -------------------------------------------------------------------------------------
+1. Identify the meaningful customer topics.
+2. Understand the customer's underlying reason for contact.
+3. Classify the demand type for each topic.
+4. Determine whether the demand represents genuine Failure Demand.
+5. Determine whether the customer's issue was resolved during this interaction.
+6. Use the agent conversation as evidence of what AXA actually did in response.
 
-    1. True Failure Demand
+IMPORTANT:
 
-    Use this ONLY when there is evidence that the customer is contacting AXA again because something was not resolved, was incorrectly handled, was missed, or the customer was required to make another contact unnecessarily.
+Repeat contact does NOT automatically mean Failure Demand.
 
-    Examples:
-    - "I contacted you last week and this still hasn't been fixed."
-    - Customer was promised an action that did not happen.
-    - Customer has to contact AXA again because the previous interaction failed to resolve the issue.
+Only classify a topic as True Failure Demand when there is evidence that
+the customer is contacting AXA because a previous interaction failed,
+was incomplete, was incorrect, was missed, or required the customer
+to contact AXA again unnecessarily.
 
-    IMPORTANT:
-    Do NOT classify something as True Failure Demand merely because the customer is making a repeat contact.
+============================================================
+DEMAND CLASSIFICATION
+============================================================
 
-    There must be evidence of a failed or incomplete resolution.
+1. True Failure Demand
 
-    -------------------------------------------------------------------------------------
+Use this when there is evidence that the customer has returned because
+a previous AXA interaction did not successfully resolve the issue.
 
-    2. Expected Process Demand
+Examples:
 
-    The customer is contacting AXA because a normal part of the service/process requires another interaction.
+- Previous promised action was not completed.
+- Customer was told something would happen but it did not.
+- Customer has to contact AXA again because information/action was missed.
+- Customer explicitly says they contacted AXA previously and the problem
+  remains unresolved.
+- Agent identifies that a previous AXA action was missed or incorrect.
 
-    Examples:
-    - Providing additional information.
-    - Checking the progress of a claim.
-    - Asking what happens next in a process.
-    - Routine documentation or administrative steps.
-    - Normal follow-up required by the process.
+DO NOT classify as True Failure Demand merely because:
 
-    This is not necessarily a failure.
+- ContactEpisode > 1
+- The customer contacted AXA previously.
+- The customer is checking progress.
+- The customer is providing additional information.
+- The process naturally requires multiple interactions.
 
-    -------------------------------------------------------------------------------------
+There must be evidence of failure or unnecessary repeat contact.
 
-    3. External Dependency Demand
+============================================================
+2. Expected Process Demand
+============================================================
 
-    The customer needs something that depends on another party or event outside the advisor's direct control.
+Use when the interaction is a normal part of the expected AXA process.
 
-    Examples:
-    - Hospital
-    - Consultant
-    - GP
-    - Provider
-    - Third-party organisation
-    - Appointment availability
-    - Medical Report
-    - External authorisation
-    - Waiting for another partyto provide information
+Examples:
 
-    The contact may be legitimate even when the customer has contacted AXA previously.
+- Checking claim progress.
+- Providing requested documentation.
+- Providing additional information.
+- Asking what happens next.
+- Normal administrative processing.
+- Routine follow-up.
+- Confirming information.
+- Progress updates that are expected as part of the process.
 
-    -------------------------------------------------------------------------------------
+============================================================
+3. External Dependency Demand
+============================================================
 
-    4. Customer Choice Demand
+Use when resolution depends on another party, organisation,
+event, or information outside the direct control of the AXA advisor.
 
-    The customer is making a choice, preference or optional request rather than correcting a service failure.
+Examples:
 
-    Examples:
-    - Choosing a provider.
-    - Asking for alternative options.
-    - Changing an appointment preference.
-    - Requesting a different option when the existing option is already available.
-    - Voluntary changes initiated by the customer.
+- Hospital
+- Consultant
+- GP
+- Medical provider
+- Appointment availability
+- Medical report
+- Third-party organisation
+- External authorisation
+- Waiting for another party to provide information.
 
-    -------------------------------------------------------------------------------------
+============================================================
+4. Customer Choice Demand
+============================================================
 
-    IMPORTANT FCR RULE
+Use when the customer is making a preference, choice, or optional request
+rather than correcting a service failure.
 
-    Repeat contact does NOT automatically mean Failure Demand.
+Examples:
 
-    The classification must distinguish:
+- Choosing a provider.
+- Requesting an alternative provider.
+- Changing a preference.
+- Requesting a different appointment option.
+- Voluntary change initiated by the customer.
 
-    Repeat Contact
-            ↓
-    Was the previous issue actually unresolved?
-            ↓
-    Yes → possible True Failure Demand
-    No → leitimate repeat contact
+============================================================
+FCR / FAILURE DEMAND REASONING
+============================================================
 
-    Therefore, only assign True Failure Demand when the conversation contains evidence supporting the failure.
+Use the following reasoning:
 
-    -------------------------------------------------------------------------------------
-    TOPIC IDENTIFICATION
-    -------------------------------------------------------------------------------------
+Repeat Contact
+      |
+      v
+Was there a previous interaction about the same issue?
+      |
+      +---- NO ----> Not True Failure Demand
+      |
+      YES
+      |
+      v
+Is there evidence that the previous interaction failed,
+was incomplete, incorrect, missed, or created unnecessary
+additional work for the customer?
+      |
+      +---- YES ---> True Failure Demand
+      |
+      +---- NO ----> Do NOT classify as True Failure Demand
 
-    Identify every meaningful topic discussed.
+The evidence must come from the conversation wherever possible.
 
-    For each topic provide:
+============================================================
+TOPIC IDENTIFICATION
+============================================================
 
-    - Topic
-    - Specific subtopic
-    - Demand Type
-    - Short explanation for why the demand type applies
-    - Supporting evidence from the conversation
-    - Resolution status
-    - Confidence
+Identify all meaningful customer topics.
 
-    Do not create artificial topics for greetings, pleasantries or irrelavant conversation.
+Do not create topics for:
 
-    If several parts of the conversation belon to the same topic, combine them.
+- Greetings
+- Pleasantries
+- Small talk
+- Administrative statements with no customer intent
 
-    If genuinely different customer intents occur, return multiple topics.
+Combine conversation elements that relate to the same underlying issue.
 
-    -------------------------------------------------------------------------------------
-    OVERALL DEMAND TYPE
-    -------------------------------------------------------------------------------------
+Create multiple topics only when the customer genuinely has
+different intents/issues.
 
-    Select the demand type that best represents the main reason for the customer's contact.
+For each topic provide:
 
-    Do not choose True Failure Demand simply because the interaction contains a repeat contact.
+- topic
+- subtopic
+- demand_type
+- demand_reason
+- evidence
+- resolution_status
+- confidence
 
-    -------------------------------------------------------------------------------------
-    CONVERSATION
-    ------------------------------------------------------------------------------------- 
+============================================================
+RESOLUTION
+============================================================
 
-    {transcript}
+Determine resolution based on the outcome of the interaction.
 
-    """.strip()
+Resolved:
+The customer's issue/request was successfully addressed.
+
+Partially Resolved:
+Some aspects were addressed, but an outstanding action,
+dependency or issue remains.
+
+Unresolved:
+The customer's issue remains unresolved at the end of the interaction.
+
+Not Applicable:
+There is no meaningful resolution requirement.
+
+Use the AGENT conversation to determine what AXA actually did,
+not merely what the customer requested.
+
+============================================================
+CUSTOMER CONVERSATION
+============================================================
+
+{customer_conversation}
+
+============================================================
+AGENT CONVERSATION
+============================================================
+
+{agent_conversation}
+
+============================================================
+OUTPUT
+============================================================
+
+Return ONLY valid JSON matching the supplied schema.
+Do not include markdown, commentary or text outside the JSON object.
+""".strip()
