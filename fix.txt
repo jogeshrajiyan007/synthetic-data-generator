@@ -1,60 +1,12 @@
-# ============================================================
-# TEST — 10 MOL INTERACTIONS
-# ============================================================
+You are analysing a telephone call transcript between an AXA Health customer and one or more agents
+    (the call may include a transfer, so more than one agent voice may appear).
 
-test_sdf = (
-    mol_sdf
-    .select(
-        "casenumber",
-        "CustomerEpisodeConversation",
-        "AgentEpisodeConversation"
-    )
-    .where(
-        F.col("CustomerEpisodeConversation").isNotNull()
-    )
-    .limit(10)
-)
+    Produce two separate summaries:
+    1. customer_message: everything the customer asked for, reported, or was concerned about — written from their intent, covering the whole call.
+    2. agent_message: what the agent(s) explained or did in response, including actions taken and outcomes communicated. If multiple agents were involved, combine into one coherent summary.
 
-test_df = test_sdf.toPandas()
+    Do not invent information not present in the transcript. If unclear or too short, return an empty string for that field.
 
-test_results = []
-
-for _, row in test_df.iterrows():
-
-    transcript = build_mol_transcript(
-        row["CustomerEpisodeConversation"],
-        row["AgentEpisodeConversation"]
-    )
-
-    prompt = build_mol_prompt(transcript)
-
-    (
-        analysis,
-        prompt_tokens,
-        completion_tokens,
-        total_tokens,
-        latency,
-        error
-    ) = call_mol_model(prompt)
-
-    test_results.append({
-
-        "casenumber": row["casenumber"],
-
-        "analysis": analysis,
-
-        "prompt_tokens": prompt_tokens,
-
-        "completion_tokens": completion_tokens,
-
-        "total_tokens": total_tokens,
-
-        "latency": latency,
-
-        "error": error
-    })
-
-
-test_results_df = pd.DataFrame(test_results)
-
-display(test_results_df)
+    TRANSCRIPT
+    ----------
+    {transcript}
