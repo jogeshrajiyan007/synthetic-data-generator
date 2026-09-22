@@ -1,249 +1,60 @@
-Yes — you can identify repeat contacts using Episodes alone. The reason to retain Sequence is not to detect whether a customer contacted again; it is to capture the relationship between separate episodes that occur close together.
+# ============================================================
+# TEST — 10 MOL INTERACTIONS
+# ============================================================
 
-Think of the hierarchy like this:
+test_sdf = (
+    mol_sdf
+    .select(
+        "casenumber",
+        "CustomerEpisodeConversation",
+        "AgentEpisodeConversation"
+    )
+    .where(
+        F.col("CustomerEpisodeConversation").isNotNull()
+    )
+    .limit(10)
+)
 
-Contact → Episode → Sequence → Customer journey
+test_df = test_sdf.toPandas()
 
-Example
+test_results = []
 
-Suppose a customer has these contacts:
+for _, row in test_df.iterrows():
 
-Contact	Time	Gap	Episode	Sequence
+    transcript = build_mol_transcript(
+        row["CustomerEpisodeConversation"],
+        row["AgentEpisodeConversation"]
+    )
 
-C1	Mon 09:00	—	E1	S1
-C2	Mon 15:00	6h	E1	S1
-C3	Tue 10:00	19h	E1	S1
-C4	Wed 09:00	23h	E1	S1
-C5	Thu 10:00	25h	E2	S1
-C6	Fri 09:00	23h	E2	S1
-C7	Mon 10:00	73h	E3	S2
+    prompt = build_mol_prompt(transcript)
 
+    (
+        analysis,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        latency,
+        error
+    ) = call_mol_model(prompt)
 
-With a 24-hour Episode threshold:
+    test_results.append({
 
-C1–C4 → one Episode
+        "casenumber": row["casenumber"],
 
-C5–C6 → another Episode
+        "analysis": analysis,
 
-C7 → another Episode
+        "prompt_tokens": prompt_tokens,
 
+        "completion_tokens": completion_tokens,
 
-So Episodes tell you:
+        "total_tokens": total_tokens,
 
-> "This customer had 3 distinct contact episodes."
+        "latency": latency,
 
+        "error": error
+    })
 
 
-But with a 48-hour Sequence threshold:
+test_results_df = pd.DataFrame(test_results)
 
-E1 + E2 → Sequence S1
-
-E3 → Sequence S2
-
-
-So Sequence tells you:
-
-> "Those two separate episodes were part of the same short-term customer interaction journey."
-
-
-
-
----
-
-Why this matters for your FCR work
-
-Imagine:
-
-Episode 1 → customer contacts → Episode 2
-
-If Episode 2 happens 25 hours later, you probably don't want to treat it identically to an episode that happens 3 months later.
-
-Sequence lets you distinguish:
-
-Pattern A — Immediate repeat
-
-> Contact → Contact → Contact
-
-
-
-All within one Episode.
-
-This is useful for identifying failure to resolve within the same interaction period.
-
-Pattern B — Episode-to-episode repeat
-
-> Episode 1 → 25h → Episode 2
-
-
-
-This is different.
-
-The first episode ended according to your Episode definition, but the customer returned very soon afterwards.
-
-That can be important evidence for:
-
-unresolved demand
-
-delayed resolution
-
-follow-up requirement
-
-customer having to contact again
-
-operational handoffs
-
-claims/process dependencies
-
-
-Pattern C — Genuine later re-contact
-
-> Episode 1 → 2 weeks → Episode 2
-
-
-
-This may be a completely different customer need.
-
-Sequence helps prevent these very different patterns from being treated as the same thing.
-
-
----
-
-But there is an important point for your project
-
-You don't need Sequence just because Episodes exist.
-
-If your immediate objective is simply:
-
-> "Did the customer contact again after the initial contact?"
-
-
-
-Then Episode is sufficient.
-
-You can calculate:
-
-Initial Episode
-       ↓
-Was there another Episode?
-       ↓
-Repeat Contact
-
-You don't need Sequence for that.
-
-
----
-
-Sequence becomes valuable when you want to answer:
-
-> "Are these separate Episodes part of the same ongoing customer demand/journey?"
-
-
-
-For example:
-
-Customer
-│
-├── Sequence 1
-│   ├── Episode 1
-│   │   ├── Contact
-│   │   └── Contact
-│   │
-│   └── Episode 2
-│       └── Contact
-│
-├── Sequence 2
-│   └── Episode 3
-│
-└── Sequence 3
-    ├── Episode 4
-    └── Episode 5
-
-That gives you a much richer analytical structure.
-
-
----
-
-And this is particularly useful for your FCR model
-
-You could eventually distinguish:
-
-Level 1 — Contact
-
-Was this interaction handled?
-
-↓
-
-Level 2 — Episode
-
-Did the customer continue contacting within the immediate contact window?
-
-↓
-
-Level 3 — Sequence
-
-Did the customer return shortly after the episode ended?
-
-↓
-
-Level 4 — Longer-term repeat
-
-Did the customer come back later?
-
-This is much more informative than simply:
-
-Repeat Contact = Yes/No
-
-
----
-
-One thing I would change in your current approach
-
-Don't defend 48 hours by saying:
-
-> "We chose 48 hours because that's the standard."
-
-
-
-Instead, your analysis should establish whether the data supports a meaningful separation.
-
-You have already done this for Episode with the threshold sensitivity analysis.
-
-You should do the equivalent for Sequence:
-
-Sequence threshold
-        ↓
-24h
-36h
-48h
-60h
-72h
-...
-        ↓
-How many Episodes are grouped together?
-How many Sequences are created?
-How many sequences contain multiple episodes?
-How long are sequences?
-
-Then you can say something much more defensible:
-
-> "The Sequence threshold was selected based on the observed distribution of gaps between Episodes and sensitivity analysis, rather than being arbitrarily defined."
-
-
-
-That is the important part.
-
-So your final MOL structure should be:
-
-Contact → Episode → Sequence
-
-but each level needs a different analytical purpose:
-
-Level	What it represents	Why
-
-Contact	Individual interaction	Raw event
-Episode	Continuous/closely connected contact period	Identify immediate repeat behaviour
-Sequence	Closely spaced Episodes	Identify an ongoing customer journey
-Customer	All interactions over time	Long-term behaviour
-
-
-And if your only deliverable were FCR / repeat contact, I would keep the model simpler and use Episodes. Sequence earns its place when you need to understand the journey between Episodes, not merely whether a repeat happened.
+display(test_results_df)
