@@ -1,111 +1,87 @@
-# =====================================
-# SAFE CHECKPOINT WRITER
-# =====================================
+# ============================================
+# CREATE SPARK DATAFRAME
+# ============================================
 
-def write_checkpoint_safely(
-    df_out: pd.DataFrame,
-    checkpoint_table: str
-):
-    """
-    Write checkpoint results to Delta with an explicit stable schema.
+spark_df = spark.createDataFrame(checkpoint_df)
 
-    Prevents Pandas/Spark type inference from changing nullable
-    BIGINT columns such as prompt_tokens into DOUBLE.
-    """
+# ============================================
+# FORCE CHECKPOINT SCHEMA
+# ============================================
 
-    if df_out is None or len(df_out) == 0:
-        print("[CHECKPOINT] Nothing to write")
-        return
-
-    print(f"\n[CHECKPOINT] Preparing {len(df_out):,} rows")
-
-    # -----------------------------------------
-    # Create Spark DataFrame
-    # -----------------------------------------
-    spark_df = spark.createDataFrame(df_out)
-
-    # -----------------------------------------
-    # Explicit BIGINT columns
-    # -----------------------------------------
-    bigint_columns = [
-        "prompt_tokens",
-        "completion_tokens",
-        "total_tokens"
-    ]
-
-    for col_name in bigint_columns:
-        if col_name in spark_df.columns:
-            spark_df = spark_df.withColumn(
-                col_name,
-                F.col(col_name).cast("long")
-            )
-
-    # -----------------------------------------
-    # Explicit DOUBLE columns
-    # -----------------------------------------
-    double_columns = [
-        "Confidence",
-        "api_latency",
-        "task_latency"
-    ]
-
-    for col_name in double_columns:
-        if col_name in spark_df.columns:
-            spark_df = spark_df.withColumn(
-                col_name,
-                F.col(col_name).cast("double")
-            )
-
-    # -----------------------------------------
-    # Explicit STRING columns
-    # -----------------------------------------
-    string_columns = [
-        "ConversationId",
-        "ClaimNumber",
-        "MembershipNumber",
-        "CustomerMessage",
-        "AgentMessage",
-        "request_id",
-        "error"
-    ]
-
-    for col_name in string_columns:
-        if col_name in spark_df.columns:
-            spark_df = spark_df.withColumn(
-                col_name,
-                F.col(col_name).cast("string")
-            )
-
-    # -----------------------------------------
-    # Explicit TIMESTAMP
-    # -----------------------------------------
-    if "ConversationStartTimestamp" in spark_df.columns:
+# BIGINT
+for col_name in [
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens"
+]:
+    if col_name in spark_df.columns:
         spark_df = spark_df.withColumn(
-            "ConversationStartTimestamp",
-            F.to_timestamp(
-                F.col("ConversationStartTimestamp")
-            )
+            col_name,
+            F.col(col_name).cast("long")
         )
 
-    # -----------------------------------------
-    # DEBUG SCHEMA
-    # -----------------------------------------
-    print("[CHECKPOINT] Schema being written:")
-    spark_df.printSchema()
+# DOUBLE
+for col_name in [
+    "Confidence",
+    "api_latency",
+    "task_latency"
+]:
+    if col_name in spark_df.columns:
+        spark_df = spark_df.withColumn(
+            col_name,
+            F.col(col_name).cast("double")
+        )
 
-    # -----------------------------------------
-    # Append to Delta
-    # -----------------------------------------
-    (
-        spark_df
-        .write
-        .mode("append")
-        .format("delta")
-        .option("mergeSchema", "false")
-        .saveAsTable(checkpoint_table)
+# STRING
+for col_name in [
+    "ConversationId",
+    "ClaimNumber",
+    "MembershipNumber",
+    "CustomerMessage",
+    "AgentMessage",
+    "request_id",
+    "error"
+]:
+    if col_name in spark_df.columns:
+        spark_df = spark_df.withColumn(
+            col_name,
+            F.col(col_name).cast("string")
+        )
+
+# TIMESTAMP
+if "ConversationStartTimestamp" in spark_df.columns:
+    spark_df = spark_df.withColumn(
+        "ConversationStartTimestamp",
+        F.to_timestamp(
+            F.col("ConversationStartTimestamp")
+        )
     )
 
-    print(
-        f"[CHECKPOINT] Successfully saved "
-        f"{len(df_out):,} rows"
+# processed_at, if your checkpoint dataframe contains it
+if "processed_at" in spark_df.columns:
+    spark_df = spark_df.withColumn(
+        "processed_at",
+        F.to_timestamp(
+            F.col("processed_at")
+        )
     )
+
+# ============================================
+# DEBUG — VERY IMPORTANT
+# ============================================
+
+print("\n[CHECKPOINT] Schema being written:")
+spark_df.printSchema()
+
+# ============================================
+# WRITE
+# ============================================
+
+(
+    spark_df
+    .write
+    .mode("append")
+    .format("delta")
+    .option("mergeSchema", "false")
+    .saveAsTable(checkpoint_table)
+)
