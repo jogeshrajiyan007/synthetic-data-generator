@@ -1,9 +1,101 @@
-# =====================================
-# TELEPHONY LLM BATCH PROCESSOR
-# =====================================
-# Safely process large telephony transcripts in chunks
-# with rate limiting, retry logic, checkpointing, and PII redaction
-# =====================================
+# Complete Implementation: Running LLM Batch Processor on fcr_telephony_base
+
+## Part 1: Set Up Checkpoint & Output Tables
+
+```sql
+%sql
+-- =====================================================================
+-- CREATE CHECKPOINT TABLE
+-- =====================================================================
+-- This table stores intermediate results as LLM processes rows
+-- Allows resumption if job is interrupted
+
+CREATE TABLE IF NOT EXISTS axahealth_dataplatform_pd_lab.axahealth_data_scientist_analytics.fcr_telephony_llm_messages_checkpoint (
+    ConversationId STRING,
+    ClaimNumber STRING,
+    ConversationStartTimestamp TIMESTAMP,
+    MembershipNumber STRING,
+    CustomerMessage STRING,
+    AgentMessage STRING,
+    Confidence DOUBLE,
+    prompt_tokens INT,
+    completion_tokens INT,
+    total_tokens INT,
+    api_latency DOUBLE,
+    task_latency DOUBLE,
+    request_id STRING,
+    error STRING,
+    processed_at TIMESTAMP
+)
+USING DELTA
+COMMENT "Checkpoint for FCR telephony LLM message extraction batch processing";
+
+-- =====================================================================
+-- CREATE OUTPUT TABLE
+-- =====================================================================
+-- Final table with all extracted messages after batch completes
+
+CREATE TABLE IF NOT EXISTS axahealth_dataplatform_pd_lab.axahealth_data_scientist_analytics.fcr_telephony_llm_messages_output (
+    ConversationId STRING,
+    ClaimNumber STRING,
+    ConversationStartTimestamp TIMESTAMP,
+    MembershipNumber STRING,
+    CustomerMessage STRING,
+    AgentMessage STRING,
+    Confidence DOUBLE,
+    prompt_tokens INT,
+    completion_tokens INT,
+    total_tokens INT,
+    api_latency DOUBLE,
+    task_latency DOUBLE,
+    request_id STRING,
+    error STRING,
+    processed_at TIMESTAMP
+)
+USING DELTA
+COMMENT "Final output table with customer/agent messages extracted from FCR telephony transcripts";
+
+-- Verify tables created
+SHOW TABLES LIKE 'fcr_telephony_llm*';
+```
+
+---
+
+## Part 2: Validate Input Table Structure
+
+```sql
+%sql
+-- Check fcr_telephony_base structure
+DESC TABLE fcr_telephony_base;
+
+-- See sample data
+SELECT * FROM fcr_telephony_base LIMIT 5;
+
+-- Check for required columns
+SELECT 
+  CASE WHEN COUNT(*) > 0 THEN 'YES' ELSE 'NO' END as has_conversation_id,
+  CASE WHEN SUM(CASE WHEN ConversationTranscript IS NOT NULL THEN 1 ELSE 0 END) > 0 THEN 'YES' ELSE 'NO' END as has_transcript
+FROM fcr_telephony_base;
+
+-- Check data volume
+SELECT COUNT(*) as total_records,
+       COUNT(DISTINCT ConversationId) as unique_conversations,
+       COUNT(DISTINCT ClaimNumber) as unique_claims,
+       MIN(ConversationStartTimestamp) as earliest_date,
+       MAX(ConversationStartTimestamp) as latest_date
+FROM fcr_telephony_base;
+```
+
+---
+
+## Part 3: Python Setup & Authentication
+
+```python
+%python
+
+# ==============================================
+# CELL: IMPORTS & CONFIGURATION
+# ==============================================
 
 import asyncio
 import json
@@ -15,590 +107,573 @@ import numpy as np
 from collections import deque
 from typing import Dict, Any, Tuple, List
 from datetime import datetime
+import requests
+from msal import ConfidentialClientApplication
+from azure.identity import ConfidentialClientCredential
+from azure.keyvault.secrets import SecretClient
+import pyspark.sql.functions as F
 
-# =====================================
-# CONFIGURATION
-# =====================================
-MODEL = "gpt-4o-2024-11-20"
-MAX_CONCURRENCY = 15  # parallel LLM calls
-MIN_TRANSCRIPT_CHARS = 100
-MAX_TOKENS = 1200
-RETRIES = 3
+# Import the batch processor module
+exec(open('/home/claude/telephony_llm_batch_processor.py').read())
 
-# =====================================
-# RATE LIMITING & TOKEN MANAGEMENT
-# =====================================
-TOKEN_LIMIT = 15_000_000  # 15M tokens per 30 min window
-WINDOW_SECONDS = 60 * 30  # 30 minute window
-SAFETY_BUFFER = 0.90  # stay at 90% of limit
-ESTIMATED_TOKENS_PER_CALL = 1800
+print("[SETUP] All imports successful")
+print("[SETUP] Batch processor module loaded")
+```
 
-DATE_CHUNKS = [
-    # ("2024-01-01", "2024-06-30"),  # Chunk 1
-    # ("2024-07-01", "2024-12-31"),  # Chunk 2
-    # Adjust these based on your data volume
+```python
+%python
+
+# ==============================================
+# CELL: AUTHENTICATE & GET TOKEN
+# ==============================================
+
+# Service Connector Details
+connector = "z-ppp-pr-dbr-keyvaultcredentials-key05"
+vault_url = "https://z-ppp-en1-pr-dala-key05.vault.azure.net/"
+client_id_key = "modelgateway-healthsgpt-client-id"
+client_secret_key = "modelgateway-healthsgpt-client-secret"
+
+# OAuth tenant and scope
+tenant_id = "edd791b6-a6e2-450b-9582-5c29c2cc2d25"
+scopes = ["https://axapppuk.onmicrosoft.com/modelgateway-api-pr/.default"]
+
+# Model Gateway Base URL
+modelgateway_baseurl = "https://your-model-gateway-url/"  # UPDATE THIS
+
+# ========================
+# Get Credentials from Key Vault
+# ========================
+def get_uc_secrets(connector: str, vault_url: str, *secret_keys: str) -> dict:
+    """Retrieve secrets from Azure Key Vault"""
+    credential = dbutils.credentials.getServiceCredentialsProvider(connector)
+    client = SecretClient(vault_url=vault_url, credential=credential)
+    return {k: client.get_secret(k).value for k in secret_keys}
+
+try:
+    secrets = get_uc_secrets(connector, vault_url, client_id_key, client_secret_key)
+    client_id = secrets[client_id_key]
+    client_secret = secrets[client_secret_key]
+    print("[AUTH] Successfully retrieved secrets from Key Vault")
+except Exception as e:
+    print(f"[ERROR] Failed to get secrets: {e}")
+    raise
+
+# ========================
+# Get OAuth Token
+# ========================
+def get_oauth_token(tenant_id, client_id, client_secret, scopes):
+    """Acquire OAuth token for model gateway"""
+    app = ConfidentialClientApplication(
+        client_id,
+        client_credential=client_secret,
+        authority=f"https://login.microsoftonline.com/{tenant_id}"
+    )
+    result = app.acquire_token_for_client(scopes=scopes)
+    if "access_token" in result:
+        return result["access_token"]
+    raise RuntimeError(f"Failed to acquire token: {result}")
+
+try:
+    token = get_oauth_token(tenant_id, client_id, client_secret, scopes)
+    print(f"[AUTH] Token acquired successfully")
+    print(f"[AUTH] Token preview: {token[:30]}...")
+except Exception as e:
+    print(f"[ERROR] Token acquisition failed: {e}")
+    raise
+```
+
+---
+
+## Part 4: Load & Prepare Data
+
+```python
+%python
+
+# ==============================================
+# CELL: LOAD fcr_telephony_base
+# ==============================================
+
+# Load the table
+df_sp = spark.table("fcr_telephony_base")
+
+print(f"[DATA] Loaded fcr_telephony_base")
+print(f"[DATA] Total records: {df_sp.count():,}")
+
+# Show schema
+print("\n[DATA] Table schema:")
+df_sp.printSchema()
+
+# Show sample
+print("\n[DATA] Sample row:")
+df_sp.limit(1).display()
+```
+
+```python
+%python
+
+# ==============================================
+# CELL: CHUNK DATA BY DATE (optional, for large datasets)
+# ==============================================
+
+# Option A: Small/Medium dataset (<50K rows) - single chunk
+# df = df_sp.toPandas()
+
+# Option B: Large dataset (>50K rows) - chunk by date
+# Define date ranges based on your data volume
+date_chunks = [
+    ("2024-01-01", "2024-03-31"),   # Q1 2024
+    ("2024-04-01", "2024-06-30"),   # Q2 2024
+    ("2024-07-01", "2024-09-30"),   # Q3 2024
+    ("2024-10-01", "2024-12-31"),   # Q4 2024
 ]
 
-# =====================================
-# PII REDACTION PATTERNS
-# =====================================
-PII_PATTERNS = [
-    re.compile(r"\b\d{3}\s?\d{3}\s?\d{4}\b"),           # Phone: XXX XXX XXXX
-    re.compile(r"\b\d{10,}\b"),                        # Long digit sequences (policy, membership)
-    re.compile(r"\b(?:\+?1?[-.\s]?\(?)?(\d{3})\)?[-.\s]?(\d{3})[-.\s]?(\d{4})\b"),  # Various phone formats
-    re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}"),  # Emails
-    re.compile(r"\b[A-Z]{2}\d{6}\b"),                  # UK ID format (e.g., AB123456)
-    re.compile(r"(?:DOB|dob|date of birth)[:\s]*\d{1,2}[-/]\d{1,2}[-/]\d{2,4}", re.IGNORECASE),  # DOB
-    re.compile(r"(?:postcode|postal code|zip)[:\s]*[A-Z0-9]{2,4}\s?[A-Z0-9]{1,3}", re.IGNORECASE),  # Postcode
-    re.compile(r"(?:sort code|account)[:\s]*\d{2}[-\s]?\d{2}[-\s]?\d{2}", re.IGNORECASE),  # Bank details
+# Load chunks into pandas
+pandas_dfs = []
+total_records = 0
+
+for start_date, end_date in date_chunks:
+    try:
+        df_chunk = df_sp.filter(
+            (F.col("ConversationStartTimestamp") >= start_date) &
+            (F.col("ConversationStartTimestamp") <= end_date)
+        )
+        count = df_chunk.count()
+        print(f"[CHUNK] {start_date} to {end_date}: {count:,} records")
+        
+        if count > 0:
+            pandas_dfs.append(df_chunk.toPandas())
+            total_records += count
+    except Exception as e:
+        print(f"[WARN] Could not load chunk {start_date}-{end_date}: {e}")
+
+if pandas_dfs:
+    df = pd.concat(pandas_dfs, ignore_index=True)
+else:
+    df = df_sp.toPandas()
+
+print(f"\n[DATA] Total rows loaded into pandas: {len(df):,}")
+print(f"[DATA] Memory usage: {df.memory_usage(deep=True).sum() / 1024**2:.1f} MB")
+```
+
+```python
+%python
+
+# ==============================================
+# CELL: INSPECT & VALIDATE INPUT DATA
+# ==============================================
+
+# Check required columns
+required_cols = ["ConversationId", "ConversationStartTimestamp", "ConversationTranscript"]
+missing = [c for c in required_cols if c not in df.columns]
+
+if missing:
+    print(f"[ERROR] Missing required columns: {missing}")
+    print(f"[ERROR] Available columns: {df.columns.tolist()}")
+    raise ValueError(f"Missing columns: {missing}")
+else:
+    print(f"[OK] All required columns present")
+
+# Check for nulls
+print("\n[DATA] Null check:")
+for col in required_cols:
+    null_count = df[col].isna().sum()
+    pct = (null_count / len(df)) * 100
+    print(f"  {col}: {null_count:,} ({pct:.1f}%)")
+
+# Check transcript lengths
+print("\n[DATA] Transcript length statistics:")
+df['transcript_len'] = df['ConversationTranscript'].astype(str).str.len()
+print(df['transcript_len'].describe())
+
+# Show sample
+print("\n[DATA] Sample conversation:")
+sample = df[df['transcript_len'] > 500].iloc[0]
+print(f"ConversationId: {sample['ConversationId']}")
+print(f"ClaimNumber: {sample['ClaimNumber']}")
+print(f"Transcript length: {sample['transcript_len']} chars")
+print(f"Transcript preview:\n{sample['ConversationTranscript'][:500]}...")
+```
+
+---
+
+## Part 5: Configure LLM Batch Processor
+
+```python
+%python
+
+# ==============================================
+# CELL: DEFINE TABLE REFERENCES
+# ==============================================
+
+# Full table paths
+CHECKPOINT_TABLE = "axahealth_dataplatform_pd_lab.axahealth_data_scientist_analytics.fcr_telephony_llm_messages_checkpoint"
+OUTPUT_TABLE = "axahealth_dataplatform_pd_lab.axahealth_data_scientist_analytics.fcr_telephony_llm_messages_output"
+
+print(f"[CONFIG] Checkpoint table: {CHECKPOINT_TABLE}")
+print(f"[CONFIG] Output table: {OUTPUT_TABLE}")
+
+# Define date chunks for this run (update based on your needs)
+date_chunks_to_process = [
+    ("2024-01-01", "2024-03-31"),   # Q1 2024
+    ("2024-04-01", "2024-06-30"),   # Q2 2024
+    ("2024-07-01", "2024-09-30"),   # Q3 2024
+    ("2024-10-01", "2024-12-31"),   # Q4 2024
 ]
 
-def redact_pii(text: str) -> str:
-    """Redact PII from transcript before sending to LLM"""
-    if not isinstance(text, str):
-        return ""
-    
-    redacted = text
-    for pattern in PII_PATTERNS:
-        redacted = pattern.sub("[REDACTED]", redacted)
-    
-    return redacted.strip()
+print(f"\n[CONFIG] Will process {len(date_chunks_to_process)} date chunks")
+for start, end in date_chunks_to_process:
+    print(f"  {start} to {end}")
+```
 
-# =====================================
-# TRANSCRIPT PARSING
-# =====================================
-def parse_transcript_into_turns(transcript: str) -> List[Dict[str, str]]:
-    """
-    Parse transcript into structured turns.
-    Expected format:
-    Agent: message
-    Customer: message
-    Agent: message
-    ...
-    """
-    if not transcript:
-        return []
-    
-    turns = []
-    lines = transcript.split('\n')
-    
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        
-        if line.startswith('Agent:'):
-            turns.append({
-                'speaker': 'agent',
-                'text': line[6:].strip()
-            })
-        elif line.startswith('Customer:'):
-            turns.append({
-                'speaker': 'customer',
-                'text': line[9:].strip()
-            })
-        elif ':' in line:
-            # Handle other formats like "Ekaterina McLaughlin (02:30:15): message"
-            parts = line.split(':', 1)
-            if len(parts) == 2:
-                speaker_part = parts[0].strip()
-                message = parts[1].strip()
-                
-                # Determine if agent or customer
-                if any(x in speaker_part.lower() for x in ['agent', 'support', 'representative', 'tech', 'customer service']):
-                    turns.append({'speaker': 'agent', 'text': message})
-                elif any(x in speaker_part.lower() for x in ['customer', 'caller', 'client', 'member']):
-                    turns.append({'speaker': 'customer', 'text': message})
-    
-    return turns
+---
 
-def build_clean_transcript_for_llm(transcript: str) -> str:
-    """
-    Build a clean, structured transcript for LLM analysis.
-    Handles multi-agent calls gracefully by combining agent turns chronologically.
-    """
-    turns = parse_transcript_into_turns(transcript)
-    
-    if not turns:
-        return ""
-    
-    # Redact PII
-    turns = [
-        {'speaker': t['speaker'], 'text': redact_pii(t['text'])}
-        for t in turns
-    ]
-    
-    # Rebuild as clean alternating turns
-    clean_lines = []
-    for turn in turns:
-        speaker_label = "Agent" if turn['speaker'] == 'agent' else "Customer"
-        clean_lines.append(f"{speaker_label}: {turn['text']}")
-    
-    return '\n'.join(clean_lines)
+## Part 6: Execute LLM Batch Processing
 
-# =====================================
-# LLM JSON SCHEMA & PROMPTS
-# =====================================
-TELEPHONY_JSON_SCHEMA = {
-    "name": "telephony_message_split",
-    "schema": {
-        "type": "object",
-        "properties": {
-            "customer_message": {
-                "type": "string",
-                "description": "Summary of what the customer asked for, reported, or was concerned about"
-            },
-            "agent_message": {
-                "type": "string",
-                "description": "Summary of what the agent(s) explained, did, or outcome communicated"
-            },
-            "confidence": {
-                "type": "number",
-                "description": "Confidence score 0-1 on how well the split represents the call"
-            }
-        },
-        "required": ["customer_message", "agent_message", "confidence"],
-        "additionalProperties": False
-    }
-}
+```python
+%python
 
-def build_telephony_prompt(clean_transcript: str, agents_involved: str = None) -> str:
-    """Build the prompt for telephony transcript analysis"""
-    
-    agent_context = ""
-    if agents_involved:
-        agent_context = f"\nNote: This call involved {agents_involved}. If multiple agents handled the call, combine their responses into one coherent resolution summary.\n"
-    
-    return f"""
-You are an expert AXA Health customer service analyst. Your task is to analyse a telephone call transcript and extract TWO separate summaries:
+# ==============================================
+# CELL: RUN TELEPHONY LLM BATCH PROCESSOR
+# ==============================================
 
-1. **customer_message**: What the customer asked for, reported, or was concerned about. Write this from the customer's perspective/intent, covering the entire call. Focus on their needs, problems, or questions.
+print("=" * 80)
+print("STARTING TELEPHONY LLM BATCH PROCESSING")
+print("=" * 80)
+print(f"Start time: {datetime.now()}")
+print(f"Input records: {len(df):,}")
+print(f"Checkpoint table: {CHECKPOINT_TABLE}")
+print(f"Output table: {OUTPUT_TABLE}")
+print("=" * 80 + "\n")
 
-2. **agent_message**: What the agent(s) explained, did, or what outcomes were communicated. If multiple agents handled this call (transfers, consultations), combine their contributions into one coherent summary showing what was resolved or actioned.
+# Start timer
+overall_start = time.time()
 
-Guidelines:
-- Do NOT invent information not present in the transcript.
-- Do NOT include internal jargon or system references unless they were explicitly discussed with the customer.
-- If the transcript is too short or unclear, return empty strings for the relevant field rather than guessing.
-- Both summaries should be 1-3 sentences, clear and actionable.
-- Flag any PII redactions ([REDACTED]) if they were critical context (e.g., "customer provided [REDACTED] as confirmation").
-{agent_context}
+try:
+    # Run the batch processor
+    df_results = run_telephony_llm_batch(
+        df=df,
+        token=token,
+        modelgateway_baseurl=modelgateway_baseurl,
+        checkpoint_table=CHECKPOINT_TABLE,
+        output_table=OUTPUT_TABLE,
+        date_chunks=date_chunks_to_process
+    )
+    
+    elapsed = time.time() - overall_start
+    
+    print("\n" + "=" * 80)
+    print("BATCH PROCESSING COMPLETE")
+    print("=" * 80)
+    print(f"End time: {datetime.now()}")
+    print(f"Total elapsed time: {elapsed/60:.1f} minutes ({elapsed/3600:.2f} hours)")
+    print(f"Records processed: {len(df_results):,}")
+    print(f"Processing rate: {len(df_results) / (elapsed/60):.1f} records/min")
+    print("=" * 80)
+    
+except Exception as e:
+    print(f"\n[ERROR] Batch processing failed:")
+    print(f"  {type(e).__name__}: {str(e)}")
+    traceback.print_exc()
+    raise
+```
 
-TRANSCRIPT (may contain multiple agent turns or transfers):
-----------
-{clean_transcript}
-----------
+---
 
-Provide your response as JSON with only the three fields: customer_message, agent_message, confidence.
-""".strip()
+## Part 7: Quality Assurance & Validation
 
-def custom_json_loader(output_text: str) -> Dict[str, Any]:
-    """Parse JSON with fallback to extracting outermost object"""
-    try:
-        return json.loads(output_text)
-    except json.JSONDecodeError:
-        start = output_text.find("{")
-        end = output_text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            return json.loads(output_text[start:end+1])
-        raise
+```python
+%python
 
-def validate_and_repair_telephony_response(response: Dict[str, Any]) -> Dict[str, Any]:
-    """Validate and repair model response"""
-    if not isinstance(response, dict):
-        response = {}
-    
-    customer_msg = str(response.get("customer_message", "")).strip() or None
-    agent_msg = str(response.get("agent_message", "")).strip() or None
-    confidence = response.get("confidence")
-    
-    # Validate confidence
-    try:
-        confidence = float(confidence or 0)
-        confidence = max(0.0, min(1.0, confidence))
-    except (ValueError, TypeError):
-        confidence = 0.5
-    
-    # If both are empty, mark low confidence
-    if not customer_msg and not agent_msg:
-        confidence = 0.0
-    
-    return {
-        "customer_message": customer_msg,
-        "agent_message": agent_msg,
-        "confidence": confidence
-    }
+# ==============================================
+# CELL: VALIDATE RESULTS
+# ==============================================
 
-# =====================================
-# MODEL API CALLS
-# =====================================
-def call_telephony_model(
-    prompt: str,
-    max_tokens: int = MAX_TOKENS,
-    retries: int = RETRIES,
-    token: str = None,
-    modelgateway_baseurl: str = None,
-    api_timeout: int = 60
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """
-    Call the model with retry logic and error handling.
-    Returns (analysis, metadata)
-    """
-    apiurl = f"{modelgateway_baseurl}secure-gpt-openai/openai/deployments/{MODEL}/chat/completions?api-version=2024-06-01"
-    
-    payload = {
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are an expert AXA Health customer service analyst who separates call transcripts into customer and agent contributions."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        "temperature": 0,
-        "max_tokens": max_tokens,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": TELEPHONY_JSON_SCHEMA["name"],
-                "schema": TELEPHONY_JSON_SCHEMA["schema"],
-                "strict": True
-            }
-        }
-    }
-    
-    last_exception = None
-    
-    for attempt in range(retries):
-        start_api = time.time()
-        try:
-            # Import here to avoid hardcoding
-            import requests
-            
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json"
-            }
-            resp = requests.post(
-                apiurl,
-                headers=headers,
-                json=payload,
-                verify=True,
-                timeout=api_timeout
-            )
-            resp.raise_for_status()
-            
-            api_latency = time.time() - start_api
-            request_id = resp.headers.get("x-request-id")
-            
-            r = resp.json()
-            choice = r["choices"][0]["message"]
-            
-            if "parsed" in choice:
-                parsed = choice["parsed"]
-            elif choice.get("content"):
-                parsed = custom_json_loader(choice["content"])
-            else:
-                raise ValueError("No model content returned")
-            
-            cleaned = validate_and_repair_telephony_response(parsed)
-            
-            usage = r.get("usage", {})
-            meta = {
-                "prompt_tokens": usage.get("prompt_tokens"),
-                "completion_tokens": usage.get("completion_tokens"),
-                "total_tokens": usage.get("total_tokens"),
-                "api_latency": api_latency,
-                "request_id": request_id,
-                "attempt": attempt + 1,
-                "error": None
-            }
-            
-            return cleaned, meta
-        
-        except Exception as e:
-            last_exception = e
-            if attempt < retries - 1:
-                wait_time = 2 ** attempt + np.random.rand()  # exponential backoff + jitter
-                time.sleep(wait_time)
-            else:
-                meta = {
-                    "prompt_tokens": None,
-                    "completion_tokens": None,
-                    "total_tokens": None,
-                    "api_latency": time.time() - start_api,
-                    "request_id": None,
-                    "attempt": attempt + 1,
-                    "error": f"{type(e).__name__}: {str(e)}"
-                }
-                return {
-                    "customer_message": None,
-                    "agent_message": None,
-                    "confidence": 0.0
-                }, meta
-    
-    raise RuntimeError(f"Model call failed after {retries} attempts: {last_exception}")
+print("\n" + "=" * 80)
+print("RESULTS VALIDATION")
+print("=" * 80)
 
-# =====================================
-# ASYNC BATCH PROCESSING
-# =====================================
-class TokenBudgetManager:
-    """Manages token rate limiting across concurrent tasks"""
-    
-    def __init__(self, token_limit: int, window_secs: int, safety_buffer: float = 0.90):
-        self.token_limit = token_limit
-        self.window_secs = window_secs
-        self.safety_buffer = safety_buffer
-        self.token_usage_window = deque()  # (timestamp, tokens)
-        self.current_tokens = 0
-        self.lock = asyncio.Lock()
-    
-    async def clean_old_tokens(self):
-        """Remove tokens outside the window"""
-        now = time.time()
-        async with self.lock:
-            while self.token_usage_window and now - self.token_usage_window[0][0] > self.window_secs:
-                _, old_tokens = self.token_usage_window.popleft()
-                self.current_tokens = max(0, self.current_tokens - old_tokens)
-    
-    async def throttle_if_needed(self, estimated_tokens: int = ESTIMATED_TOKENS_PER_CALL):
-        """Wait if approaching token limit"""
-        await self.clean_old_tokens()
-        limit = self.token_limit * self.safety_buffer
-        
-        while self.current_tokens + estimated_tokens > limit:
-            pressure = self.current_tokens / limit
-            sleep_time = min(1 + pressure * 4, 8)
-            print(f"[THROTTLE] Tokens: {self.current_tokens:,}/{int(limit):,} | Sleeping {sleep_time:.1f}s")
-            await asyncio.sleep(sleep_time)
-            await self.clean_old_tokens()
-    
-    async def record_tokens(self, token_count: int):
-        """Record token usage"""
-        async with self.lock:
-            now = time.time()
-            self.token_usage_window.append((now, token_count))
-            self.current_tokens += token_count
+# Overall stats
+total = len(df_results)
+print(f"\nTotal records: {total:,}")
 
-# =====================================
-# MAIN BATCH PROCESSOR
-# =====================================
-async def process_telephony_batch_async(
-    df: pd.DataFrame,
-    token: str,
-    modelgateway_baseurl: str,
-    checkpoint_table: str = None,
-    output_table: str = None
-) -> pd.DataFrame:
-    """
-    Process telephony transcripts in batches with:
-    - Async concurrency control
-    - Token rate limiting
-    - Retry logic
-    - PII redaction
-    - Checkpoint saving
-    """
-    
-    # Validate input
-    required_cols = ["ConversationId", "ConversationStartTimestamp", "ConversationTranscript", "ClaimNumber"]
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}")
-    
-    df = df.reset_index(drop=True).copy()
-    
-    # Filter already-processed if checkpoint exists
-    if checkpoint_table:
-        try:
-            checkpoint_df = spark.table(checkpoint_table).toPandas()
-            processed_ids = set(checkpoint_df["ConversationId"].unique())
-            df = df[~df["ConversationId"].isin(processed_ids)].copy()
-            print(f"[CHECKPOINT] Resuming: {len(df)} unprocessed records remaining")
-        except Exception as e:
-            print(f"[CHECKPOINT] Could not load checkpoint (first run?): {e}")
-    
-    # Filter by minimum transcript length
-    df = df[df["ConversationTranscript"].astype(str).str.len() >= MIN_TRANSCRIPT_CHARS].copy()
-    print(f"[FILTER] Processing {len(df)} records with transcript >= {MIN_TRANSCRIPT_CHARS} chars")
-    
-    # Initialize output
-    results = []
-    semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
-    token_mgr = TokenBudgetManager(TOKEN_LIMIT, WINDOW_SECONDS, SAFETY_BUFFER)
-    
-    async def process_single_row(idx: int, row: pd.Series):
-        """Process one transcript"""
-        async with semaphore:
-            task_start = time.time()
-            
-            try:
-                # Throttle if needed
-                await token_mgr.throttle_if_needed(ESTIMATED_TOKENS_PER_CALL)
-                
-                # Clean transcript
-                clean_transcript = build_clean_transcript_for_llm(row["ConversationTranscript"])
-                
-                if len(clean_transcript) < MIN_TRANSCRIPT_CHARS:
-                    print(f"[SKIP] {row['ConversationId']}: transcript too short after PII redaction")
-                    return {
-                        "ConversationId": row["ConversationId"],
-                        "ClaimNumber": row["ClaimNumber"],
-                        "ConversationStartTimestamp": row["ConversationStartTimestamp"],
-                        "CustomerMessage": None,
-                        "AgentMessage": None,
-                        "Confidence": 0.0,
-                        "prompt_tokens": None,
-                        "completion_tokens": None,
-                        "total_tokens": None,
-                        "api_latency": None,
-                        "task_latency": time.time() - task_start,
-                        "request_id": None,
-                        "error": "Transcript too short after redaction"
-                    }
-                
-                # Build prompt
-                agents_str = row.get("AgentsInvolved", "")
-                prompt = build_telephony_prompt(clean_transcript, agents_str)
-                
-                # Call model
-                analysis, meta = call_telephony_model(
-                    prompt,
-                    max_tokens=MAX_TOKENS,
-                    retries=RETRIES,
-                    token=token,
-                    modelgateway_baseurl=modelgateway_baseurl
-                )
-                
-                # Record tokens
-                if meta.get("total_tokens"):
-                    await token_mgr.record_tokens(meta["total_tokens"])
-                
-                # Build result
-                result = {
-                    "ConversationId": row["ConversationId"],
-                    "ClaimNumber": row["ClaimNumber"],
-                    "ConversationStartTimestamp": row["ConversationStartTimestamp"],
-                    "CustomerMessage": analysis.get("customer_message"),
-                    "AgentMessage": analysis.get("agent_message"),
-                    "Confidence": analysis.get("confidence"),
-                    "prompt_tokens": meta.get("prompt_tokens"),
-                    "completion_tokens": meta.get("completion_tokens"),
-                    "total_tokens": meta.get("total_tokens"),
-                    "api_latency": meta.get("api_latency"),
-                    "task_latency": time.time() - task_start,
-                    "request_id": meta.get("request_id"),
-                    "error": meta.get("error")
-                }
-                
-                # Progress logging
-                if (len(results) + 1) % 50 == 0:
-                    print(f"[PROGRESS] Processed {len(results) + 1}/{len(df)} | Avg confidence: {np.mean([r.get('Confidence', 0) for r in results]):.2f}")
-                
-                return result
-            
-            except Exception as e:
-                print(f"[ERROR] {row['ConversationId']}: {str(e)}")
-                return {
-                    "ConversationId": row["ConversationId"],
-                    "ClaimNumber": row["ClaimNumber"],
-                    "ConversationStartTimestamp": row["ConversationStartTimestamp"],
-                    "CustomerMessage": None,
-                    "AgentMessage": None,
-                    "Confidence": 0.0,
-                    "prompt_tokens": None,
-                    "completion_tokens": None,
-                    "total_tokens": None,
-                    "api_latency": None,
-                    "task_latency": time.time() - task_start,
-                    "request_id": None,
-                    "error": f"{type(e).__name__}: {str(e)}"
-                }
-    
-    # Run all tasks concurrently
-    tasks = [process_single_row(i, row) for i, (_, row) in enumerate(df.iterrows())]
-    results = await asyncio.gather(*tasks)
-    
-    # Convert to dataframe
-    df_out = pd.DataFrame(results)
-    
-    # Save checkpoint if specified
-    if checkpoint_table:
-        try:
-            spark_df = spark.createDataFrame(df_out)
-            spark_df.write.mode("append").format("delta").saveAsTable(checkpoint_table)
-            print(f"[CHECKPOINT] Saved {len(df_out)} results")
-        except Exception as e:
-            print(f"[WARNING] Could not save checkpoint: {e}")
-    
-    return df_out
+# Success rate
+errors = df_results['error'].notna().sum()
+success = total - errors
+success_pct = (success / total) * 100
 
-# =====================================
-# USAGE WRAPPER (SYNC CALLER)
-# =====================================
-def run_telephony_llm_batch(
-    df: pd.DataFrame,
-    token: str,
-    modelgateway_baseurl: str,
-    checkpoint_table: str = None,
-    output_table: str = None,
-    date_chunks: List[Tuple[str, str]] = None
-) -> pd.DataFrame:
-    """
-    Wrapper to run async batch processor from sync context.
-    If date_chunks provided, processes in chunks and appends to output table.
-    """
+print(f"Successful extractions: {success:,} ({success_pct:.1f}%)")
+print(f"Failed extractions: {errors:,} ({100-success_pct:.1f}%)")
+
+# Confidence distribution
+print("\n--- Confidence Distribution ---")
+print(df_results['Confidence'].describe())
+
+confidence_buckets = [
+    (0.9, 1.0, "Excellent (>0.9)"),
+    (0.7, 0.9, "Good (0.7-0.9)"),
+    (0.5, 0.7, "Fair (0.5-0.7)"),
+    (0.0, 0.5, "Poor (<0.5)"),
+]
+
+for min_conf, max_conf, label in confidence_buckets:
+    count = ((df_results['Confidence'] >= min_conf) & (df_results['Confidence'] < max_conf)).sum()
+    pct = (count / total) * 100
+    print(f"  {label}: {count:,} ({pct:.1f}%)")
+
+# Message coverage
+print("\n--- Message Coverage ---")
+both_present = (df_results['CustomerMessage'].notna() & df_results['AgentMessage'].notna()).sum()
+customer_only = (df_results['CustomerMessage'].notna() & df_results['AgentMessage'].isna()).sum()
+agent_only = (df_results['CustomerMessage'].isna() & df_results['AgentMessage'].notna()).sum()
+neither = (df_results['CustomerMessage'].isna() & df_results['AgentMessage'].isna()).sum()
+
+print(f"Both messages: {both_present:,} ({(both_present/total)*100:.1f}%)")
+print(f"Customer only: {customer_only:,} ({(customer_only/total)*100:.1f}%)")
+print(f"Agent only: {agent_only:,} ({(agent_only/total)*100:.1f}%)")
+print(f"Neither: {neither:,} ({(neither/total)*100:.1f}%)")
+
+# Token usage
+print("\n--- Token Usage ---")
+total_tokens = df_results['total_tokens'].sum()
+prompt_tokens = df_results['prompt_tokens'].sum()
+completion_tokens = df_results['completion_tokens'].sum()
+
+print(f"Total tokens used: {total_tokens:,}")
+print(f"Prompt tokens: {prompt_tokens:,}")
+print(f"Completion tokens: {completion_tokens:,}")
+print(f"Avg tokens per call: {(total_tokens / success):.0f}" if success > 0 else "N/A")
+
+# Latency
+print("\n--- Performance Metrics ---")
+api_latency = df_results['api_latency'].mean()
+task_latency = df_results['task_latency'].mean()
+print(f"Avg API latency: {api_latency:.2f}s")
+print(f"Avg task latency (incl. processing): {task_latency:.2f}s")
+
+# Error breakdown
+if errors > 0:
+    print("\n--- Top 10 Errors ---")
+    error_counts = df_results[df_results['error'].notna()]['error'].value_counts().head(10)
+    for error_msg, count in error_counts.items():
+        print(f"  {count:>3}: {error_msg[:70]}")
+```
+
+```python
+%python
+
+# ==============================================
+# CELL: EXAMINE SAMPLE RESULTS
+# ==============================================
+
+print("\n" + "=" * 80)
+print("SAMPLE RESULTS")
+print("=" * 80)
+
+# High confidence samples
+print("\n--- HIGH CONFIDENCE RESULTS (Confidence > 0.85) ---\n")
+high_conf = df_results[df_results['Confidence'] > 0.85].head(3)
+
+for idx, row in high_conf.iterrows():
+    print(f"ConversationId: {row['ConversationId']}")
+    print(f"ClaimNumber: {row['ClaimNumber']}")
+    print(f"Confidence: {row['Confidence']:.2f}")
+    print(f"Customer message:\n  {row['CustomerMessage'][:150]}...")
+    print(f"Agent message:\n  {row['AgentMessage'][:150]}...")
+    print()
+
+# Low confidence samples (for review)
+print("\n--- LOW CONFIDENCE RESULTS (Confidence < 0.5) ---\n")
+low_conf = df_results[df_results['Confidence'] < 0.5].head(3)
+
+if len(low_conf) > 0:
+    for idx, row in low_conf.iterrows():
+        print(f"ConversationId: {row['ConversationId']}")
+        print(f"Confidence: {row['Confidence']:.2f}")
+        print(f"Error: {row['error']}")
+        print()
+else:
+    print("No low-confidence results found (good news!)")
+
+# Error samples
+print("\n--- FAILED EXTRACTIONS ---\n")
+failed = df_results[df_results['error'].notna()].head(3)
+
+if len(failed) > 0:
+    for idx, row in failed.iterrows():
+        print(f"ConversationId: {row['ConversationId']}")
+        print(f"Error: {row['error']}")
+        print()
+else:
+    print("No failures (excellent!)")
+```
+
+---
+
+## Part 8: Save Results to Spark Table
+
+```python
+%python
+
+# ==============================================
+# CELL: SAVE TO OUTPUT TABLE
+# ==============================================
+
+print("\n" + "=" * 80)
+print("SAVING RESULTS")
+print("=" * 80)
+
+# Add processed timestamp
+df_results['processed_at'] = pd.Timestamp.now()
+
+# Convert to Spark DataFrame
+try:
+    spark_df = spark.createDataFrame(df_results)
     
-    all_results = []
+    # Append to output table
+    spark_df.write.mode("append").format("delta").saveAsTable(OUTPUT_TABLE)
     
-    if date_chunks:
-        for start_date, end_date in date_chunks:
-            print(f"\n[CHUNK] Processing {start_date} to {end_date}")
-            df_chunk = df[
-                (df["ConversationStartTimestamp"] >= start_date) &
-                (df["ConversationStartTimestamp"] <= end_date)
-            ].copy()
-            
-            if len(df_chunk) == 0:
-                print(f"[CHUNK] No data in range {start_date} to {end_date}")
-                continue
-            
-            # Run async processor
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                df_chunk_out = loop.run_until_complete(
-                    process_telephony_batch_async(
-                        df_chunk,
-                        token,
-                        modelgateway_baseurl,
-                        checkpoint_table,
-                        output_table
-                    )
-                )
-                all_results.append(df_chunk_out)
-            finally:
-                loop.close()
-    else:
-        # Single run
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            df_out = loop.run_until_complete(
-                process_telephony_batch_async(
-                    df,
-                    token,
-                    modelgateway_baseurl,
-                    checkpoint_table,
-                    output_table
-                )
-            )
-            all_results.append(df_out)
-        finally:
-            loop.close()
+    print(f"\n[SUCCESS] {len(df_results):,} records saved to {OUTPUT_TABLE}")
     
-    if all_results:
-        return pd.concat(all_results, ignore_index=True)
-    else:
-        return pd.DataFrame()
+except Exception as e:
+    print(f"\n[ERROR] Failed to save results: {e}")
+    traceback.print_exc()
+    raise
+```
+
+---
+
+## Part 9: Verify Saved Data
+
+```sql
+%sql
+
+-- Check output table
+SELECT COUNT(*) as total_records FROM axahealth_dataplatform_pd_lab.axahealth_data_scientist_analytics.fcr_telephony_llm_messages_output;
+
+-- Check checkpoint table
+SELECT COUNT(*) as checkpoint_records FROM axahealth_dataplatform_pd_lab.axahealth_data_scientist_analytics.fcr_telephony_llm_messages_checkpoint;
+
+-- Sample output
+SELECT ConversationId, ClaimNumber, Confidence, CustomerMessage, AgentMessage, error
+FROM axahealth_dataplatform_pd_lab.axahealth_data_scientist_analytics.fcr_telephony_llm_messages_output
+WHERE error IS NULL
+LIMIT 5;
+```
+
+---
+
+## Part 10: Join Back to fcr_telephony_base
+
+```sql
+%sql
+
+-- =====================================================================
+-- JOIN LLM RESULTS BACK TO fcr_telephony_base
+-- =====================================================================
+
+CREATE OR REPLACE TEMPORARY TABLE fcr_telephony_with_messages AS
+SELECT 
+  a.*,
+  b.CustomerMessage,
+  b.AgentMessage,
+  b.Confidence as MessageExtractionConfidence,
+  b.error as MessageExtractionError,
+  b.prompt_tokens,
+  b.completion_tokens,
+  b.total_tokens,
+  b.api_latency
+FROM fcr_telephony_base a
+LEFT JOIN axahealth_dataplatform_pd_lab.axahealth_data_scientist_analytics.fcr_telephony_llm_messages_output b
+  ON a.ConversationId = b.ConversationId;
+
+-- Verify join
+SELECT COUNT(*) as total,
+       COUNT(CASE WHEN CustomerMessage IS NOT NULL THEN 1 END) as has_customer_msg,
+       COUNT(CASE WHEN AgentMessage IS NOT NULL THEN 1 END) as has_agent_msg,
+       COUNT(CASE WHEN MessageExtractionError IS NULL THEN 1 END) as successful
+FROM fcr_telephony_with_messages;
+
+-- Preview
+SELECT ConversationId, ClaimNumber, Confidence, CustomerMessage, AgentMessage, MessageExtractionError
+FROM fcr_telephony_with_messages
+WHERE MessageExtractionError IS NULL AND Confidence > 0.7
+LIMIT 5;
+```
+
+---
+
+## Part 11: Continue with Union & Episodes
+
+```sql
+%sql
+
+-- Now ready to align with combined_mol_final and proceed with:
+-- 1. Create combined_telephony view (align schema)
+-- 2. Dedup by top claim
+-- 3. Union with MOL
+-- 4. Build episodes at CLAIM level
+-- 5. Build repeat contact sequences
+
+-- See COMPLETE_SQL_PIPELINE.sql for full SQL after LLM step
+```
+
+---
+
+## Configuration Summary
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| **Input Table** | `fcr_telephony_base` | Main telephony data |
+| **Checkpoint Table** | `fcr_telephony_llm_messages_checkpoint` | For resumption on failure |
+| **Output Table** | `fcr_telephony_llm_messages_output` | Final extracted messages |
+| **Model** | `gpt-4o-2024-11-20` | Latest available |
+| **Max Concurrency** | 15 | Async parallel calls |
+| **Token Limit** | 15M per 30 min | Rate limiting |
+| **Retries** | 3 | With exponential backoff |
+| **Min Transcript Chars** | 100 | Filter out short transcripts |
+
+---
+
+## Troubleshooting
+
+### If token limit exceeded
+```python
+# In configuration cell, reduce:
+MAX_CONCURRENCY = 10  # from 15
+SAFETY_BUFFER = 0.85  # from 0.90
+```
+
+### If resuming after failure
+```python
+# The checkpoint table will automatically skip already-processed rows
+# Just run the batch processor again with same parameters
+```
+
+### If transcripts are too short after PII redaction
+```python
+# In Python before running:
+MIN_TRANSCRIPT_CHARS = 50  # from 100
+```
+
+### Check what's in checkpoint table
+```sql
+SELECT COUNT(DISTINCT ConversationId) as processed,
+       COUNT(CASE WHEN error IS NULL THEN 1 END) as successful,
+       COUNT(CASE WHEN error IS NOT NULL THEN 1 END) as failed
+FROM fcr_telephony_llm_messages_checkpoint;
+```
+
+---
+
+## Expected Runtime
+
+- **1K records**: ~5-10 minutes
+- **10K records**: ~30-45 minutes
+- **50K records**: ~2-3 hours
+- **100K records**: ~5-7 hours (or split into 2 chunks for parallelization)
+
+Times vary based on:
+- Transcript length
+- Model gateway latency
+- Cluster resources
+- Network conditions
