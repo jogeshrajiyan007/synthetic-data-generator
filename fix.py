@@ -24,6 +24,7 @@ import asyncio
 import json
 import time
 import re
+import math
 import traceback
 import threading
 
@@ -1066,15 +1067,21 @@ def save_checkpoint(
         "total_tokens"
     ]
 
+    def to_python_int(value):
+        if value is None:
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except (TypeError, ValueError):
+            pass
+        return int(value)
+    
     for col in bigint_columns:
-
-        checkpoint_df[col] = pd.to_numeric(
-            checkpoint_df[col],
-            errors="coerce"
-        )
-
-        checkpoint_df[col] = checkpoint_df[col].apply(
-            lambda x: int(x) if pd.notna(x) else None
+        checkpoint_df[col] = (
+            pd.to_numeric(checkpoint_df[col], errors="coerce")
+            .map(to_python_int)
+            .astype(object)
         )
 
     # ============================================================
@@ -1087,17 +1094,22 @@ def save_checkpoint(
         "task_latency"
     ]
 
-    for col in double_columns:
-
-        checkpoint_df[col] = pd.to_numeric(
-            checkpoint_df[col],
-            errors="coerce"
+    def to_python_float(value):
+        if value is None:
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except (TypeError, ValueError):
+            pass
+        return float(value)
+    
+    for col in bigint_columns:
+        checkpoint_df[col] = (
+            pd.to_numeric(checkpoint_df[col], errors="coerce")
+            .map(to_python_float)
+            .astype(object)
         )
-
-        checkpoint_df[col] = checkpoint_df[col].apply(
-            lambda x: float(x) if pd.notna(x) else None
-        )
-
     # ============================================================
     # TIMESTAMP COLUMNS
     # ============================================================
@@ -1107,18 +1119,31 @@ def save_checkpoint(
         "processed_at"
     ]
 
+    def to_naive_python_datetime(value):
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return None
+        
+        if isinstance(value, pd.Timestamp):
+            if pd.isna(value):
+                return None
+            if value.tzinfo is not None:
+                value = value.tz_localize(None)
+            return value.to_pydatetime().replace(tzinfo=None)
+
+        if isinstance(value,datetime):
+            return value.replace(tzinfo=None)
+        
+        parsed = pd.to_datetime(value,errors="coerce")
+
+        if pd.isna(parsed):
+            return None
+        if getattr(parsed,"tzinfo",None) is not None:
+            parsed = parsed.replace(tzinfo=None)
+        
+        return parsed.to_pydatetime().replace(tzinfo=None)
+    
     for col in timestamp_columns:
-
-        checkpoint_df[col] = pd.to_datetime(
-            checkpoint_df[col],
-            errors="coerce",
-            utc=True
-        )
-
-        checkpoint_df[col] = (
-            checkpoint_df[col]
-            .dt.tz_localize(None)
-            )
+        checkpoint_df[col] = checkpoint_df[col].map(to_naive_python_datetime)
 
     # ============================================================
     # EXPLICIT SPARK SCHEMA
@@ -1140,7 +1165,7 @@ def save_checkpoint(
 
         StructField(
             "ConversationStartTimestamp",
-            TimestampType(),
+            StringType(),
             True
         ),
 
@@ -1212,7 +1237,7 @@ def save_checkpoint(
 
         StructField(
             "processed_at",
-            TimestampType(),
+            StringType(),
             True
         )
     ])
@@ -1221,15 +1246,35 @@ def save_checkpoint(
     # CREATE SPARK DATAFRAME USING EXPLICIT SCHEMA
     # ============================================================
 
+    def spark_safe(value):
+        if value is None:
+            return None
+        if isinstance(value,(float,np.floating)) and (math.isnan(value) or math.isinf(value)):
+            return None
+        if isinstance(value,(np.integer,)):
+            return int(value)
+        if isinstance(value,(np.floating,)):
+            return float(value)
+        return value
+
     records = checkpoint_df.to_dict(
         orient="records"
     )
+
+    records = [
+        {k: spark_safe(v) for k,v in row.items()} for row in records
+    ]
 
     spark_df = spark.createDataFrame(
         records,
         schema=checkpoint_schema
     )
 
+    spark_df = (
+        spark_df
+        .withColumn("ConversationStartTimestamp", F.to_timestamp("ConversationStartTimestamp"))
+        .withColumn("processed_at", F.to_timestamp("processed_at"))
+    )
     # ============================================================
     # DEBUG
     # ============================================================
