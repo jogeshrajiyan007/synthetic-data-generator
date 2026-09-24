@@ -63,7 +63,7 @@ MODEL = "gpt-4o-2024-11-20"
 # Number of simultaneous LLM requests.
 # If you keep seeing sustained 429s even with the coordinated
 # backoff below, lower this first (try 8-10).
-MAX_CONCURRENCY = 15
+MAX_CONCURRENCY = 10
 
 # Minimum transcript length before LLM processing
 MIN_TRANSCRIPT_CHARS = 100
@@ -78,7 +78,13 @@ MAX_TOKENS = 1200
 RETRIES = 3
 
 # API timeout
-API_TIMEOUT = 90
+API_TIMEOUT = 180
+
+TIMEOUT_RETRIES = 4
+
+TIMEOUT_BACKOFF_BASE = 5
+
+TIMEOUT_BACKOFF_MAX = 60
 
 # How many times a single row will re-attempt after being rate
 # limited before it's finally recorded as failed (and retried on
@@ -135,7 +141,7 @@ ESTIMATED_TOKENS_PER_CALL = 1800
 # actually allows - check with your platform team if unsure.
 # ================================================================
 
-MAX_REQUESTS_PER_MINUTE = 180
+MAX_REQUESTS_PER_MINUTE = 120
 
 
 # ================================================================
@@ -397,6 +403,12 @@ class AuthError(Exception):
     def __init__(self, status_code: int):
         self.status_code = status_code
         super().__init__(f"Auth error (HTTP {status_code})")
+
+class TransientAPIError(Exception):
+    """Temporary API/gateway failure such as: ReadTimeOut, ConnectTimeOut, HTTP 408,502,503,504"""
+    def __init__(self, message: str, status_code: Optional[int]=None):
+        self.status_code = status_code
+        super().__init__(message)
 
 
 # ================================================================
@@ -773,6 +785,16 @@ def call_telephony_model(
                 # Do not retry locally - bubble up for token refresh.
                 raise AuthError(status_code=response.status_code)
 
+            if response.status_code in (408,502,503,504):
+                raise TransientAPIError(
+                    message = (
+                        f"Transient HTTP error"
+                        f"{response.status_code}: "
+                        f"{response.text[:500]}"
+                    ),
+                    status_code=response.status_code
+                    )
+
             response.raise_for_status()
 
             api_latency = time.time() - start_api
@@ -808,6 +830,136 @@ def call_telephony_model(
             # 2-4 second backoff while 14 other workers keep firing
             # is exactly what caused the storm - so don't.
             raise
+        
+        ### READ TIMEOUT
+
+        except requests.exceptions.ReadTimeout as e:
+            last_exception = e
+
+            if attempt >= TIMEOUT_RETRIES:
+                return (
+                    {
+                        "customer_message": None,
+                        "agent_message": None,
+                        "confidence": 0.0
+                    },
+                    {
+                        "prompt_tokens": None,
+                        "completion_tokens": None,
+                        "total_tokens": None,
+                        "api_latency": time.time() - start_api,
+                        "request_id": None,
+                        "attempt": attempt,
+                        "error": (
+                            f"ReadTimeout after "
+                            f"{attempt} attempts: {str(e)}"
+                        )
+                    }
+                )
+            
+            wait_time = min(
+                TIMEOUT_BACKOFF_BASE * (2 ** (attempt - 1)),
+                TIMEOUT_BACKOFF_MAX
+            )
+
+            jitter = np.random.uniform(0,2)
+
+            total_wait = wait_time + jitter
+
+            print(
+                f"\n[TIMEOUT] ReadTimeout on attempt "
+                f"{attempt}/{TIMEOUT_RETRIES}. "
+                f"Retrying in {total_wait:.1f}s..."
+            )
+
+            time.sleep(total_wait)
+
+        ### CONNECT TIMEOUT
+
+        except requests.exceptions.ConnectTimeout as e:
+            last_exception = e
+
+            if attempt >= TIMEOUT_RETRIES:
+                return (
+                    {
+                        "customer_message": None,
+                        "agent_message": None,
+                        "confidence": 0.0
+                    },
+                    {
+                        "prompt_tokens": None,
+                        "completion_tokens": None,
+                        "total_tokens": None,
+                        "api_latency": time.time() - start_api,
+                        "request_id": None,
+                        "attempt": attempt,
+                        "error": (
+                            f"ConnectTimeout after "
+                            f"{attempt} attempts: {str(e)}"
+                        )
+                    }
+                )
+            
+            wait_time = min(
+                TIMEOUT_BACKOFF_BASE * (2 ** (attempt - 1)),
+                TIMEOUT_BACKOFF_MAX
+            )
+
+            jitter = np.random.uniform(0,2)
+
+            total_wait = wait_time + jitter
+
+            print(
+                f"\n[TIMEOUT] ConnectTimeout on attempt "
+                f"{attempt}/{TIMEOUT_RETRIES}. "
+                f"Retrying in {total_wait:.1f}s..."
+            )
+
+            time.sleep(total_wait)
+
+        ### Transient HTTP Errors
+
+        except TransientAPIError as e:
+
+            last_exception = e
+
+            if attempt >= retries:
+                return (
+                    {
+                        "customer_message": None,
+                        "agent_message": None,
+                        "confidence": 0.0
+                    },
+                    {
+                        "prompt_tokens": None,
+                        "completion_tokens": None,
+                        "total_tokens": None,
+                        "api_latency": time.time() - start_api,
+                        "request_id": None,
+                        "attempt": attempt,
+                        "error": (
+                            f"ConnectTimeout after "
+                            f"{attempt} attempts: {str(e)}"
+                        )
+                    }
+                )
+            
+            wait_time = min(
+                TIMEOUT_BACKOFF_BASE * (2 ** (attempt - 1)),
+                TIMEOUT_BACKOFF_MAX
+            )
+
+            jitter = np.random.uniform(0,2)
+
+            total_wait = wait_time + jitter
+
+            print(
+                f"\n[GATEWAY] HTTP {e.status_code} "
+                f"on attempt {attempt}/{retries}. "
+                f"Retrying in {total_wait:.1f}s..."
+            )
+
+            time.sleep(total_wait)
 
         except Exception as e:
             last_exception = e
@@ -1245,10 +1397,11 @@ async def process_telephony_batch_async(
                 # auth failures, capped at MAX_ROW_AUTH_RETRIES.
                 # ------------------------------------------------
 
+                await token_mgr.reserve_tokens(ESTIMATED_TOKENS_PER_CALL)
+
                 while True:
                     await rate_coordinator.wait_if_paused()
                     await request_limiter.acquire()
-                    await token_mgr.reserve_tokens(ESTIMATED_TOKENS_PER_CALL)
 
                     # Proactive refresh: if the token is close to
                     # expiring, refresh it BEFORE firing the request
