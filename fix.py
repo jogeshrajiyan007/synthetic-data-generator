@@ -1,28 +1,57 @@
 # ================================================================
-# TELEPHONY LLM BATCH PROCESSOR - PRODUCTION VERSION (FIXED)
+# SECTION 1 — FCR DEMAND / TOPIC / REPEAT-CONTACT LLM PROCESSOR
+# MOL + TELEPHONY COMBINED-CHANNEL EPISODES
 # ================================================================
 #
-# Changes vs previous version:
-#   - Explicit 429 / 401 / 403 detection (previously swallowed into
-#     a generic Exception with no special handling)
-#   - GLOBAL coordinated backoff: when ANY worker hits a 429, ALL
-#     concurrent workers pause together and resume together.
-#     (Previously each of the 15 concurrent workers retried
-#     independently, so 14 kept hammering the API while 1 backed
-#     off -> immediate re-throttle -> the storm you saw.)
-#   - Retry-After header is now read and honored
-#   - Added a requests-per-minute limiter alongside the existing
-#     token-per-window limiter (429s are usually RPM, not just TPM)
-#   - Rows that hit rate limits are retried after the pause instead
-#     of being recorded as permanently failed for the run
-#   - Optional token_refresh_callback for 401/403 (token expiry on
-#     long-running jobs)
-#   - Fixed a bug in save_checkpoint(): the double-column dtype
-#     loop was iterating over bigint_columns instead of
-#     double_columns, so Confidence/api_latency/task_latency were
-#     never cleaned and prompt/completion/total_tokens were
-#     overwritten back to float right after being cast to int.
+# This is a NEW, SEPARATE processor. It does not modify the
+# existing Telephony LLM batch processor. It reuses the same
+# proven engineering patterns (semaphore concurrency, coordinated
+# 429 backoff, RPM limiting, token budget, checkpointing, resume,
+# OAuth refresh) but is architected differently where the task
+# genuinely differs:
 #
+#   TWO-PASS DESIGN
+#   ----------------
+#   Pass 1 (fully parallel): analyse each Episode independently -
+#       demand classification, topics, topic coverage, resolution,
+#       sentiment. Zero cross-episode information used.
+#
+#   Pass 2 (also fully parallel): for every episode that HAS a
+#       PreviousContactEpisode (from your deterministic pipeline),
+#       compare its own Pass-1 output against the *already
+#       computed* Pass-1 output of the immediately preceding
+#       episode, to decide topic similarity / same-underlying-issue
+#       / repeat-contact. Because Pass 2 only ever reads Pass-1
+#       results (never other Pass-2 results), every row's Pass-2
+#       job is independent of every other row's - no sequential
+#       chain, and no leakage: episode N never sees anything about
+#       episode N+1.
+#
+#   Episodes with PreviousContactEpisode IS NULL (first contact on
+#   the claim) skip Pass 2 entirely - deterministically
+#   FIRST_CONTACT, no LLM call, no cost.
+#
+#   DETERMINISTIC RISK-SCORE COMBINER (not an LLM call)
+#   -----------------------------------------------------
+#   `repeat_contact_llm_confidence` (LLM's own stated confidence),
+#   `topic_similarity` (LLM's own stated similarity) and the
+#   EXISTING deterministic GapHours / RepeatCandidateType signal
+#   are combined by a transparent, documented rule into
+#   `risk_score`. `probability` is left NULL with a comment -
+#   nothing here is a calibrated probability until you have
+#   labelled outcomes to fit a real model against. All raw
+#   Pass-1/Pass-2 fields are retained specifically so they can
+#   become the feature set for that future model.
+#
+# THIS ANALYSIS IS RETROSPECTIVE, NOT REAL-TIME.
+# Pass 2 for episode N is only ever run once episode N-1's Pass-1
+# result already exists in the checkpoint table - i.e. the whole
+# job assumes you are scoring a completed history, not predicting
+# live. If you later want real-time scoring, Pass 2 for the
+# newest episode would need to run against the most recent
+# checkpointed Pass-1 result for that claim, which this code
+# already supports (see run_pass2_batch's dependency on a
+# persisted Pass-1 checkpoint table).
 # ================================================================
 
 import asyncio
@@ -31,7 +60,6 @@ import time
 import re
 import math
 import base64
-import traceback
 import threading
 
 import pandas as pd
@@ -39,15 +67,11 @@ import numpy as np
 
 from collections import deque
 from typing import Dict, Any, Tuple, List, Optional, Callable
-from datetime import datetime, timedelta
+from datetime import datetime
 from pyspark.sql import functions as F
+from pyspark.sql.window import Window
 from pyspark.sql.types import (
-    StructType,
-    StructField,
-    StringType,
-    LongType,
-    DoubleType,
-    TimestampType
+    StructType, StructField, StringType, LongType, DoubleType, BooleanType
 )
 
 import requests
@@ -55,101 +79,147 @@ from tqdm.auto import tqdm
 
 
 # ================================================================
-# CONFIGURATION
+# SECTION 2 — CONFIGURATION
 # ================================================================
 
 MODEL = "gpt-4o-2024-11-20"
 
-# Number of simultaneous LLM requests.
-# If you keep seeing sustained 429s even with the coordinated
-# backoff below, lower this first (try 8-10).
-MAX_CONCURRENCY = 15
+MAX_CONCURRENCY = 10
+MAX_REQUESTS_PER_MINUTE = 120
 
-# Minimum transcript length before LLM processing
-MIN_TRANSCRIPT_CHARS = 100
+MIN_CONVERSATION_CHARS = 40          # episodes can be short (single MOL message)
+MAX_TOKENS_PASS1 = 1500
+MAX_TOKENS_PASS2 = 700
 
-# Maximum completion tokens
-MAX_TOKENS = 1200
-
-# API retries for NON-rate-limit errors (timeouts, 5xx, etc).
-# 429/401/403 are handled separately below - they are not
-# retried locally, they bubble up so the async layer can
-# coordinate a shared pause / token refresh.
 RETRIES = 3
+API_TIMEOUT = 180
+TIMEOUT_RETRIES = 4
+TIMEOUT_BACKOFF_BASE = 5
+TIMEOUT_BACKOFF_MAX = 60
 
-# API timeout
-API_TIMEOUT = 90
-
-# How many times a single row will re-attempt after being rate
-# limited before it's finally recorded as failed (and retried on
-# the NEXT run via checkpoint resume).
 MAX_ROW_RATE_LIMIT_RETRIES = 6
-
-# If the gateway doesn't send Retry-After, back off this many
-# seconds as a baseline before scaling up.
 RATE_LIMIT_BASE_WAIT = 10
-
-# Hard cap on any single coordinated pause, however bad it gets.
 RATE_LIMIT_MAX_WAIT = 120
-
-# How many times a single row will retry after an auth failure
-# (401/403) before giving up. Protects against a refresh_callback
-# that returns a token that's still invalid (e.g. bad credentials) -
-# without this, that would loop forever.
 MAX_ROW_AUTH_RETRIES = 3
-
-# Proactively refresh the token this many seconds before it's due
-# to expire, instead of waiting for a 401/403 to happen first.
-# Only takes effect if the token is a decodable JWT with an `exp`
-# claim (Azure AD tokens are) - otherwise this is a no-op and
-# refresh stays purely reactive (on 401/403).
 TOKEN_EXPIRY_BUFFER_SECONDS = 120
-
-# ================================================================
-# CHECKPOINT CONFIGURATION
-# ================================================================
 
 CHECKPOINT_EVERY = 250
 CHECKPOINT_RETRIES = 3
 
-
-# ================================================================
-# TOKEN RATE LIMITING (existing - limits total token VOLUME)
-# ================================================================
-
 TOKEN_LIMIT = 15_000_000
 WINDOW_SECONDS = 60 * 30
 SAFETY_BUFFER = 0.90
-ESTIMATED_TOKENS_PER_CALL = 1800
+ESTIMATED_TOKENS_PASS1 = 2200
+ESTIMATED_TOKENS_PASS2 = 900
+
+# Demand taxonomy - fixed per the business definitions supplied.
+# Topics are NOT fixed - they are generated by the model from the
+# conversation, per spec ("do not invent a predefined taxonomy").
+DEMAND_TYPES = [
+    "TrueFailureDemand",
+    "ExpectedProcessDemand",
+    "ExternalDependencyDemand",
+    "CustomerChoiceDemand",
+    "UnknownUnclear"
+]
+
+RESOLUTION_STATUSES = ["Resolved", "PartiallyResolved", "NotResolved", "Unclear"]
+SENTIMENT_CATEGORIES = ["VeryNegative", "Negative", "Neutral", "Positive", "VeryPositive"]
 
 
 # ================================================================
-# REQUEST RATE LIMITING (NEW - limits requests PER MINUTE)
+# SECTION 2b — INPUT SCHEMA VALIDATION
 # ================================================================
 #
-# A 429 is very often an RPM limit, not a TPM limit. The token
-# budget manager above does nothing to protect against 15
-# concurrent requests firing in the same second. This does.
-#
-# Tune MAX_REQUESTS_PER_MINUTE to whatever your model gateway
-# actually allows - check with your platform team if unsure.
+# Per the data-integrity requirement: never assume columns exist.
+# Inspect the actual dataframe/table schema and separate required
+# vs optional vs derived. Fail loudly and specifically if a
+# REQUIRED column is missing; silently skip OPTIONAL columns
+# (features that use them are simply omitted from the prompt / the
+# output field is left null) rather than fabricating a value.
 # ================================================================
 
-MAX_REQUESTS_PER_MINUTE = 60
+REQUIRED_COLUMNS = [
+    "ConversationId",       # or "Conversations" from your EpisodeLevel - resolved at runtime
+    "ClaimNumber",
+    "ContactEpisode",
+    "EpisodeStart",
+    "CustomerEpisodeConversation",
+]
+
+# Any one of these satisfies the "agent conversation" requirement -
+# your prompt named RelevantAgentEpisodeConversation but the
+# notebook you showed produces AgentEpisodeConversation. Resolve
+# at runtime rather than assuming which one exists.
+AGENT_CONVERSATION_COLUMN_CANDIDATES = [
+    "RelevantAgentEpisodeConversation",
+    "AgentEpisodeConversation",
+]
+
+OPTIONAL_COLUMNS = [
+    "MembershipNumber", "ConversationStartTimestamp", "MemberId",
+    "PreviousContactEpisode", "PreviousEpisodeEnd", "GapHours",
+    "HasPreviousEpisode", "RepeatCandidateType", "ContactSequence",
+    "MessageCount", "AgentResponseCount", "CurrentCondition",
+    "CurrentConditionCategory", "ComplaintArea", "IsRepeatContact",
+    # existing deterministic flag - kept ONLY as an audit/comparison
+    # column against the new LLM-informed repeat_contact field,
+    # never used as ground truth or as an input signal to the LLM.
+]
+
+
+def inspect_input_schema(df_columns: List[str]) -> Dict[str, Any]:
+    """
+    Inspects the actual columns present and returns a resolved
+    column map. Raises a clear, specific error if a required
+    column (or an acceptable substitute) is missing. Never
+    silently assumes a column exists.
+    """
+    cols = set(df_columns)
+    missing_required = [c for c in REQUIRED_COLUMNS if c not in cols]
+
+    agent_col = next(
+        (c for c in AGENT_CONVERSATION_COLUMN_CANDIDATES if c in cols),
+        None
+    )
+    if agent_col is None:
+        missing_required.append(
+            f"one of {AGENT_CONVERSATION_COLUMN_CANDIDATES}"
+        )
+
+    if missing_required:
+        raise ValueError(
+            f"Input dataframe is missing required column(s): {missing_required}. "
+            f"Available columns: {sorted(cols)}"
+        )
+
+    available_optional = [c for c in OPTIONAL_COLUMNS if c in cols]
+    unused_optional = [c for c in OPTIONAL_COLUMNS if c not in cols]
+
+    resolved = {
+        "conversation_id_col": "ConversationId" if "ConversationId" in cols else "Conversations",
+        "agent_conversation_col": agent_col,
+        "available_optional": available_optional,
+    }
+
+    print("[SCHEMA] Required columns present: OK")
+    print(f"[SCHEMA] Agent conversation column resolved to: {agent_col}")
+    print(f"[SCHEMA] Optional columns available and will be used: {available_optional}")
+    if unused_optional:
+        print(f"[SCHEMA] Optional columns NOT present (features skipped, not fabricated): {unused_optional}")
+
+    return resolved
 
 
 # ================================================================
-# PII REDACTION (unchanged)
+# SECTION 3 — PII REDACTION (reused pattern from telephony processor)
 # ================================================================
 
 PII_PATTERNS = [
     re.compile(r"\b\d{3}\s?\d{3}\s?\d{4}\b"),
     re.compile(r"\b\d{10,}\b"),
     re.compile(
-        r"\b(?:\+?1?[-.\s]?\(?)?"
-        r"(\d{3})\)?[-.\s]?"
-        r"(\d{3})[-.\s]?"
-        r"(\d{4})\b"
+        r"\b(?:\+?1?[-.\s]?\(?)?(\d{3})\)?[-.\s]?(\d{3})[-.\s]?(\d{4})\b"
     ),
     re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}"),
     re.compile(r"\b[A-Z]{2}\d{6}\b"),
@@ -178,158 +248,280 @@ def redact_pii(text: str) -> str:
 
 
 # ================================================================
-# TRANSCRIPT PARSING (unchanged)
+# SECTION 4 — INPUT PREPARATION
 # ================================================================
 
-def parse_transcript_into_turns(transcript: str) -> List[Dict[str, str]]:
-    if not transcript:
-        return []
-
-    turns = []
-    lines = transcript.split("\n")
-
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-
-        if line.startswith("Agent:"):
-            turns.append({"speaker": "agent", "text": line[6:].strip()})
-
-        elif line.startswith("Customer:"):
-            turns.append({"speaker": "customer", "text": line[9:].strip()})
-
-        elif ":" in line:
-            parts = line.split(":", 1)
-            if len(parts) != 2:
-                continue
-
-            speaker_part = parts[0].strip()
-            message = parts[1].strip()
-            speaker_lower = speaker_part.lower()
-
-            if any(x in speaker_lower for x in
-                   ["agent", "support", "representative", "tech", "customer service"]):
-                turns.append({"speaker": "agent", "text": message})
-
-            elif any(x in speaker_lower for x in
-                     ["customer", "caller", "client", "member"]):
-                turns.append({"speaker": "customer", "text": message})
-
-    return turns
-
-
-def build_clean_transcript_for_llm(transcript: str) -> str:
-    turns = parse_transcript_into_turns(transcript)
-    if not turns:
-        return ""
-
-    clean_lines = []
-    for turn in turns:
-        text = redact_pii(turn["text"])
-        speaker_label = "Agent" if turn["speaker"] == "agent" else "Customer"
-        clean_lines.append(f"{speaker_label}: {text}")
-
-    return "\n".join(clean_lines)
+def prepare_episode_text(customer_text: str, agent_text: str) -> str:
+    """Redacts and formats an episode's already-aggregated
+    customer/agent conversation strings (these come pre-built from
+    your deterministic EpisodeLevel view - CustomerEpisodeConversation
+    / AgentEpisodeConversation - so no re-parsing of raw turns is
+    needed here, unlike the telephony processor)."""
+    customer_clean = redact_pii(customer_text or "")
+    agent_clean = redact_pii(agent_text or "")
+    return (
+        f"CUSTOMER SIDE OF EPISODE:\n{customer_clean}\n\n"
+        f"AGENT SIDE OF EPISODE:\n{agent_clean}"
+    ).strip()
 
 
 # ================================================================
-# LLM JSON SCHEMA (unchanged)
+# SECTION 5 — PASS 1 PROMPT + STRICT JSON SCHEMA
+# (self-contained per-episode analysis: demand, topics, coverage,
+#  resolution, sentiment. NO cross-episode information.)
 # ================================================================
 
-TELEPHONY_JSON_SCHEMA = {
-    "name": "telephony_message_split",
+PASS1_JSON_SCHEMA = {
+    "name": "fcr_episode_analysis",
     "schema": {
         "type": "object",
         "properties": {
-            "customer_message": {
-                "type": "string",
-                "description": "Summary of what the customer asked for, reported, or was concerned about"
+            "primary_demand_type": {"type": "string", "enum": DEMAND_TYPES},
+            "primary_demand_evidence": {"type": ["string", "null"]},
+            "primary_demand_confidence": {"type": "number"},
+            "secondary_demand_types": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "demand_type": {"type": "string", "enum": DEMAND_TYPES},
+                        "evidence": {"type": ["string", "null"]},
+                        "confidence": {"type": "number"}
+                    },
+                    "required": ["demand_type", "evidence", "confidence"],
+                    "additionalProperties": False
+                }
             },
-            "agent_message": {
-                "type": "string",
-                "description": "Summary of what the agent explained, did, or outcome communicated"
+            "topics": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {"type": "string"},
+                        "subtopic": {"type": ["string", "null"]},
+                        "description": {"type": "string"},
+                        "evidence": {"type": ["string", "null"]},
+                        "coverage_pct": {"type": "number"},
+                        "is_primary": {"type": "boolean"}
+                    },
+                    "required": ["topic", "subtopic", "description", "evidence", "coverage_pct", "is_primary"],
+                    "additionalProperties": False
+                }
             },
-            "confidence": {
-                "type": "number",
-                "description": "Confidence score between 0 and 1"
-            }
+            "primary_topic": {"type": "string"},
+            "primary_topic_coverage_pct": {"type": "number"},
+            "resolution_status": {"type": "string", "enum": RESOLUTION_STATUSES},
+            "resolution_evidence": {"type": ["string", "null"]},
+            "resolution_agent_action": {"type": ["string", "null"]},
+            "resolution_customer_indication": {"type": ["string", "null"]},
+            "resolution_confidence": {"type": "number"},
+            "sentiment_score": {"type": "number"},
+            "sentiment_category": {"type": "string", "enum": SENTIMENT_CATEGORIES},
+            "sentiment_evidence": {"type": ["string", "null"]},
+            "sentiment_confidence": {"type": "number"},
+            "overall_confidence": {"type": "number"}
         },
-        "required": ["customer_message", "agent_message", "confidence"],
+        "required": [
+            "primary_demand_type", "primary_demand_evidence", "primary_demand_confidence",
+            "secondary_demand_types", "topics", "primary_topic", "primary_topic_coverage_pct",
+            "resolution_status", "resolution_evidence", "resolution_agent_action",
+            "resolution_customer_indication", "resolution_confidence",
+            "sentiment_score", "sentiment_category", "sentiment_evidence", "sentiment_confidence",
+            "overall_confidence"
+        ],
         "additionalProperties": False
     }
 }
 
 
-# ================================================================
-# PROMPT (unchanged)
-# ================================================================
-
-def build_telephony_prompt(clean_transcript: str, agents_involved: str = None) -> str:
-    agent_context = ""
-    if agents_involved:
-        agent_context = f"""
-Note:
-This call involved {agents_involved}.
-
-If multiple agents handled the call, combine their
-responses into one coherent resolution summary.
-"""
-
+def build_pass1_prompt(episode_text: str) -> str:
     return f"""
-You are an expert AXA Health customer service analyst.
+You are an expert AXA Health customer contact analyst.
 
-Analyse the telephone call transcript and extract TWO
-separate summaries.
+Analyse ONE customer contact episode (this may combine messages
+from MOL and/or Telephony that happened close together). You are
+given ONLY this episode's own conversation. You have NOT been
+given any other episode - do not assume or invent information
+about what happened before or after this episode.
 
-1. customer_message
+Your task has four parts:
 
-Summarise what the customer asked for, reported,
-or was concerned about.
+1. DEMAND CLASSIFICATION
+Classify the customer's demand using ONLY these four categories:
+- TrueFailureDemand: the customer has to contact AXA again because
+  something that should have worked, been completed, communicated
+  or resolved did not happen as expected. Do NOT choose this
+  category just because the contact might be a repeat - you are
+  not told whether it is a repeat. Only choose it if THIS
+  episode's own content shows evidence of a prior failure (e.g.
+  the customer explicitly says something was promised and not
+  done, or an expected outcome clearly did not happen).
+- ExpectedProcessDemand: part of the normal expected customer/
+  service journey (status check, providing requested information,
+  routine administration).
+- ExternalDependencyDemand: progress depends on an external party/
+  provider/system outside AXA's direct control, with evidence in
+  the conversation.
+- CustomerChoiceDemand: a customer-initiated choice, preference,
+  optional change or request, not caused by an AXA failure.
+- UnknownUnclear: use this rather than inventing a classification
+  if the evidence is insufficient.
 
-Write this from the customer's perspective and intent.
+A single conversation may have multiple demands. Return a primary
+demand type plus any secondary demand types with their own
+evidence and confidence. Do not force a single category if the
+evidence indicates more than one.
 
-2. agent_message
+2. TOPIC IDENTIFICATION AND COVERAGE
+Identify all meaningful topics/subtopics actually discussed. Do
+not invent a fixed predefined taxonomy - generate topic labels
+from what is actually in this conversation. For each topic give a
+short label, an optional subtopic, a one-sentence description,
+evidence, and an estimated coverage percentage representing how
+much of the conversation's substance relates to that topic
+(analytical prominence, not literal timing). Coverage percentages
+across topics should sum to approximately 100. Mark exactly one
+topic as the primary topic (highest coverage).
 
-Summarise what the agent(s) explained, did,
-or what outcomes were communicated.
+3. RESOLUTION ASSESSMENT
+Determine whether the customer's issue in THIS episode appears
+resolved: Resolved, PartiallyResolved, NotResolved, or Unclear.
+Do not infer resolution simply because the conversation ended -
+base it on what the agent explicitly did/communicated and any
+customer confirmation present in the text.
 
-If multiple agents handled the call, combine their
-contributions into one coherent resolution summary.
+4. SENTIMENT
+Score customer sentiment from -5 (extremely negative) to +5
+(extremely positive), based on the customer's own language only -
+not on how serious the underlying topic sounds. A calm discussion
+of a serious medical issue is not automatically negative
+sentiment.
 
-Rules:
+Rules for all parts:
+- Do NOT invent information not present in the transcript.
+- [REDACTED] may appear where PII was removed - do not attempt to
+  guess the redacted values.
+- Every evidence field must be a short paraphrase grounded in the
+  transcript, or null if no clear evidence exists. Do not fabricate
+  quotations.
+- All confidence values are between 0 and 1.
 
-- Do NOT invent information.
-- Do NOT infer information not present in the transcript.
-- Do NOT include internal system jargon unless discussed
-  with the customer.
-- If the transcript is unclear, use an empty string.
-- Keep each summary to 1-3 sentences.
-- Make the summaries clear and actionable.
-- Preserve important context.
-- [REDACTED] may appear where PII was removed.
-
-{agent_context}
-
-TRANSCRIPT
+EPISODE CONVERSATION
+--------------------------------------------------
+{episode_text}
 --------------------------------------------------
 
-{clean_transcript}
-
---------------------------------------------------
-
-Return ONLY JSON containing:
-
-customer_message
-agent_message
-confidence
-
-Confidence must be between 0 and 1.
+Return ONLY the JSON object matching the required schema. No other text.
 """.strip()
 
 
 # ================================================================
-# JSON PARSER (unchanged)
+# SECTION 6 — PASS 2 PROMPT + STRICT JSON SCHEMA
+# (cross-episode comparison: current episode's Pass-1 output vs
+#  the immediately preceding episode's Pass-1 output ONLY.
+#  Never given raw future information.)
+# ================================================================
+
+PASS2_JSON_SCHEMA = {
+    "name": "fcr_repeat_contact_comparison",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "topic_similarity": {"type": "number"},
+            "same_underlying_issue": {"type": "boolean"},
+            "continuing_previous_issue": {"type": "boolean"},
+            "genuinely_new_issue": {"type": "boolean"},
+            "repeat_contact": {"type": "boolean"},
+            "repeat_contact_llm_confidence": {"type": "number"},
+            "repeat_contact_reason": {"type": ["string", "null"]},
+            "repeat_contact_evidence": {"type": ["string", "null"]},
+            "true_failure_supported": {"type": "boolean"}
+        },
+        "required": [
+            "topic_similarity", "same_underlying_issue", "continuing_previous_issue",
+            "genuinely_new_issue", "repeat_contact", "repeat_contact_llm_confidence",
+            "repeat_contact_reason", "repeat_contact_evidence", "true_failure_supported"
+        ],
+        "additionalProperties": False
+    }
+}
+
+
+def build_pass2_prompt(
+    current_primary_topic: str,
+    current_topics_json: str,
+    current_primary_demand: str,
+    current_episode_text: str,
+    previous_primary_topic: str,
+    previous_topics_json: str,
+    previous_primary_demand: str,
+    previous_resolution_status: str,
+    gap_hours: Optional[float]
+) -> str:
+    gap_desc = f"{gap_hours:.1f} hours" if gap_hours is not None else "unknown"
+
+    return f"""
+You are an expert AXA Health customer contact analyst comparing
+two contact episodes on the same claim to assess whether the
+second (current) episode is a genuine repeat contact for the SAME
+underlying customer issue as the first (previous) episode.
+
+You are given structured summaries already produced from each
+episode's own conversation (topics, primary demand, resolution
+status of the previous episode), plus the current episode's raw
+text for extra context. You have NOT been given anything about any
+episode after the current one.
+
+Do NOT conclude the two are a repeat simply because they share a
+claim number, membership number or fall within a time window - the
+deterministic pipeline has already established that relationship;
+your job is to judge whether the underlying CUSTOMER ISSUE is the
+same, using the topic/demand content.
+
+PREVIOUS EPISODE
+-----------------
+Primary topic: {previous_primary_topic}
+Primary demand type: {previous_primary_demand}
+All topics (JSON): {previous_topics_json}
+Resolution status recorded for previous episode: {previous_resolution_status}
+
+CURRENT EPISODE
+-----------------
+Primary topic: {current_primary_topic}
+Primary demand type: {current_primary_demand}
+All topics (JSON): {current_topics_json}
+Current episode raw conversation:
+{current_episode_text}
+
+Time gap between the end of the previous episode and the start of
+this one: {gap_desc}. This is provided for context only - do not
+treat time proximity alone as evidence of a repeat; base your
+judgment on topic/issue continuity.
+
+Return:
+- topic_similarity: 0 (completely unrelated) to 1 (same issue)
+- same_underlying_issue: true only if the CONTENT indicates the
+  same customer issue/demand, not just the same claim
+- continuing_previous_issue / genuinely_new_issue: mutually
+  informative flags on issue continuity
+- repeat_contact: true only when same_underlying_issue is
+  well-supported by the evidence
+- repeat_contact_llm_confidence: your own confidence (0-1) in the
+  repeat_contact judgment - this is NOT a calibrated probability,
+  just your self-assessed certainty
+- repeat_contact_reason / repeat_contact_evidence: short,
+  grounded explanations, or null if genuinely unclear
+- true_failure_supported: true only if the current episode's own
+  content plus the previous episode's unresolved status together
+  indicate the customer is back because something AXA should have
+  done did not happen
+
+Return ONLY the JSON object matching the required schema. No other text.
+""".strip()
+
+
+# ================================================================
+# SECTION 7 — RESPONSE VALIDATION / REPAIR
 # ================================================================
 
 def custom_json_loader(output_text: str) -> Dict[str, Any]:
@@ -343,48 +535,126 @@ def custom_json_loader(output_text: str) -> Dict[str, Any]:
         raise
 
 
-# ================================================================
-# RESPONSE VALIDATION (unchanged)
-# ================================================================
-
-def validate_and_repair_telephony_response(response: Dict[str, Any]) -> Dict[str, Any]:
-    if not isinstance(response, dict):
-        response = {}
-
-    customer_msg = str(response.get("customer_message", "")).strip() or None
-    agent_msg = str(response.get("agent_message", "")).strip() or None
-
-    confidence = response.get("confidence")
+def _clip01(x, default=0.5):
     try:
-        confidence = float(confidence or 0)
-        confidence = max(0.0, min(1.0, confidence))
-    except (ValueError, TypeError):
-        confidence = 0.5
+        x = float(x)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(x):
+        return default
+    return max(0.0, min(1.0, x))
 
-    if not customer_msg and not agent_msg:
-        confidence = 0.0
+
+def validate_and_repair_pass1(resp: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(resp, dict):
+        resp = {}
+
+    demand_type = resp.get("primary_demand_type")
+    if demand_type not in DEMAND_TYPES:
+        demand_type = "UnknownUnclear"
+
+    resolution_status = resp.get("resolution_status")
+    if resolution_status not in RESOLUTION_STATUSES:
+        resolution_status = "Unclear"
+
+    sentiment_category = resp.get("sentiment_category")
+    if sentiment_category not in SENTIMENT_CATEGORIES:
+        sentiment_category = "Neutral"
+
+    topics = resp.get("topics")
+    if not isinstance(topics, list):
+        topics = []
+    clean_topics = []
+    for t in topics:
+        if not isinstance(t, dict):
+            continue
+        clean_topics.append({
+            "topic": str(t.get("topic", "")).strip() or "Unspecified",
+            "subtopic": (str(t.get("subtopic")).strip() if t.get("subtopic") else None),
+            "description": str(t.get("description", "")).strip(),
+            "evidence": (str(t.get("evidence")).strip() if t.get("evidence") else None),
+            "coverage_pct": _clip01(
+                (t.get("coverage_pct") or 0) / 100.0 if isinstance(t.get("coverage_pct"), (int, float)) and t.get("coverage_pct") > 1 else t.get("coverage_pct"),
+                default=0.0
+            ) * 100.0,
+            "is_primary": bool(t.get("is_primary", False))
+        })
+
+    secondary = resp.get("secondary_demand_types")
+    if not isinstance(secondary, list):
+        secondary = []
+    clean_secondary = []
+    for s in secondary:
+        if not isinstance(s, dict):
+            continue
+        dt = s.get("demand_type")
+        if dt not in DEMAND_TYPES:
+            continue
+        clean_secondary.append({
+            "demand_type": dt,
+            "evidence": (str(s.get("evidence")).strip() if s.get("evidence") else None),
+            "confidence": _clip01(s.get("confidence"))
+        })
+
+    sentiment_score = resp.get("sentiment_score")
+    try:
+        sentiment_score = float(sentiment_score)
+        sentiment_score = max(-5.0, min(5.0, sentiment_score))
+    except (TypeError, ValueError):
+        sentiment_score = 0.0
 
     return {
-        "customer_message": customer_msg,
-        "agent_message": agent_msg,
-        "confidence": confidence
+        "primary_demand_type": demand_type,
+        "primary_demand_evidence": (str(resp.get("primary_demand_evidence")).strip()
+                                     if resp.get("primary_demand_evidence") else None),
+        "primary_demand_confidence": _clip01(resp.get("primary_demand_confidence")),
+        "secondary_demand_types_json": json.dumps(clean_secondary),
+        "topics_json": json.dumps(clean_topics),
+        "primary_topic": str(resp.get("primary_topic", "")).strip() or "Unspecified",
+        "primary_topic_coverage_pct": max(0.0, min(100.0, float(resp.get("primary_topic_coverage_pct") or 0))),
+        "resolution_status": resolution_status,
+        "resolution_evidence": (str(resp.get("resolution_evidence")).strip()
+                                 if resp.get("resolution_evidence") else None),
+        "resolution_agent_action": (str(resp.get("resolution_agent_action")).strip()
+                                     if resp.get("resolution_agent_action") else None),
+        "resolution_customer_indication": (str(resp.get("resolution_customer_indication")).strip()
+                                            if resp.get("resolution_customer_indication") else None),
+        "resolution_confidence": _clip01(resp.get("resolution_confidence")),
+        "sentiment_score": sentiment_score,
+        "sentiment_category": sentiment_category,
+        "sentiment_evidence": (str(resp.get("sentiment_evidence")).strip()
+                                if resp.get("sentiment_evidence") else None),
+        "sentiment_confidence": _clip01(resp.get("sentiment_confidence")),
+        "overall_confidence": _clip01(resp.get("overall_confidence")),
+    }
+
+
+def validate_and_repair_pass2(resp: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(resp, dict):
+        resp = {}
+
+    return {
+        "topic_similarity": _clip01(resp.get("topic_similarity"), default=0.0),
+        "same_underlying_issue": bool(resp.get("same_underlying_issue", False)),
+        "continuing_previous_issue": bool(resp.get("continuing_previous_issue", False)),
+        "genuinely_new_issue": bool(resp.get("genuinely_new_issue", False)),
+        "repeat_contact": bool(resp.get("repeat_contact", False)),
+        "repeat_contact_llm_confidence": _clip01(resp.get("repeat_contact_llm_confidence"), default=0.0),
+        "repeat_contact_reason": (str(resp.get("repeat_contact_reason")).strip()
+                                   if resp.get("repeat_contact_reason") else None),
+        "repeat_contact_evidence": (str(resp.get("repeat_contact_evidence")).strip()
+                                     if resp.get("repeat_contact_evidence") else None),
+        "true_failure_supported": bool(resp.get("true_failure_supported", False)),
     }
 
 
 # ================================================================
-# NEW: SPECIFIC EXCEPTIONS FOR RATE LIMITING / AUTH
-# ================================================================
-#
-# The old code caught EVERY failure (429, 401, timeouts, JSON
-# errors, ...) as the same generic Exception, retried a couple
-# of times with a tiny backoff, then gave up. That's why 429s
-# were never really "handled" - they were just retried too fast
-# and too locally to matter.
+# SECTION 8 — RATE-LIMIT / AUTH EXCEPTIONS + TOKEN HANDLING
+# (identical patterns to the telephony processor, duplicated here
+#  intentionally so this module has no import dependency on it)
 # ================================================================
 
 class RateLimitError(Exception):
-    """Raised on HTTP 429. Carries Retry-After if the server sent one."""
-
     def __init__(self, retry_after: Optional[float] = None, status_code: int = 429):
         self.retry_after = retry_after
         self.status_code = status_code
@@ -392,65 +662,30 @@ class RateLimitError(Exception):
 
 
 class AuthError(Exception):
-    """Raised on HTTP 401/403. Retrying the same token won't help - needs refresh."""
-
     def __init__(self, status_code: int):
         self.status_code = status_code
         super().__init__(f"Auth error (HTTP {status_code})")
 
 
-# ================================================================
-# NEW: JWT EXPIRY DECODING (for proactive refresh)
-# ================================================================
-#
-# Azure AD access tokens are JWTs with an `exp` claim (unix
-# timestamp). We decode just the payload segment - no signature
-# verification needed, we're not authenticating anything, just
-# reading our own token's expiry so we can refresh BEFORE it
-# lapses instead of waiting for a 401.
-#
-# If the token isn't a 3-part JWT (some gateways issue opaque
-# tokens), this returns None and proactive refresh is skipped -
-# refresh then stays purely reactive (on 401/403), which still
-# works fine.
-# ================================================================
+class TransientAPIError(Exception):
+    def __init__(self, message: str, status_code: Optional[int] = None):
+        self.status_code = status_code
+        super().__init__(message)
+
 
 def decode_jwt_exp(token: str) -> Optional[float]:
     try:
         parts = token.split(".")
         if len(parts) != 3:
             return None
-
         payload_b64 = parts[1]
         padding = "=" * (-len(payload_b64) % 4)
         payload_bytes = base64.urlsafe_b64decode(payload_b64 + padding)
         payload = json.loads(payload_bytes)
-
         return float(payload["exp"]) if "exp" in payload else None
-
     except Exception:
         return None
 
-
-# ================================================================
-# NEW: MUTABLE TOKEN HOLDER (FIXED)
-# ================================================================
-#
-# Lets all concurrent workers see a refreshed token without each
-# holding a stale local copy of the string, and coordinates so
-# that when N workers discover the token is bad/expiring at once,
-# exactly ONE of them calls the refresh endpoint and the rest wait
-# for it - instead of N redundant calls.
-#
-# IMPORTANT FIX vs the first version of this class: the actual
-# network call to refresh_callback() used to happen INSIDE
-# `async with self._lock`. That meant a second worker blocking on
-# the lock would only get it back AFTER the first refresh had
-# already finished and reset the flag - so it never actually saw
-# "someone else is refreshing" and would immediately trigger a
-# second, redundant refresh call. The lock here now only guards
-# the flag check/set; the network call itself happens outside it.
-# ================================================================
 
 class TokenHolder:
     def __init__(self, token: str):
@@ -466,31 +701,18 @@ class TokenHolder:
             return None
         return exp - time.time()
 
-    async def ensure_fresh(
-        self,
-        refresh_callback: Optional[Callable[[], str]],
-        buffer_seconds: float = TOKEN_EXPIRY_BUFFER_SECONDS
-    ):
-        """Proactive refresh - call before each request. Cheap no-op
-        unless the token is within buffer_seconds of expiring."""
-
+    async def ensure_fresh(self, refresh_callback, buffer_seconds: float = TOKEN_EXPIRY_BUFFER_SECONDS):
         if refresh_callback is None:
             return
-
         remaining = self.seconds_until_expiry()
         if remaining is not None and remaining <= buffer_seconds:
             await self.refresh(refresh_callback)
 
-    async def refresh(self, refresh_callback: Optional[Callable[[], str]]):
-        """Reactive refresh - call after a 401/403. Coordinates so
-        only one concurrent worker actually hits the token
-        endpoint; the rest wait on the event."""
-
+    async def refresh(self, refresh_callback):
         if refresh_callback is None:
             raise AuthError(status_code=401)
 
         should_refresh = False
-
         async with self._lock:
             if not self._refreshing:
                 self._refreshing = True
@@ -500,21 +722,14 @@ class TokenHolder:
         if should_refresh:
             try:
                 print("\n[AUTH] Token expired/invalid or expiring soon -> refreshing...")
-
                 if asyncio.iscoroutinefunction(refresh_callback):
                     new_token = await refresh_callback()
                 else:
-                    # requests.post inside the callback is blocking -
-                    # run it off the event loop like every other
-                    # network call in this module.
                     new_token = await asyncio.to_thread(refresh_callback)
-
                 if not new_token or not isinstance(new_token, str):
                     raise AuthError(status_code=401)
-
                 self.token = new_token
                 print("[AUTH] Token refreshed successfully.")
-
             except AuthError:
                 raise
             except Exception as e:
@@ -524,94 +739,39 @@ class TokenHolder:
                     self._refreshing = False
                     self._refreshed_event.set()
 
-        # Whether we refreshed it ourselves or another worker did -
-        # wait until whichever refresh is in flight completes.
         await self._refreshed_event.wait()
 
 
-# ================================================================
-# NEW: AUTOMATIC OAUTH2 CLIENT-CREDENTIALS TOKEN FETCH
-# ================================================================
-#
-# Concrete implementation for automatic refresh. If you pass
-# tenant_id / client_id / client_secret / scopes into
-# run_telephony_llm_batch(), this is wired up automatically as the
-# refresh mechanism - no callback needs to be hand-built.
-#
-# If your token comes from somewhere else (a different IdP, a
-# secrets-manager-backed helper, etc), just pass your own
-# token_refresh_callback instead and this function is unused.
-# ================================================================
-
-def get_oauth_token(
-    tenant_id: str,
-    client_id: str,
-    client_secret: str,
-    scopes: str,
-    timeout: int = 30
-) -> str:
-    """
-    Client-credentials OAuth2 flow against Azure AD.
-    scopes: space-separated scope string, e.g.
-            "https://your-model-gateway/.default"
-    """
-
+def get_oauth_token(tenant_id: str, client_id: str, client_secret: str, scopes: str, timeout: int = 30) -> str:
     token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
-
     payload = {
         "grant_type": "client_credentials",
         "client_id": client_id,
         "client_secret": client_secret,
         "scope": scopes
     }
-
     response = requests.post(token_url, data=payload, timeout=timeout)
     response.raise_for_status()
-
     data = response.json()
-
     if "access_token" not in data:
         raise AuthError(status_code=401)
-
     return data["access_token"]
 
 
-def build_oauth_refresh_callback(
-    tenant_id: str,
-    client_id: str,
-    client_secret: str,
-    scopes: str
-) -> Callable[[], str]:
-    """Wraps get_oauth_token into a zero-arg callable for TokenHolder."""
-
+def build_oauth_refresh_callback(tenant_id, client_id, client_secret, scopes) -> Callable[[], str]:
     def _refresh() -> str:
         return get_oauth_token(tenant_id, client_id, client_secret, scopes)
-
     return _refresh
 
 
 # ================================================================
-# NEW: GLOBAL COORDINATED RATE-LIMIT BACKOFF
-# ================================================================
-#
-# This is the core fix for the 429 storm.
-#
-# Without this, when worker A gets a 429, only worker A backs off.
-# Workers B through O (14 of them) keep firing immediately,
-# re-trip the limit, and the whole batch thrashes into a wall of
-# 429s - exactly what the screenshot shows.
-#
-# With this, the FIRST worker to see a 429 pauses EVERY worker
-# (via an asyncio.Event), waits out the backoff once, then
-# releases everyone together. Consecutive hits increase the wait,
-# and it decays back down on sustained success.
+# SECTION 9 — COORDINATED RATE LIMITING (global backoff + RPM)
 # ================================================================
 
 class GlobalRateLimitCoordinator:
-
     def __init__(self):
         self._resume_event = asyncio.Event()
-        self._resume_event.set()  # not paused initially
+        self._resume_event.set()
         self._lock = asyncio.Lock()
         self._consecutive_rate_limits = 0
 
@@ -621,30 +781,22 @@ class GlobalRateLimitCoordinator:
     async def trigger_pause(self, retry_after: Optional[float] = None):
         wait_time = 0
         should_sleep = False
-
         async with self._lock:
             already_paused = not self._resume_event.is_set()
-
             if not already_paused:
                 self._consecutive_rate_limits += 1
                 self._resume_event.clear()
-
                 base_wait = retry_after if retry_after else RATE_LIMIT_BASE_WAIT
                 backoff_multiplier = min(2 ** (self._consecutive_rate_limits - 1), 8)
                 wait_time = min(base_wait * backoff_multiplier, RATE_LIMIT_MAX_WAIT)
                 should_sleep = True
-
-                print(
-                    f"\n[RATE LIMIT] HTTP 429 received. Pausing ALL workers for "
-                    f"{wait_time:.0f}s (consecutive hits: {self._consecutive_rate_limits})"
-                )
-
+                print(f"\n[RATE LIMIT] HTTP 429 received. Pausing ALL workers for "
+                      f"{wait_time:.0f}s (consecutive hits: {self._consecutive_rate_limits})")
         if should_sleep:
             await asyncio.sleep(wait_time)
             async with self._lock:
                 self._resume_event.set()
             print("[RATE LIMIT] Resuming all workers.")
-
         await self._resume_event.wait()
 
     def note_success(self):
@@ -652,19 +804,7 @@ class GlobalRateLimitCoordinator:
             self._consecutive_rate_limits = max(0, self._consecutive_rate_limits - 1)
 
 
-# ================================================================
-# NEW: REQUESTS-PER-MINUTE LIMITER
-# ================================================================
-#
-# The existing TokenBudgetManager only guards total token VOLUME
-# over a 30-min window. It does nothing to stop 15 requests firing
-# in the same second, which is usually what actually trips a 429
-# on an APIM-style gateway. This adds a simple sliding-window RPM
-# guard alongside it.
-# ================================================================
-
 class RequestRateLimiter:
-
     def __init__(self, max_requests_per_minute: int):
         self.max_requests_per_minute = max_requests_per_minute
         self.window = deque()
@@ -676,32 +816,54 @@ class RequestRateLimiter:
                 now = time.time()
                 while self.window and now - self.window[0] > 60:
                     self.window.popleft()
-
                 if len(self.window) < self.max_requests_per_minute:
                     self.window.append(now)
                     return
-
             await asyncio.sleep(0.5)
 
 
+class TokenBudgetManager:
+    def __init__(self, token_limit: int, window_secs: int, safety_buffer: float = 0.90):
+        self.token_limit = token_limit
+        self.window_secs = window_secs
+        self.safety_buffer = safety_buffer
+        self.token_usage_window = deque()
+        self.current_tokens = 0
+        self.lock = asyncio.Lock()
+
+    async def _clean_old_tokens_locked(self):
+        now = time.time()
+        while self.token_usage_window and now - self.token_usage_window[0][0] > self.window_secs:
+            _, old_tokens = self.token_usage_window.popleft()
+            self.current_tokens = max(0, self.current_tokens - old_tokens)
+
+    async def reserve_tokens(self, estimated_tokens: int):
+        limit = int(self.token_limit * self.safety_buffer)
+        while True:
+            async with self.lock:
+                await self._clean_old_tokens_locked()
+                if self.current_tokens + estimated_tokens <= limit:
+                    now = time.time()
+                    self.token_usage_window.append((now, estimated_tokens))
+                    self.current_tokens += estimated_tokens
+                    return
+            await asyncio.sleep(5)
+
+    async def adjust_tokens(self, estimated_tokens: int, actual_tokens: int):
+        async with self.lock:
+            difference = actual_tokens - estimated_tokens
+            self.current_tokens = max(0, self.current_tokens + difference)
+
+
 # ================================================================
-# SYNCHRONOUS MODEL CALL (FIXED)
-# ================================================================
-#
-# requests.post is blocking - the async processor calls this via
-# asyncio.to_thread(...).
-#
-# CHANGED: 429 and 401/403 are now detected explicitly by status
-# code and raised as RateLimitError / AuthError instead of being
-# retried locally and eventually flattened into a generic string.
-# They are NOT retried inside this function - they bubble up so
-# the async layer can coordinate a shared pause / token refresh
-# across all concurrent workers.
+# SECTION 10 — MODEL / API CALL
+# (generic: takes prompt + schema, used by BOTH pass 1 and pass 2)
 # ================================================================
 
-def call_telephony_model(
+def call_fcr_model(
     prompt: str,
-    max_tokens: int = MAX_TOKENS,
+    json_schema: Dict[str, Any],
+    max_tokens: int,
     retries: int = RETRIES,
     token: str = None,
     modelgateway_baseurl: str = None,
@@ -712,7 +874,6 @@ def call_telephony_model(
         raise ValueError("modelgateway_baseurl is required")
 
     base_url = modelgateway_baseurl.rstrip("/")
-
     apiurl = (
         f"{base_url}/secure-gpt-openai/openai/deployments/"
         f"{MODEL}/chat/completions?api-version=2024-06-01"
@@ -720,13 +881,10 @@ def call_telephony_model(
 
     payload = {
         "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are an expert AXA Health customer service analyst who "
-                    "separates call transcripts into customer and agent contributions."
-                )
-            },
+            {"role": "system", "content": (
+                "You are an expert AXA Health customer contact analyst producing "
+                "structured, evidence-grounded analysis for FCR/repeat-contact reporting."
+            )},
             {"role": "user", "content": prompt}
         ],
         "temperature": 0,
@@ -734,8 +892,8 @@ def call_telephony_model(
         "response_format": {
             "type": "json_schema",
             "json_schema": {
-                "name": TELEPHONY_JSON_SCHEMA["name"],
-                "schema": TELEPHONY_JSON_SCHEMA["schema"],
+                "name": json_schema["name"],
+                "schema": json_schema["schema"],
                 "strict": True
             }
         }
@@ -745,20 +903,9 @@ def call_telephony_model(
 
     for attempt in range(1, retries + 1):
         start_api = time.time()
-
         try:
             headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-
-            response = requests.post(
-                apiurl, headers=headers, json=payload, verify=True, timeout=api_timeout
-            )
-
-            # ------------------------------------------------------
-            # NEW: explicit status-code handling - this was missing
-            # entirely before. Everything used to fall through to
-            # response.raise_for_status() -> generic HTTPError ->
-            # generic retry loop -> generic failure string.
-            # ------------------------------------------------------
+            response = requests.post(apiurl, headers=headers, json=payload, verify=True, timeout=api_timeout)
 
             if response.status_code == 429:
                 retry_after_header = response.headers.get("Retry-After")
@@ -766,12 +913,16 @@ def call_telephony_model(
                     retry_after = float(retry_after_header) if retry_after_header else None
                 except (TypeError, ValueError):
                     retry_after = None
-                # Do not retry locally - bubble up for coordinated backoff.
                 raise RateLimitError(retry_after=retry_after, status_code=429)
 
             if response.status_code in (401, 403):
-                # Do not retry locally - bubble up for token refresh.
                 raise AuthError(status_code=response.status_code)
+
+            if response.status_code in (408, 502, 503, 504):
+                raise TransientAPIError(
+                    message=f"Transient HTTP error {response.status_code}: {response.text[:500]}",
+                    status_code=response.status_code
+                )
 
             response.raise_for_status()
 
@@ -787,9 +938,7 @@ def call_telephony_model(
             else:
                 raise ValueError("No model content returned")
 
-            cleaned = validate_and_repair_telephony_response(parsed)
             usage = data.get("usage", {})
-
             metadata = {
                 "prompt_tokens": usage.get("prompt_tokens"),
                 "completion_tokens": usage.get("completion_tokens"),
@@ -799,100 +948,95 @@ def call_telephony_model(
                 "attempt": attempt,
                 "error": None
             }
-
-            return cleaned, metadata
+            return parsed, metadata
 
         except (RateLimitError, AuthError):
-            # These are handled one level up (coordinated pause /
-            # token refresh). Retrying them here, locally, with a
-            # 2-4 second backoff while 14 other workers keep firing
-            # is exactly what caused the storm - so don't.
             raise
+
+        except requests.exceptions.ReadTimeout as e:
+            last_exception = e
+            if attempt >= TIMEOUT_RETRIES:
+                return None, {
+                    "prompt_tokens": None, "completion_tokens": None, "total_tokens": None,
+                    "api_latency": time.time() - start_api, "request_id": None, "attempt": attempt,
+                    "error": f"ReadTimeout after {attempt} attempts: {str(e)}"
+                }
+            wait_time = min(TIMEOUT_BACKOFF_BASE * (2 ** (attempt - 1)), TIMEOUT_BACKOFF_MAX) + np.random.uniform(0, 2)
+            print(f"\n[TIMEOUT] ReadTimeout on attempt {attempt}/{TIMEOUT_RETRIES}. Retrying in {wait_time:.1f}s...")
+            time.sleep(wait_time)
+
+        except requests.exceptions.ConnectTimeout as e:
+            last_exception = e
+            if attempt >= TIMEOUT_RETRIES:
+                return None, {
+                    "prompt_tokens": None, "completion_tokens": None, "total_tokens": None,
+                    "api_latency": time.time() - start_api, "request_id": None, "attempt": attempt,
+                    "error": f"ConnectTimeout after {attempt} attempts: {str(e)}"
+                }
+            wait_time = min(TIMEOUT_BACKOFF_BASE * (2 ** (attempt - 1)), TIMEOUT_BACKOFF_MAX) + np.random.uniform(0, 2)
+            print(f"\n[TIMEOUT] ConnectTimeout on attempt {attempt}/{TIMEOUT_RETRIES}. Retrying in {wait_time:.1f}s...")
+            time.sleep(wait_time)
+
+        except TransientAPIError as e:
+            last_exception = e
+            if attempt >= retries:
+                return None, {
+                    "prompt_tokens": None, "completion_tokens": None, "total_tokens": None,
+                    "api_latency": time.time() - start_api, "request_id": None, "attempt": attempt,
+                    "error": f"Transient gateway error after {attempt} attempts: {str(e)}"
+                }
+            wait_time = min(TIMEOUT_BACKOFF_BASE * (2 ** (attempt - 1)), TIMEOUT_BACKOFF_MAX) + np.random.uniform(0, 2)
+            print(f"\n[GATEWAY] HTTP {e.status_code} on attempt {attempt}/{retries}. Retrying in {wait_time:.1f}s...")
+            time.sleep(wait_time)
 
         except Exception as e:
             last_exception = e
-
             if attempt < retries:
-                wait_time = (2 ** (attempt - 1)) + np.random.rand()
-                time.sleep(wait_time)
+                time.sleep((2 ** (attempt - 1)) + np.random.rand())
             else:
-                return (
-                    {"customer_message": None, "agent_message": None, "confidence": 0.0},
-                    {
-                        "prompt_tokens": None,
-                        "completion_tokens": None,
-                        "total_tokens": None,
-                        "api_latency": time.time() - start_api,
-                        "request_id": None,
-                        "attempt": attempt,
-                        "error": f"{type(e).__name__}: {str(e)}"
-                    }
-                )
+                return None, {
+                    "prompt_tokens": None, "completion_tokens": None, "total_tokens": None,
+                    "api_latency": time.time() - start_api, "request_id": None, "attempt": attempt,
+                    "error": f"{type(e).__name__}: {str(e)}"
+                }
 
     raise RuntimeError(f"Model call failed: {last_exception}")
 
 
 # ================================================================
-# TOKEN BUDGET MANAGER (unchanged - still guards total TPM volume)
+# SECTION 11 — RESULT BUILDERS
 # ================================================================
 
-class TokenBudgetManager:
+PASS1_CHECKPOINT_COLUMNS = [
+    "ConversationId", "ClaimNumber", "ContactEpisode", "EpisodeStart", "MembershipNumber",
+    "primary_demand_type", "primary_demand_evidence", "primary_demand_confidence",
+    "secondary_demand_types_json", "topics_json", "primary_topic", "primary_topic_coverage_pct",
+    "resolution_status", "resolution_evidence", "resolution_agent_action",
+    "resolution_customer_indication", "resolution_confidence",
+    "sentiment_score", "sentiment_category", "sentiment_evidence", "sentiment_confidence",
+    "overall_confidence",
+    "prompt_tokens", "completion_tokens", "total_tokens", "api_latency", "task_latency",
+    "request_id", "error", "processed_at"
+]
 
-    def __init__(self, token_limit: int, window_secs: int, safety_buffer: float = 0.90):
-        self.token_limit = token_limit
-        self.window_secs = window_secs
-        self.safety_buffer = safety_buffer
-        self.token_usage_window = deque()
-        self.current_tokens = 0
-        self.lock = asyncio.Lock()
-
-    async def _clean_old_tokens_locked(self):
-        now = time.time()
-        while self.token_usage_window and now - self.token_usage_window[0][0] > self.window_secs:
-            _, old_tokens = self.token_usage_window.popleft()
-            self.current_tokens = max(0, self.current_tokens - old_tokens)
-
-    async def reserve_tokens(self, estimated_tokens: int = ESTIMATED_TOKENS_PER_CALL):
-        limit = int(self.token_limit * self.safety_buffer)
-
-        while True:
-            async with self.lock:
-                await self._clean_old_tokens_locked()
-
-                if self.current_tokens + estimated_tokens <= limit:
-                    now = time.time()
-                    self.token_usage_window.append((now, estimated_tokens))
-                    self.current_tokens += estimated_tokens
-                    return
-
-            await asyncio.sleep(5)
-
-    async def adjust_tokens(self, estimated_tokens: int, actual_tokens: int):
-        async with self.lock:
-            difference = actual_tokens - estimated_tokens
-            self.current_tokens = max(0, self.current_tokens + difference)
+PASS2_CHECKPOINT_COLUMNS = [
+    "ConversationId", "ClaimNumber", "ContactEpisode", "PreviousContactEpisode",
+    "topic_similarity", "same_underlying_issue", "continuing_previous_issue",
+    "genuinely_new_issue", "repeat_contact", "repeat_contact_llm_confidence",
+    "repeat_contact_reason", "repeat_contact_evidence", "true_failure_supported",
+    "prompt_tokens", "completion_tokens", "total_tokens", "api_latency", "task_latency",
+    "request_id", "error", "processed_at"
+]
 
 
-# ================================================================
-# RESULT BUILDER (unchanged)
-# ================================================================
-
-def build_result(
-    row: pd.Series,
-    analysis: Dict[str, Any],
-    meta: Dict[str, Any],
-    task_latency: float,
-    error_override: str = None
-) -> Dict[str, Any]:
-
-    return {
-        "ConversationId": row.get("ConversationId"),
+def build_pass1_result(row: pd.Series, analysis: Dict[str, Any], meta: Dict[str, Any],
+                        task_latency: float, error_override: str = None) -> Dict[str, Any]:
+    out = {
+        "ConversationId": row.get("ConversationId") if "ConversationId" in row else row.get("Conversations"),
         "ClaimNumber": row.get("ClaimNumber"),
-        "ConversationStartTimestamp": row.get("ConversationStartTimestamp"),
+        "ContactEpisode": row.get("ContactEpisode"),
+        "EpisodeStart": row.get("EpisodeStart"),
         "MembershipNumber": row.get("MembershipNumber"),
-        "CustomerMessage": analysis.get("customer_message"),
-        "AgentMessage": analysis.get("agent_message"),
-        "Confidence": analysis.get("confidence"),
         "prompt_tokens": meta.get("prompt_tokens"),
         "completion_tokens": meta.get("completion_tokens"),
         "total_tokens": meta.get("total_tokens"),
@@ -902,145 +1046,136 @@ def build_result(
         "error": error_override if error_override is not None else meta.get("error"),
         "processed_at": datetime.now()
     }
+    fields = analysis if analysis else {}
+    for k in ["primary_demand_type", "primary_demand_evidence", "primary_demand_confidence",
+              "secondary_demand_types_json", "topics_json", "primary_topic", "primary_topic_coverage_pct",
+              "resolution_status", "resolution_evidence", "resolution_agent_action",
+              "resolution_customer_indication", "resolution_confidence",
+              "sentiment_score", "sentiment_category", "sentiment_evidence", "sentiment_confidence",
+              "overall_confidence"]:
+        out[k] = fields.get(k)
+    return out
+
+
+def build_pass2_result(row: pd.Series, analysis: Dict[str, Any], meta: Dict[str, Any],
+                        task_latency: float, error_override: str = None) -> Dict[str, Any]:
+    out = {
+        "ConversationId": row.get("ConversationId") if "ConversationId" in row else row.get("Conversations"),
+        "ClaimNumber": row.get("ClaimNumber"),
+        "ContactEpisode": row.get("ContactEpisode"),
+        "PreviousContactEpisode": row.get("PreviousContactEpisode"),
+        "prompt_tokens": meta.get("prompt_tokens"),
+        "completion_tokens": meta.get("completion_tokens"),
+        "total_tokens": meta.get("total_tokens"),
+        "api_latency": meta.get("api_latency"),
+        "task_latency": task_latency,
+        "request_id": meta.get("request_id"),
+        "error": error_override if error_override is not None else meta.get("error"),
+        "processed_at": datetime.now()
+    }
+    fields = analysis if analysis else {}
+    for k in ["topic_similarity", "same_underlying_issue", "continuing_previous_issue",
+              "genuinely_new_issue", "repeat_contact", "repeat_contact_llm_confidence",
+              "repeat_contact_reason", "repeat_contact_evidence", "true_failure_supported"]:
+        out[k] = fields.get(k)
+    return out
 
 
 # ================================================================
-# CHECKPOINT WRITER (dtype bug fixed)
+# SECTION 13 — CHECKPOINTING (explicit Spark schema, dtype-safe)
 # ================================================================
 
-CHECKPOINT_COLUMNS = [
-    "ConversationId", "ClaimNumber", "ConversationStartTimestamp",
-    "MembershipNumber", "CustomerMessage", "AgentMessage", "Confidence",
-    "prompt_tokens", "completion_tokens", "total_tokens",
-    "api_latency", "task_latency", "request_id", "error", "processed_at"
-]
+def _spark_safe(value):
+    if value is None:
+        return None
+    if isinstance(value, (float, np.floating)) and (math.isnan(value) or math.isinf(value)):
+        return None
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    return value
 
 
-def save_checkpoint(results: List[Dict[str, Any]], checkpoint_table: str):
+def _to_naive_python_datetime(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if isinstance(value, pd.Timestamp):
+        if pd.isna(value):
+            return None
+        if value.tzinfo is not None:
+            value = value.tz_localize(None)
+        return value.to_pydatetime().replace(tzinfo=None)
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    if getattr(parsed, "tzinfo", None) is not None:
+        parsed = parsed.replace(tzinfo=None)
+    return parsed.to_pydatetime().replace(tzinfo=None)
 
+
+def save_pass1_checkpoint(results: List[Dict[str, Any]], checkpoint_table: str):
     if not results:
         return
 
-    checkpoint_df = pd.DataFrame(results)
+    df = pd.DataFrame(results)
+    for col in PASS1_CHECKPOINT_COLUMNS:
+        if col not in df.columns:
+            df[col] = None
+    df = df[PASS1_CHECKPOINT_COLUMNS].copy()
 
-    for col in CHECKPOINT_COLUMNS:
-        if col not in checkpoint_df.columns:
-            checkpoint_df[col] = None
+    string_cols = ["ConversationId", "ClaimNumber", "MembershipNumber",
+                    "primary_demand_type", "primary_demand_evidence", "secondary_demand_types_json",
+                    "topics_json", "primary_topic", "resolution_status", "resolution_evidence",
+                    "resolution_agent_action", "resolution_customer_indication",
+                    "sentiment_category", "sentiment_evidence", "request_id", "error"]
+    for col in string_cols:
+        df[col] = df[col].apply(lambda x: str(x) if pd.notna(x) else None)
 
-    checkpoint_df = checkpoint_df[CHECKPOINT_COLUMNS].copy()
+    int_cols = ["ContactEpisode", "prompt_tokens", "completion_tokens", "total_tokens"]
+    for col in int_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce").map(
+            lambda v: None if pd.isna(v) else int(v)
+        ).astype(object)
 
-    # ------------------------------------------------------------
-    # STRING COLUMNS
-    # ------------------------------------------------------------
+    double_cols = ["primary_demand_confidence", "primary_topic_coverage_pct", "resolution_confidence",
+                   "sentiment_score", "sentiment_confidence", "overall_confidence",
+                   "api_latency", "task_latency"]
+    for col in double_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce").map(
+            lambda v: None if pd.isna(v) else float(v)
+        ).astype(object)
 
-    string_columns = [
-        "ConversationId", "ClaimNumber", "MembershipNumber",
-        "CustomerMessage", "AgentMessage", "request_id", "error"
-    ]
+    for col in ["EpisodeStart", "processed_at"]:
+        df[col] = df[col].map(_to_naive_python_datetime)
 
-    for col in string_columns:
-        checkpoint_df[col] = checkpoint_df[col].where(checkpoint_df[col].notna(), None)
-        checkpoint_df[col] = checkpoint_df[col].apply(lambda x: str(x) if x is not None else None)
-
-    # ------------------------------------------------------------
-    # BIGINT COLUMNS
-    # ------------------------------------------------------------
-
-    bigint_columns = ["prompt_tokens", "completion_tokens", "total_tokens"]
-
-    def to_python_int(value):
-        if value is None:
-            return None
-        try:
-            if pd.isna(value):
-                return None
-        except (TypeError, ValueError):
-            pass
-        return int(value)
-
-    for col in bigint_columns:
-        checkpoint_df[col] = (
-            pd.to_numeric(checkpoint_df[col], errors="coerce")
-            .map(to_python_int)
-            .astype(object)
-        )
-
-    # ------------------------------------------------------------
-    # DOUBLE COLUMNS
-    #
-    # FIXED: this loop previously iterated over `bigint_columns`
-    # again (copy-paste error), which meant:
-    #   1. Confidence / api_latency / task_latency were NEVER
-    #      cleaned of NaN/type issues here.
-    #   2. prompt_tokens / completion_tokens / total_tokens got
-    #      cast to int above, then immediately overwritten back
-    #      to float by this loop running on the same columns -
-    #      right before being written against an explicit
-    #      LongType() schema below.
-    # ------------------------------------------------------------
-
-    double_columns = ["Confidence", "api_latency", "task_latency"]
-
-    def to_python_float(value):
-        if value is None:
-            return None
-        try:
-            if pd.isna(value):
-                return None
-        except (TypeError, ValueError):
-            pass
-        return float(value)
-
-    for col in double_columns:
-        checkpoint_df[col] = (
-            pd.to_numeric(checkpoint_df[col], errors="coerce")
-            .map(to_python_float)
-            .astype(object)
-        )
-
-    # ------------------------------------------------------------
-    # TIMESTAMP COLUMNS
-    # ------------------------------------------------------------
-
-    timestamp_columns = ["ConversationStartTimestamp", "processed_at"]
-
-    def to_naive_python_datetime(value):
-        if value is None or (isinstance(value, float) and pd.isna(value)):
-            return None
-
-        if isinstance(value, pd.Timestamp):
-            if pd.isna(value):
-                return None
-            if value.tzinfo is not None:
-                value = value.tz_localize(None)
-            return value.to_pydatetime().replace(tzinfo=None)
-
-        if isinstance(value, datetime):
-            return value.replace(tzinfo=None)
-
-        parsed = pd.to_datetime(value, errors="coerce")
-        if pd.isna(parsed):
-            return None
-        if getattr(parsed, "tzinfo", None) is not None:
-            parsed = parsed.replace(tzinfo=None)
-
-        return parsed.to_pydatetime().replace(tzinfo=None)
-
-    for col in timestamp_columns:
-        checkpoint_df[col] = checkpoint_df[col].map(to_naive_python_datetime)
-
-    # ------------------------------------------------------------
-    # EXPLICIT SPARK SCHEMA
-    # ------------------------------------------------------------
-
-    checkpoint_schema = StructType([
+    schema = StructType([
         StructField("ConversationId", StringType(), True),
         StructField("ClaimNumber", StringType(), True),
-        StructField("ConversationStartTimestamp", StringType(), True),
+        StructField("ContactEpisode", LongType(), True),
+        StructField("EpisodeStart", StringType(), True),
         StructField("MembershipNumber", StringType(), True),
-        StructField("CustomerMessage", StringType(), True),
-        StructField("AgentMessage", StringType(), True),
-        StructField("Confidence", DoubleType(), True),
+        StructField("primary_demand_type", StringType(), True),
+        StructField("primary_demand_evidence", StringType(), True),
+        StructField("primary_demand_confidence", DoubleType(), True),
+        StructField("secondary_demand_types_json", StringType(), True),
+        StructField("topics_json", StringType(), True),
+        StructField("primary_topic", StringType(), True),
+        StructField("primary_topic_coverage_pct", DoubleType(), True),
+        StructField("resolution_status", StringType(), True),
+        StructField("resolution_evidence", StringType(), True),
+        StructField("resolution_agent_action", StringType(), True),
+        StructField("resolution_customer_indication", StringType(), True),
+        StructField("resolution_confidence", DoubleType(), True),
+        StructField("sentiment_score", DoubleType(), True),
+        StructField("sentiment_category", StringType(), True),
+        StructField("sentiment_evidence", StringType(), True),
+        StructField("sentiment_confidence", DoubleType(), True),
+        StructField("overall_confidence", DoubleType(), True),
         StructField("prompt_tokens", LongType(), True),
         StructField("completion_tokens", LongType(), True),
         StructField("total_tokens", LongType(), True),
@@ -1048,160 +1183,166 @@ def save_checkpoint(results: List[Dict[str, Any]], checkpoint_table: str):
         StructField("task_latency", DoubleType(), True),
         StructField("request_id", StringType(), True),
         StructField("error", StringType(), True),
-        StructField("processed_at", StringType(), True)
+        StructField("processed_at", StringType(), True),
     ])
 
-    def spark_safe(value):
-        if value is None:
-            return None
-        if isinstance(value, (float, np.floating)) and (math.isnan(value) or math.isinf(value)):
-            return None
-        if isinstance(value, (np.integer,)):
-            return int(value)
-        if isinstance(value, (np.floating,)):
-            return float(value)
-        return value
-
-    records = checkpoint_df.to_dict(orient="records")
-    records = [{k: spark_safe(v) for k, v in row.items()} for row in records]
-
-    spark_df = spark.createDataFrame(records, schema=checkpoint_schema)
-
+    records = [{k: _spark_safe(v) for k, v in r.items()} for r in df.to_dict(orient="records")]
+    spark_df = spark.createDataFrame(records, schema=schema)
     spark_df = (
         spark_df
-        .withColumn("ConversationStartTimestamp", F.to_timestamp("ConversationStartTimestamp"))
+        .withColumn("EpisodeStart", F.to_timestamp("EpisodeStart"))
         .withColumn("processed_at", F.to_timestamp("processed_at"))
     )
 
-    print("\n[CHECKPOINT] Schema being written:")
-    spark_df.printSchema()
-    print("[CHECKPOINT] Rows:", spark_df.count())
+    _write_checkpoint_with_retry(spark_df, checkpoint_table)
 
+
+def save_pass2_checkpoint(results: List[Dict[str, Any]], checkpoint_table: str):
+    if not results:
+        return
+
+    df = pd.DataFrame(results)
+    for col in PASS2_CHECKPOINT_COLUMNS:
+        if col not in df.columns:
+            df[col] = None
+    df = df[PASS2_CHECKPOINT_COLUMNS].copy()
+
+    string_cols = ["ConversationId", "ClaimNumber", "repeat_contact_reason",
+                   "repeat_contact_evidence", "request_id", "error"]
+    for col in string_cols:
+        df[col] = df[col].apply(lambda x: str(x) if pd.notna(x) else None)
+
+    int_cols = ["ContactEpisode", "PreviousContactEpisode", "prompt_tokens", "completion_tokens", "total_tokens"]
+    for col in int_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce").map(
+            lambda v: None if pd.isna(v) else int(v)
+        ).astype(object)
+
+    double_cols = ["topic_similarity", "repeat_contact_llm_confidence", "api_latency", "task_latency"]
+    for col in double_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce").map(
+            lambda v: None if pd.isna(v) else float(v)
+        ).astype(object)
+
+    bool_cols = ["same_underlying_issue", "continuing_previous_issue", "genuinely_new_issue",
+                 "repeat_contact", "true_failure_supported"]
+    for col in bool_cols:
+        df[col] = df[col].map(lambda v: bool(v) if pd.notna(v) else None).astype(object)
+
+    df["processed_at"] = df["processed_at"].map(_to_naive_python_datetime)
+
+    schema = StructType([
+        StructField("ConversationId", StringType(), True),
+        StructField("ClaimNumber", StringType(), True),
+        StructField("ContactEpisode", LongType(), True),
+        StructField("PreviousContactEpisode", LongType(), True),
+        StructField("topic_similarity", DoubleType(), True),
+        StructField("same_underlying_issue", BooleanType(), True),
+        StructField("continuing_previous_issue", BooleanType(), True),
+        StructField("genuinely_new_issue", BooleanType(), True),
+        StructField("repeat_contact", BooleanType(), True),
+        StructField("repeat_contact_llm_confidence", DoubleType(), True),
+        StructField("repeat_contact_reason", StringType(), True),
+        StructField("repeat_contact_evidence", StringType(), True),
+        StructField("true_failure_supported", BooleanType(), True),
+        StructField("prompt_tokens", LongType(), True),
+        StructField("completion_tokens", LongType(), True),
+        StructField("total_tokens", LongType(), True),
+        StructField("api_latency", DoubleType(), True),
+        StructField("task_latency", DoubleType(), True),
+        StructField("request_id", StringType(), True),
+        StructField("error", StringType(), True),
+        StructField("processed_at", StringType(), True),
+    ])
+
+    records = [{k: _spark_safe(v) for k, v in r.items()} for r in df.to_dict(orient="records")]
+    spark_df = spark.createDataFrame(records, schema=schema)
+    spark_df = spark_df.withColumn("processed_at", F.to_timestamp("processed_at"))
+
+    _write_checkpoint_with_retry(spark_df, checkpoint_table)
+
+
+def _write_checkpoint_with_retry(spark_df, checkpoint_table: str):
+    print(f"[CHECKPOINT] Writing {spark_df.count():,} rows to {checkpoint_table}")
     last_exception = None
-
     for attempt in range(1, CHECKPOINT_RETRIES + 1):
         try:
-            (
-                spark_df.write
-                .mode("append")
-                .format("delta")
-                .option("mergeSchema", "false")
-                .saveAsTable(checkpoint_table)
-            )
-            print(f"[CHECKPOINT] Successfully saved {len(records):,} rows")
+            (spark_df.write.mode("append").format("delta")
+             .option("mergeSchema", "false").saveAsTable(checkpoint_table))
+            print(f"[CHECKPOINT] Successfully saved to {checkpoint_table}")
             return
-
         except Exception as e:
             last_exception = e
             print(f"[CHECKPOINT] Attempt {attempt} failed: {type(e).__name__}: {e}")
             if attempt < CHECKPOINT_RETRIES:
                 time.sleep(2 ** attempt)
-
-    raise RuntimeError(
-        f"Checkpoint write failed after {CHECKPOINT_RETRIES} attempts: {last_exception}"
-    )
+    raise RuntimeError(f"Checkpoint write failed after {CHECKPOINT_RETRIES} attempts: {last_exception}")
 
 
 # ================================================================
-# LOAD CHECKPOINT (unchanged)
+# SECTION 14 — RESUME LOGIC
 # ================================================================
 
-def load_processed_ids(checkpoint_table: str):
+def load_processed_episode_keys(checkpoint_table: str, key_cols: List[str]) -> set:
+    """Generic resume-key loader for either pass's checkpoint table.
+    Key is (ClaimNumber, ContactEpisode) - the Episode-level grain."""
     try:
-        checkpoint_df = (
-            spark.table(checkpoint_table)
-            .select("ConversationId", "error")
-            .toPandas()
-        )
-
-        if len(checkpoint_df) == 0:
+        cdf = spark.table(checkpoint_table).select(*key_cols, "error").toPandas()
+        if len(cdf) == 0:
             return set()
-
-        successful_ids = set(
-            checkpoint_df[checkpoint_df["error"].isna()]["ConversationId"]
-            .dropna().astype(str).unique()
-        )
-
-        return successful_ids
-
+        ok = cdf[cdf["error"].isna()]
+        return set(zip(ok[key_cols[0]].astype(str), ok[key_cols[1]].astype(str)))
     except Exception as e:
-        print(f"[CHECKPOINT] Could not load checkpoint: {e}")
+        print(f"[CHECKPOINT] Could not load checkpoint from {checkpoint_table}: {e}")
         return set()
 
 
 # ================================================================
-# MAIN ASYNC PROCESSOR (FIXED)
+# SECTION 12 — ASYNC BATCH: PASS 1 (per-episode, fully parallel)
 # ================================================================
 
-async def process_telephony_batch_async(
-    df: pd.DataFrame,
+async def run_pass1_batch(
+    episodes_df: pd.DataFrame,
+    resolved_cols: Dict[str, Any],
     token: str,
     modelgateway_baseurl: str,
-    checkpoint_table: str = None,
-    output_table: str = None,
+    checkpoint_table: Optional[str] = None,
     token_refresh_callback: Optional[Callable[[], str]] = None,
-    tenant_id: Optional[str] = None,
-    client_id: Optional[str] = None,
-    client_secret: Optional[str] = None,
-    scopes: Optional[str] = None
+    tenant_id=None, client_id=None, client_secret=None, scopes=None
 ) -> pd.DataFrame:
 
-    # --------------------------------------------------------------
-    # AUTOMATIC token refresh: if OAuth client-credentials were
-    # supplied and no custom callback was given, build one from
-    # get_oauth_token() so 401/403 (and proactive near-expiry
-    # refresh) just works with zero extra wiring.
-    # --------------------------------------------------------------
-
     if token_refresh_callback is None and all([tenant_id, client_id, client_secret, scopes]):
-        token_refresh_callback = build_oauth_refresh_callback(
-            tenant_id, client_id, client_secret, scopes
-        )
+        token_refresh_callback = build_oauth_refresh_callback(tenant_id, client_id, client_secret, scopes)
         print("[AUTH] Automatic token refresh enabled (OAuth2 client-credentials).")
 
-    required_cols = [
-        "ConversationId", "ConversationStartTimestamp",
-        "ConversationTranscript", "ClaimNumber"
-    ]
-
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}")
-
-    df = df.reset_index(drop=True).copy()
+    df = episodes_df.reset_index(drop=True).copy()
     original_count = len(df)
 
     if checkpoint_table:
-        processed_ids = load_processed_ids(checkpoint_table)
-        if processed_ids:
+        processed_keys = load_processed_episode_keys(checkpoint_table, ["ClaimNumber", "ContactEpisode"])
+        if processed_keys:
             before = len(df)
-            df = df[~df["ConversationId"].astype(str).isin(processed_ids)].copy()
-            print(f"[CHECKPOINT] Previously successful: {before - len(df):,}")
-            print(f"[CHECKPOINT] Remaining: {len(df):,}")
+            key_series = list(zip(df["ClaimNumber"].astype(str), df["ContactEpisode"].astype(str)))
+            keep_mask = [k not in processed_keys for k in key_series]
+            df = df[keep_mask].copy()
+            print(f"[CHECKPOINT] Pass 1 previously successful: {before - len(df):,}; remaining: {len(df):,}")
 
-    df = df[
-        df["ConversationTranscript"].fillna("").astype(str).str.len() >= MIN_TRANSCRIPT_CHARS
-    ].copy()
-
+    agent_col = resolved_cols["agent_conversation_col"]
+    df["_episode_text"] = df.apply(
+        lambda r: prepare_episode_text(r.get("CustomerEpisodeConversation"), r.get(agent_col)),
+        axis=1
+    )
+    df = df[df["_episode_text"].str.len() >= MIN_CONVERSATION_CHARS].copy()
     total_rows = len(df)
 
-    print()
+    print("\n" + "=" * 80)
+    print("FCR PASS 1 - PER-EPISODE ANALYSIS (demand / topics / resolution / sentiment)")
     print("=" * 80)
-    print("TELEPHONY LLM BATCH")
-    print("=" * 80)
-    print(f"Input rows:              {original_count:,}")
-    print(f"Rows to process:         {total_rows:,}")
-    print(f"Concurrency:             {MAX_CONCURRENCY}")
-    print(f"Requests/min limit:      {MAX_REQUESTS_PER_MINUTE}")
-    print(f"Checkpoint interval:     {CHECKPOINT_EVERY}")
-    print(f"Token limit:             {TOKEN_LIMIT:,}")
-    print(f"Effective token limit:   {int(TOKEN_LIMIT * SAFETY_BUFFER):,}")
-    print("=" * 80)
-    print()
+    print(f"Input episodes: {original_count:,}  |  To process: {total_rows:,}  |  Concurrency: {MAX_CONCURRENCY}")
+    print("=" * 80 + "\n")
 
     if total_rows == 0:
-        print("[COMPLETE] Nothing to process.")
-        return pd.DataFrame(columns=CHECKPOINT_COLUMNS)
+        return pd.DataFrame(columns=PASS1_CHECKPOINT_COLUMNS)
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
     token_mgr = TokenBudgetManager(TOKEN_LIMIT, WINDOW_SECONDS, SAFETY_BUFFER)
@@ -1209,164 +1350,197 @@ async def process_telephony_batch_async(
     request_limiter = RequestRateLimiter(MAX_REQUESTS_PER_MINUTE)
     token_holder = TokenHolder(token)
 
-    async def process_single_row(row: pd.Series):
-
+    async def process_one(row: pd.Series):
         task_start = time.time()
-
         async with semaphore:
             try:
-                clean_transcript = build_clean_transcript_for_llm(row["ConversationTranscript"])
-
-                if len(clean_transcript) < MIN_TRANSCRIPT_CHARS:
-                    return build_result(
-                        row,
-                        {"customer_message": None, "agent_message": None, "confidence": 0.0},
-                        {
-                            "prompt_tokens": None, "completion_tokens": None, "total_tokens": None,
-                            "api_latency": None, "request_id": None,
-                            "error": "Transcript too short after redaction"
-                        },
-                        time.time() - task_start
-                    )
-
-                agents_str = row.get("AgentsInvolved", "")
-                prompt = build_telephony_prompt(clean_transcript, agents_str)
-
-                rate_limit_attempts = 0
-                auth_attempts = 0
-                analysis, meta = None, None
-
-                # ------------------------------------------------
-                # NEW: row-level retry loop for 429 / 401 / 403.
-                # A rate-limited row is NOT immediately recorded
-                # as failed - it waits for the coordinated pause
-                # to clear and tries again, up to
-                # MAX_ROW_RATE_LIMIT_RETRIES times. Same idea for
-                # auth failures, capped at MAX_ROW_AUTH_RETRIES.
-                # ------------------------------------------------
+                prompt = build_pass1_prompt(row["_episode_text"])
+                rl_attempts, auth_attempts = 0, 0
+                await token_mgr.reserve_tokens(ESTIMATED_TOKENS_PASS1)
 
                 while True:
                     await rate_coordinator.wait_if_paused()
                     await request_limiter.acquire()
-                    await token_mgr.reserve_tokens(ESTIMATED_TOKENS_PER_CALL)
-
-                    # Proactive refresh: if the token is close to
-                    # expiring, refresh it BEFORE firing the request
-                    # instead of waiting to be told via a 401. A
-                    # no-op if the token isn't a decodable JWT or
-                    # isn't close to expiry yet.
                     await token_holder.ensure_fresh(token_refresh_callback)
-
                     try:
-                        analysis, meta = await asyncio.to_thread(
-                            call_telephony_model,
-                            prompt,
-                            MAX_TOKENS,
-                            RETRIES,
-                            token_holder.token,
-                            modelgateway_baseurl,
-                            API_TIMEOUT
+                        raw, meta = await asyncio.to_thread(
+                            call_fcr_model, prompt, PASS1_JSON_SCHEMA, MAX_TOKENS_PASS1,
+                            RETRIES, token_holder.token, modelgateway_baseurl, API_TIMEOUT
                         )
                         rate_coordinator.note_success()
                         break
-
                     except RateLimitError as rle:
-                        rate_limit_attempts += 1
-
-                        if rate_limit_attempts > MAX_ROW_RATE_LIMIT_RETRIES:
-                            return build_result(
-                                row,
-                                {"customer_message": None, "agent_message": None, "confidence": 0.0},
-                                {
-                                    "prompt_tokens": None, "completion_tokens": None,
-                                    "total_tokens": None, "api_latency": None, "request_id": None,
-                                },
-                                time.time() - task_start,
-                                error_override=(
-                                    f"RateLimitError: still throttled after "
-                                    f"{MAX_ROW_RATE_LIMIT_RETRIES} coordinated retries"
-                                )
-                            )
-
+                        rl_attempts += 1
+                        if rl_attempts > MAX_ROW_RATE_LIMIT_RETRIES:
+                            return build_pass1_result(row, None, {}, time.time() - task_start,
+                                error_override=f"RateLimitError: still throttled after {MAX_ROW_RATE_LIMIT_RETRIES} retries")
                         await rate_coordinator.trigger_pause(rle.retry_after)
                         continue
-
                     except AuthError:
                         auth_attempts += 1
-
                         if auth_attempts > MAX_ROW_AUTH_RETRIES:
-                            return build_result(
-                                row,
-                                {"customer_message": None, "agent_message": None, "confidence": 0.0},
-                                {
-                                    "prompt_tokens": None, "completion_tokens": None,
-                                    "total_tokens": None, "api_latency": None, "request_id": None,
-                                },
-                                time.time() - task_start,
-                                error_override=(
-                                    f"AuthError: still unauthorized after "
-                                    f"{MAX_ROW_AUTH_RETRIES} refresh attempts "
-                                    f"(check client credentials / scopes)"
-                                    if token_refresh_callback is not None else
-                                    "AuthError: token expired/invalid and no "
-                                    "token_refresh_callback (or OAuth credentials) "
-                                    "was provided"
-                                )
-                            )
-
+                            return build_pass1_result(row, None, {}, time.time() - task_start,
+                                error_override=f"AuthError: still unauthorized after {MAX_ROW_AUTH_RETRIES} refresh attempts")
                         try:
                             await token_holder.refresh(token_refresh_callback)
                             continue
                         except AuthError:
-                            return build_result(
-                                row,
-                                {"customer_message": None, "agent_message": None, "confidence": 0.0},
-                                {
-                                    "prompt_tokens": None, "completion_tokens": None,
-                                    "total_tokens": None, "api_latency": None, "request_id": None,
-                                },
-                                time.time() - task_start,
-                                error_override=(
-                                    "AuthError: token expired/invalid and no "
-                                    "token_refresh_callback (or OAuth credentials) "
-                                    "was provided"
-                                )
-                            )
+                            return build_pass1_result(row, None, {}, time.time() - task_start,
+                                error_override="AuthError: no token_refresh_callback / OAuth credentials provided")
 
+                if meta.get("error"):
+                    return build_pass1_result(row, None, meta, time.time() - task_start)
+
+                cleaned = validate_and_repair_pass1(raw)
                 actual_tokens = meta.get("total_tokens")
                 if actual_tokens:
-                    await token_mgr.adjust_tokens(ESTIMATED_TOKENS_PER_CALL, int(actual_tokens))
-
-                return build_result(row, analysis, meta, time.time() - task_start)
+                    await token_mgr.adjust_tokens(ESTIMATED_TOKENS_PASS1, int(actual_tokens))
+                return build_pass1_result(row, cleaned, meta, time.time() - task_start)
 
             except Exception as e:
-                return build_result(
-                    row,
-                    {"customer_message": None, "agent_message": None, "confidence": 0.0},
-                    {
-                        "prompt_tokens": None, "completion_tokens": None, "total_tokens": None,
-                        "api_latency": None, "request_id": None, "error": None
-                    },
-                    time.time() - task_start,
-                    error_override=f"{type(e).__name__}: {str(e)}"
+                return build_pass1_result(row, None, {}, time.time() - task_start,
+                    error_override=f"{type(e).__name__}: {str(e)}")
+
+    return await _run_batch_loop(df, process_one, PASS1_CHECKPOINT_COLUMNS,
+                                  checkpoint_table, save_pass1_checkpoint, "PASS 1")
+
+
+# ================================================================
+# SECTION 12b — ASYNC BATCH: PASS 2 (repeat-contact comparison)
+# ================================================================
+#
+# Runs against a table that already JOINS each episode to its
+# immediately preceding episode's Pass-1 result (see
+# build_pass2_input in Section 15/17). Episodes with no previous
+# episode are filtered out BEFORE this function is called - they
+# are deterministically FIRST_CONTACT and never need an LLM call.
+# ================================================================
+
+async def run_pass2_batch(
+    pass2_input_df: pd.DataFrame,
+    token: str,
+    modelgateway_baseurl: str,
+    checkpoint_table: Optional[str] = None,
+    token_refresh_callback: Optional[Callable[[], str]] = None,
+    tenant_id=None, client_id=None, client_secret=None, scopes=None
+) -> pd.DataFrame:
+
+    if token_refresh_callback is None and all([tenant_id, client_id, client_secret, scopes]):
+        token_refresh_callback = build_oauth_refresh_callback(tenant_id, client_id, client_secret, scopes)
+
+    df = pass2_input_df.reset_index(drop=True).copy()
+    original_count = len(df)
+
+    if checkpoint_table:
+        processed_keys = load_processed_episode_keys(checkpoint_table, ["ClaimNumber", "ContactEpisode"])
+        if processed_keys:
+            before = len(df)
+            key_series = list(zip(df["ClaimNumber"].astype(str), df["ContactEpisode"].astype(str)))
+            keep_mask = [k not in processed_keys for k in key_series]
+            df = df[keep_mask].copy()
+            print(f"[CHECKPOINT] Pass 2 previously successful: {before - len(df):,}; remaining: {len(df):,}")
+
+    total_rows = len(df)
+    print("\n" + "=" * 80)
+    print("FCR PASS 2 - REPEAT CONTACT COMPARISON (current vs. immediately previous episode)")
+    print("=" * 80)
+    print(f"Input episode-pairs: {original_count:,}  |  To process: {total_rows:,}  |  Concurrency: {MAX_CONCURRENCY}")
+    print("=" * 80 + "\n")
+
+    if total_rows == 0:
+        return pd.DataFrame(columns=PASS2_CHECKPOINT_COLUMNS)
+
+    semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
+    token_mgr = TokenBudgetManager(TOKEN_LIMIT, WINDOW_SECONDS, SAFETY_BUFFER)
+    rate_coordinator = GlobalRateLimitCoordinator()
+    request_limiter = RequestRateLimiter(MAX_REQUESTS_PER_MINUTE)
+    token_holder = TokenHolder(token)
+
+    async def process_one(row: pd.Series):
+        task_start = time.time()
+        async with semaphore:
+            try:
+                prompt = build_pass2_prompt(
+                    current_primary_topic=row.get("primary_topic", ""),
+                    current_topics_json=row.get("topics_json", "[]"),
+                    current_primary_demand=row.get("primary_demand_type", ""),
+                    current_episode_text=row.get("_episode_text", ""),
+                    previous_primary_topic=row.get("prev_primary_topic", ""),
+                    previous_topics_json=row.get("prev_topics_json", "[]"),
+                    previous_primary_demand=row.get("prev_primary_demand_type", ""),
+                    previous_resolution_status=row.get("prev_resolution_status", "Unclear"),
+                    gap_hours=row.get("GapHours")
                 )
+                rl_attempts, auth_attempts = 0, 0
+                await token_mgr.reserve_tokens(ESTIMATED_TOKENS_PASS2)
 
-    tasks = [asyncio.create_task(process_single_row(row)) for _, row in df.iterrows()]
+                while True:
+                    await rate_coordinator.wait_if_paused()
+                    await request_limiter.acquire()
+                    await token_holder.ensure_fresh(token_refresh_callback)
+                    try:
+                        raw, meta = await asyncio.to_thread(
+                            call_fcr_model, prompt, PASS2_JSON_SCHEMA, MAX_TOKENS_PASS2,
+                            RETRIES, token_holder.token, modelgateway_baseurl, API_TIMEOUT
+                        )
+                        rate_coordinator.note_success()
+                        break
+                    except RateLimitError as rle:
+                        rl_attempts += 1
+                        if rl_attempts > MAX_ROW_RATE_LIMIT_RETRIES:
+                            return build_pass2_result(row, None, {}, time.time() - task_start,
+                                error_override=f"RateLimitError: still throttled after {MAX_ROW_RATE_LIMIT_RETRIES} retries")
+                        await rate_coordinator.trigger_pause(rle.retry_after)
+                        continue
+                    except AuthError:
+                        auth_attempts += 1
+                        if auth_attempts > MAX_ROW_AUTH_RETRIES:
+                            return build_pass2_result(row, None, {}, time.time() - task_start,
+                                error_override=f"AuthError: still unauthorized after {MAX_ROW_AUTH_RETRIES} refresh attempts")
+                        try:
+                            await token_holder.refresh(token_refresh_callback)
+                            continue
+                        except AuthError:
+                            return build_pass2_result(row, None, {}, time.time() - task_start,
+                                error_override="AuthError: no token_refresh_callback / OAuth credentials provided")
 
-    all_results = []
-    checkpoint_buffer = []
-    successful = 0
-    failed = 0
+                if meta.get("error"):
+                    return build_pass2_result(row, None, meta, time.time() - task_start)
+
+                cleaned = validate_and_repair_pass2(raw)
+                actual_tokens = meta.get("total_tokens")
+                if actual_tokens:
+                    await token_mgr.adjust_tokens(ESTIMATED_TOKENS_PASS2, int(actual_tokens))
+                return build_pass2_result(row, cleaned, meta, time.time() - task_start)
+
+            except Exception as e:
+                return build_pass2_result(row, None, {}, time.time() - task_start,
+                    error_override=f"{type(e).__name__}: {str(e)}")
+
+    return await _run_batch_loop(df, process_one, PASS2_CHECKPOINT_COLUMNS,
+                                  checkpoint_table, save_pass2_checkpoint, "PASS 2")
+
+
+# ================================================================
+# SHARED BATCH-LOOP RUNNER (progress, checkpoint buffering) used
+# by both Pass 1 and Pass 2 to avoid duplicating the driver loop.
+# ================================================================
+
+async def _run_batch_loop(df, process_one_fn, checkpoint_columns, checkpoint_table,
+                           save_fn, label):
+    tasks = [asyncio.create_task(process_one_fn(row)) for _, row in df.iterrows()]
+
+    all_results, checkpoint_buffer = [], []
+    successful, failed = 0, 0
     start_time = time.time()
+    total_rows = len(df)
 
-    progress = tqdm(
-        total=total_rows, desc="Telephony LLM", unit="rows",
-        dynamic_ncols=True, mininterval=2, smoothing=0.1
-    )
+    progress = tqdm(total=total_rows, desc=f"FCR {label}", unit="rows",
+                     dynamic_ncols=True, mininterval=2, smoothing=0.1)
 
     try:
-        for completed_task in asyncio.as_completed(tasks):
-            result = await completed_task
+        for completed in asyncio.as_completed(tasks):
+            result = await completed
             all_results.append(result)
             checkpoint_buffer.append(result)
 
@@ -1378,63 +1552,45 @@ async def process_telephony_batch_async(
             processed = successful + failed
             elapsed = time.time() - start_time
             rate = processed / elapsed * 60 if elapsed > 0 else 0
-            remaining = total_rows - processed
-            eta_seconds = remaining / (processed / elapsed) if processed > 0 else 0
+            eta = (total_rows - processed) / (processed / elapsed) if processed > 0 and elapsed > 0 else 0
 
             progress.update(1)
-            progress.set_postfix({
-                "ok": f"{successful:,}",
-                "failed": f"{failed:,}",
-                "rate": f"{rate:.1f}/min",
-                "ETA": format_eta(eta_seconds)
-            }, refresh=False)
+            progress.set_postfix({"ok": f"{successful:,}", "failed": f"{failed:,}",
+                                   "rate": f"{rate:.1f}/min", "ETA": format_eta(eta)}, refresh=False)
 
             if len(checkpoint_buffer) >= CHECKPOINT_EVERY:
                 if checkpoint_table:
-                    save_checkpoint(checkpoint_buffer, checkpoint_table)
+                    save_fn(checkpoint_buffer, checkpoint_table)
                 checkpoint_buffer = []
 
     except asyncio.CancelledError:
-        for task in tasks:
-            if not task.done():
-                task.cancel()
+        for t in tasks:
+            if not t.done():
+                t.cancel()
         raise
-
     finally:
         progress.close()
 
-    if checkpoint_buffer:
-        if checkpoint_table:
-            save_checkpoint(checkpoint_buffer, checkpoint_table)
+    if checkpoint_buffer and checkpoint_table:
+        save_fn(checkpoint_buffer, checkpoint_table)
 
     elapsed = time.time() - start_time
     rate = len(all_results) / elapsed * 60 if elapsed > 0 else 0
-
-    print()
-    print("=" * 80)
-    print("BATCH COMPLETE")
-    print("=" * 80)
-    print(f"Processed:       {len(all_results):,}")
-    print(f"Successful:      {successful:,}")
-    print(f"Failed:          {failed:,}")
-    print(f"Elapsed:         {format_duration(elapsed)}")
-    print(f"Rate:            {rate:.1f} records/min")
+    print("\n" + "=" * 80)
+    print(f"{label} COMPLETE  |  Processed: {len(all_results):,}  Successful: {successful:,}  "
+          f"Failed: {failed:,}  Elapsed: {format_duration(elapsed)}  Rate: {rate:.1f}/min")
     print("=" * 80)
 
     return pd.DataFrame(all_results)
 
 
-# ================================================================
-# HELPERS (unchanged)
-# ================================================================
-
 def format_eta(seconds: float) -> str:
     if not seconds or seconds <= 0:
         return "--"
     seconds = int(seconds)
-    days, remainder = divmod(seconds, 86400)
-    hours, remainder = divmod(remainder, 3600)
-    minutes, secs = divmod(remainder, 60)
+    days, r = divmod(seconds, 86400)
+    hours, r = divmod(r, 3600)
+    minutes, secs = divmod(r, 60)
     if days > 0:
         return f"{days}d {hours}h"
     if hours > 0:
@@ -1449,112 +1605,109 @@ def format_duration(seconds: float) -> str:
 
 
 # ================================================================
-# ASYNC DATE-CHUNK RUNNER (passes through token_refresh_callback)
+# SECTION 15 — BUILD PASS-2 INPUT
+# (joins each episode with PreviousContactEpisode to that PREVIOUS
+#  episode's ALREADY-COMPUTED Pass-1 result. This is the entire
+#  leakage guard: the join is strictly to PreviousContactEpisode,
+#  never to any later episode, and it reads from a Pass-1
+#  checkpoint table that must already exist / be complete for the
+#  claim in question.)
 # ================================================================
 
-async def run_telephony_llm_batch_async(
-    df: pd.DataFrame,
-    token: str,
-    modelgateway_baseurl: str,
-    checkpoint_table: str = None,
-    output_table: str = None,
-    date_chunks: List[Tuple[str, str]] = None,
-    token_refresh_callback: Optional[Callable[[], str]] = None,
-    tenant_id: Optional[str] = None,
-    client_id: Optional[str] = None,
-    client_secret: Optional[str] = None,
-    scopes: Optional[str] = None
-) -> pd.DataFrame:
-
-    all_results = []
-
-    if date_chunks:
-        for start_date, end_date in date_chunks:
-            print()
-            print("=" * 80)
-            print(f"DATE CHUNK: {start_date} -> {end_date}")
-            print("=" * 80)
-
-            start_ts = pd.Timestamp(start_date)
-            end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1)
-            timestamps = pd.to_datetime(df["ConversationStartTimestamp"], errors="coerce")
-
-            df_chunk = df[(timestamps >= start_ts) & (timestamps < end_ts)].copy()
-            print(f"[CHUNK] Input rows: {len(df_chunk):,}")
-
-            if len(df_chunk) == 0:
-                print("[CHUNK] No records.")
-                continue
-
-            chunk_results = await process_telephony_batch_async(
-                df_chunk, token, modelgateway_baseurl,
-                checkpoint_table, output_table, token_refresh_callback,
-                tenant_id, client_id, client_secret, scopes
-            )
-            all_results.append(chunk_results)
-
-    else:
-        results = await process_telephony_batch_async(
-            df, token, modelgateway_baseurl,
-            checkpoint_table, output_table, token_refresh_callback,
-            tenant_id, client_id, client_secret, scopes
-        )
-        all_results.append(results)
-
-    if all_results:
-        return pd.concat(all_results, ignore_index=True)
-
-    return pd.DataFrame(columns=CHECKPOINT_COLUMNS)
-
-
-# ================================================================
-# NOTEBOOK-SAFE SYNC WRAPPER
-# ================================================================
-
-def run_telephony_llm_batch(
-    df: pd.DataFrame,
-    token: str,
-    modelgateway_baseurl: str,
-    checkpoint_table: str = None,
-    output_table: str = None,
-    date_chunks: List[Tuple[str, str]] = None,
-    token_refresh_callback: Optional[Callable[[], str]] = None,
-    tenant_id: Optional[str] = None,
-    client_id: Optional[str] = None,
-    client_secret: Optional[str] = None,
-    scopes: Optional[str] = None
-) -> pd.DataFrame:
+def build_pass2_input(episodes_with_meta: pd.DataFrame, pass1_results: pd.DataFrame) -> pd.DataFrame:
     """
-    token (required):
-        Your initial bearer token, exactly as before.
-
-    Automatic token refresh - pick ONE of the following, both optional:
-
-      Option A - built-in OAuth2 client-credentials refresh:
-        Pass tenant_id, client_id, client_secret, scopes. The batch
-        will call get_oauth_token(...) itself, both proactively
-        (~2 min before the JWT's `exp` claim) and reactively (on
-        any 401/403), and coordinate so only one concurrent worker
-        ever hits the token endpoint at a time.
-
-      Option B - your own refresh logic:
-        Pass token_refresh_callback: a zero-arg function (sync or
-        async) that returns a fresh bearer token string. Use this
-        if your token doesn't come from Azure AD client-credentials
-        (e.g. a secrets-manager-backed helper, a different IdP).
-
-    If neither is provided, a 401/403 is recorded as a failed row
-    (and retried on the next run via checkpoint resume) instead of
-    crashing the whole batch - same as before.
+    episodes_with_meta: the Pass-1 input episodes (must include
+        ClaimNumber, ContactEpisode, PreviousContactEpisode, GapHours,
+        _episode_text) - PreviousContactEpisode comes from your
+        EXISTING deterministic EpisodeLinks view, not recomputed here.
+    pass1_results: the (successful, error IS NULL) rows from the
+        Pass-1 checkpoint table / this run's Pass-1 output.
     """
+    p1 = pass1_results[pass1_results["error"].isna()].copy()
+    p1_keyed = p1.set_index(["ClaimNumber", "ContactEpisode"])
 
-    async def runner():
-        return await run_telephony_llm_batch_async(
-            df, token, modelgateway_baseurl, checkpoint_table,
-            output_table, date_chunks, token_refresh_callback,
-            tenant_id, client_id, client_secret, scopes
-        )
+    current = episodes_with_meta[episodes_with_meta["PreviousContactEpisode"].notna()].copy()
 
+    def lookup_prev(row, field):
+        key = (row["ClaimNumber"], row["PreviousContactEpisode"])
+        if key in p1_keyed.index:
+            return p1_keyed.loc[key, field]
+        return None
+
+    current["prev_primary_topic"] = current.apply(lambda r: lookup_prev(r, "primary_topic"), axis=1)
+    current["prev_topics_json"] = current.apply(lambda r: lookup_prev(r, "topics_json"), axis=1)
+    current["prev_primary_demand_type"] = current.apply(lambda r: lookup_prev(r, "primary_demand_type"), axis=1)
+    current["prev_resolution_status"] = current.apply(lambda r: lookup_prev(r, "resolution_status"), axis=1)
+
+    # need current episode's OWN pass-1 fields too (topic/demand),
+    # not just previous - join those in as well
+    current = current.set_index(["ClaimNumber", "ContactEpisode"]).join(
+        p1_keyed[["primary_topic", "topics_json", "primary_demand_type"]], how="inner", rsuffix="_self"
+    ).reset_index()
+
+    # drop rows where the previous episode's Pass-1 result isn't
+    # available (still processing / failed) - these are retried in
+    # a later Pass-2 run once Pass 1 for that earlier episode lands.
+    before = len(current)
+    current = current[current["prev_primary_topic"].notna()].copy()
+    skipped = before - len(current)
+    if skipped:
+        print(f"[PASS2 INPUT] Skipped {skipped:,} episodes whose previous episode's Pass-1 result "
+              f"isn't available yet - they'll be picked up once Pass 1 completes for that episode.")
+
+    return current
+
+
+# ================================================================
+# SECTION 16 — DETERMINISTIC RISK-SCORE COMBINER
+# (NOT an LLM call. Transparent, documented, auditable. Produces
+#  `risk_score`, explicitly NOT `probability`.)
+# ================================================================
+#
+# risk_score in [0, 1] is a weighted blend of:
+#   0.45 * repeat_contact_llm_confidence   (only meaningful when repeat_contact = True)
+#   0.30 * topic_similarity
+#   0.15 * time_proximity_signal   (1.0 if RepeatCandidateType == REPEAT_CANDIDATE,
+#                                     0.5 if LONG_GAP_CANDIDATE, 0.0 otherwise/FIRST_CONTACT)
+#   0.10 * prior_unresolved_signal (1.0 if prev_resolution_status in
+#                                     {NotResolved, PartiallyResolved}, else 0.0)
+# and is forced to 0 whenever the LLM's own `repeat_contact` flag is False,
+# since a low-confidence "yes it's a repeat" should still rank above a
+# high-confidence "no it isn't."
+#
+# This weighting is a starting point for stakeholder review, not a
+# statistically fitted model - document it as such wherever it is used.
+# `probability` is left NULL: populate it only once a supervised
+# model (logistic regression / GBM) has been trained on labelled
+# outcomes using topic_similarity, repeat_contact_llm_confidence,
+# GapHours, RepeatCandidateType and prev_resolution_status as
+# features, with proper calibration (e.g. isotonic/Platt scaling).
+# ================================================================
+
+def compute_risk_score(row: pd.Series) -> Optional[float]:
+    if not row.get("repeat_contact"):
+        return 0.0
+
+    llm_conf = row.get("repeat_contact_llm_confidence")
+    topic_sim = row.get("topic_similarity")
+    if llm_conf is None or topic_sim is None:
+        return None
+
+    candidate_type = row.get("RepeatCandidateType")
+    time_signal = {"REPEAT_CANDIDATE": 1.0, "LONG_GAP_CANDIDATE": 0.5}.get(candidate_type, 0.0)
+
+    prev_status = row.get("prev_resolution_status")
+    prior_unresolved_signal = 1.0 if prev_status in ("NotResolved", "PartiallyResolved") else 0.0
+
+    score = (0.45 * llm_conf) + (0.30 * topic_sim) + (0.15 * time_signal) + (0.10 * prior_unresolved_signal)
+    return round(max(0.0, min(1.0, score)), 4)
+
+
+# ================================================================
+# SECTION 17 — NOTEBOOK-SAFE SYNCHRONOUS WRAPPERS
+# ================================================================
+
+def _run_async(coro):
     try:
         asyncio.get_running_loop()
         loop_is_running = True
@@ -1562,26 +1715,190 @@ def run_telephony_llm_batch(
         loop_is_running = False
 
     if not loop_is_running:
-        return asyncio.run(runner())
+        return asyncio.run(coro)
 
-    result_container = []
-    exception_container = []
+    result_container, exception_container = [], []
 
     def thread_target():
         try:
-            result = asyncio.run(runner())
-            result_container.append(result)
+            result_container.append(asyncio.run(coro))
         except Exception as e:
             exception_container.append(e)
 
-    thread = threading.Thread(target=thread_target)
-    thread.start()
-    thread.join()
+    t = threading.Thread(target=thread_target)
+    t.start()
+    t.join()
 
     if exception_container:
         raise exception_container[0]
+    return result_container[0] if result_container else None
 
-    if result_container:
-        return result_container[0]
 
-    return pd.DataFrame(columns=CHECKPOINT_COLUMNS)
+def run_fcr_pass1(episodes_df, resolved_cols, token, modelgateway_baseurl,
+                   checkpoint_table=None, token_refresh_callback=None,
+                   tenant_id=None, client_id=None, client_secret=None, scopes=None):
+    return _run_async(run_pass1_batch(
+        episodes_df, resolved_cols, token, modelgateway_baseurl, checkpoint_table,
+        token_refresh_callback, tenant_id, client_id, client_secret, scopes
+    ))
+
+
+def run_fcr_pass2(pass2_input_df, token, modelgateway_baseurl,
+                   checkpoint_table=None, token_refresh_callback=None,
+                   tenant_id=None, client_id=None, client_secret=None, scopes=None):
+    return _run_async(run_pass2_batch(
+        pass2_input_df, token, modelgateway_baseurl, checkpoint_table,
+        token_refresh_callback, tenant_id, client_id, client_secret, scopes
+    ))
+
+
+# ================================================================
+# SECTION 18 — SAMPLE / TEST EXECUTION (run this before the full job)
+# ================================================================
+#
+# Usage from a Databricks notebook cell:
+#
+#   from fcr_llm_processor import *
+#
+#   final_combined_channels = spark.table(
+#       "axahealth_dataplatform_pd_lab.jogesh_rajiyan_axahealth.finalcombinedchannels"
+#   ).toPandas()
+#
+#   resolved = inspect_input_schema(list(final_combined_channels.columns))
+#
+#   sample_df = final_combined_channels.sample(n=5, random_state=42)
+#
+#   pass1_sample = run_fcr_pass1(
+#       sample_df, resolved,
+#       token=dbutils.secrets.get("scope", "modelgateway-token"),
+#       modelgateway_baseurl="https://your-model-gateway",
+#       checkpoint_table=None   # no checkpoint for a sample run
+#   )
+#
+#   display(pass1_sample)
+#
+#   Inspect pass1_sample manually before running the full batch.
+#   Only after Pass 1 looks right for the sample, build the Pass 2
+#   input (Section 15) against a small slice and sample-test Pass 2
+#   the same way.
+# ================================================================
+
+
+# ================================================================
+# SECTION 19 — SPARK OUTPUT TABLE CREATION
+# ================================================================
+
+def build_final_fcr_output(
+    episodes_with_meta_pdf: pd.DataFrame,   # Pass-1 input episodes, with deterministic cols
+    pass1_results_pdf: pd.DataFrame,
+    pass2_results_pdf: pd.DataFrame,
+    output_table: str
+):
+    """
+    Builds the final analytical dataset at EPISODE grain (see
+    design rationale - Episode is the deterministic unit that
+    PreviousContactEpisode links are built on). One row per
+    episode. First-contact episodes get repeat_contact = False /
+    risk_score = 0.0 deterministically, with no LLM columns for
+    Pass 2 (they were never sent to Pass 2).
+    """
+    det = episodes_with_meta_pdf[[
+        "ClaimNumber", "ContactEpisode", "ConversationId", "EpisodeStart", "EpisodeEnd",
+        "MembershipNumber", "PreviousContactEpisode", "GapHours", "RepeatCandidateType",
+        "HasPreviousEpisode"
+    ]].drop_duplicates(subset=["ClaimNumber", "ContactEpisode"])
+
+    p1 = pass1_results_pdf[pass1_results_pdf["error"].isna()].drop(columns=["error"])
+    p2 = pass2_results_pdf[pass2_results_pdf["error"].isna()].drop(columns=["error"]) if len(pass2_results_pdf) else pass2_results_pdf
+
+    merged = det.merge(p1, on=["ClaimNumber", "ContactEpisode"], how="left", suffixes=("", "_p1"))
+
+    if len(p2):
+        p2_small = p2[[
+            "ClaimNumber", "ContactEpisode", "topic_similarity", "same_underlying_issue",
+            "continuing_previous_issue", "genuinely_new_issue", "repeat_contact",
+            "repeat_contact_llm_confidence", "repeat_contact_reason", "repeat_contact_evidence",
+            "true_failure_supported"
+        ]]
+        merged = merged.merge(p2_small, on=["ClaimNumber", "ContactEpisode"], how="left")
+    else:
+        for c in ["topic_similarity", "same_underlying_issue", "continuing_previous_issue",
+                  "genuinely_new_issue", "repeat_contact", "repeat_contact_llm_confidence",
+                  "repeat_contact_reason", "repeat_contact_evidence", "true_failure_supported"]:
+            merged[c] = None
+
+    # first-contact episodes: deterministic, no LLM call was made for Pass 2
+    first_contact_mask = merged["PreviousContactEpisode"].isna()
+    merged.loc[first_contact_mask, "repeat_contact"] = False
+    merged.loc[first_contact_mask, "same_underlying_issue"] = False
+
+    # need prev_resolution_status for the risk-score combiner - pull
+    # it back in from the pass2 input build, or recompute via self-join
+    prev_status_lookup = p1.set_index(["ClaimNumber", "ContactEpisode"])["resolution_status"]
+    merged["prev_resolution_status"] = merged.apply(
+        lambda r: prev_status_lookup.get((r["ClaimNumber"], r["PreviousContactEpisode"]))
+        if pd.notna(r["PreviousContactEpisode"]) else None,
+        axis=1
+    )
+
+    merged["risk_score"] = merged.apply(compute_risk_score, axis=1)
+    merged["probability"] = None  # see Section 16 - not populated until a labelled model exists
+
+    spark_df = spark.createDataFrame(merged.astype(object).where(pd.notnull(merged), None))
+    spark_df.write.mode("overwrite").format("delta").option("overwriteSchema", "true").saveAsTable(output_table)
+    print(f"[OUTPUT] Wrote {merged.shape[0]:,} episode-level rows to {output_table}")
+    return spark_df
+
+
+# ================================================================
+# SECTION 19b — VALIDATION / QUALITY CHECKS
+# ================================================================
+
+def run_output_quality_checks(spark_df):
+    print("\n" + "=" * 80)
+    print("FCR OUTPUT QUALITY CHECKS")
+    print("=" * 80)
+
+    total = spark_df.count()
+    print(f"Total episode rows: {total:,}")
+
+    null_pass1 = spark_df.filter(F.col("primary_demand_type").isNull()).count()
+    print(f"Episodes missing Pass-1 output (still pending / failed): {null_pass1:,}")
+
+    non_first = spark_df.filter(F.col("PreviousContactEpisode").isNotNull())
+    non_first_total = non_first.count()
+    null_pass2 = non_first.filter(F.col("repeat_contact").isNull()).count()
+    print(f"Non-first episodes missing Pass-2 output: {null_pass2:,} / {non_first_total:,}")
+
+    repeat_rate = (
+        non_first.filter(F.col("repeat_contact") == True).count() / non_first_total
+        if non_first_total else 0
+    )
+    print(f"Repeat-contact rate among non-first episodes (LLM-informed): {repeat_rate:.1%}")
+
+    demand_dist = spark_df.groupBy("primary_demand_type").count().orderBy(F.desc("count"))
+    print("\nPrimary demand type distribution:")
+    demand_dist.show(truncate=False)
+
+    resolution_dist = spark_df.groupBy("resolution_status").count().orderBy(F.desc("count"))
+    print("Resolution status distribution:")
+    resolution_dist.show(truncate=False)
+
+    # sanity check: how does the new LLM-informed repeat_contact
+    # compare to the OLD naive claim+time-only flag, if present
+    if "IsRepeatContact" in spark_df.columns:
+        comparison = (
+            spark_df.filter(F.col("PreviousContactEpisode").isNotNull())
+            .groupBy("IsRepeatContact", "repeat_contact")
+            .count()
+            .orderBy("IsRepeatContact", "repeat_contact")
+        )
+        print("Old naive flag (IsRepeatContact) vs new LLM-informed flag (repeat_contact):")
+        comparison.show(truncate=False)
+
+    coverage_check = spark_df.filter(
+        (F.col("primary_topic_coverage_pct") < 0) | (F.col("primary_topic_coverage_pct") > 100)
+    ).count()
+    print(f"Rows with out-of-range primary_topic_coverage_pct: {coverage_check:,}")
+
+    print("=" * 80)
