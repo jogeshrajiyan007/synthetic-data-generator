@@ -1,754 +1,806 @@
-# GovernGPT
-## Agentic Data Intelligence Platform Architecture & Technical Reference
+# FCR LLM Processor — Complete Execution Guide
 
-**Version:** 4.0.0  
-**Classification:** Technical Documentation  
-**Domain:** Enterprise Data Governance & Intelligence
+**Starting point:** `finalcombinedchannels` (your existing combined MOL+Telephony episodes table)  
+**End point:** `fcr_analysis` (clean, analysis-ready dataset with demand/topic/repeat classification)
 
 ---
 
-## 1. Executive Summary
-
-GovernGPT is an enterprise-grade AI-powered Data Intelligence platform that combines a Retrieval-Augmented Generation (RAG) engine for governance knowledge with a live agentic SQL execution layer against Databricks, and professional document generation capabilities. The platform enables Data Governance teams, Data Engineers, and Business Analysts to interrogate complex datasets, enforce governance policies, and produce professional documentation — all through a single conversational interface.
-
-GovernGPT is built on:
-- **Backend:** FastAPI (Python 3.11)
-- **Frontend:** Next.js 14 with React
-- **Vector Store:** ChromaDB with all-MiniLM-L6-v2 embeddings
-- **LLM Integration:** GPT-4o via OpenAI API
-- **Data Processing:** LangChain 0.2.x
-- **Database:** SQLite with WAL mode
-
-All embeddings are generated locally using all-MiniLM-L6-v2 model — no data leaves your network for embedding operations.
-
----
-
-## 2. System Architecture Overview
-
-GovernGPT is structured as a two-tier application: a Python backend exposing a REST API, and a React/Next.js frontend. They communicate exclusively over HTTP. All AI inference is configurable to route through your preferred LLM provider.
-
-### 2.1 Technology Stack
-
-| Component | Technology | Version | Purpose |
-| --- | --- | --- | --- |
-| **Backend** | FastAPI | 0.104+ | REST API, async request handling |
-| **Web Framework** | Python | 3.11+ | Core runtime |
-| **Frontend** | Next.js | 14.0+ | React SSR, optimized builds |
-| **Frontend State** | Zustand | 4.4+ | Client state management |
-| **Vector Database** | ChromaDB | 0.4+ | Persistent vector storage |
-| **LLM Framework** | LangChain | 0.2.x | Orchestration, chains, agents |
-| **Embeddings** | all-MiniLM-L6-v2 | 1.0 | 384-dim local embeddings |
-| **SQL Execution** | Databricks SDK | 0.14+ | Data lake query execution |
-| **Document Gen** | python-docx | 0.8.11 | .docx file creation |
-| **Local Database** | SQLite | 3.40+ | History, configs, connections |
-| **Data Querying** | Databricks SQL | Latest | SQL warehouse backend |
-| **Authentication** | OAuth2 / JWT | Industry standard | Secure API access |
-| **Container Runtime** | Docker | Optional | Deployment isolation |
-
-### 2.2 Directory Structure
-
-```
-GovernGPT/
-├── backend/                    ← FastAPI application root
-│   ├── main.py                ← App factory, lifespan, router registration
-│   ├── config.py              ← LLM credentials, paths, governance taxonomy
-│   ├── auth.py                ← Thread-safe OAuth2 TokenManager
-│   ├── llm.py                 ← LLM chat wrapper, embeddings singleton
-│   ├── db.py                  ← SQLite utilities (WAL mode, auto-schema)
-│   ├── models/
-│   │   └── schemas.py         ← Pydantic request/response models
-│   ├── routers/               ← FastAPI route handlers
-│   │   ├── ingest.py          ← POST /api/ingest
-│   │   ├── query.py           ← POST /api/query/
-│   │   ├── databricks.py      ← /api/databricks/*
-│   │   ├── sql_agent.py       ← /api/sql-agent/*
-│   │   └── document.py        ← /api/document/*
-│   ├── services/
-│   │   ├── rag.py             ← Hybrid RAG + SQL Agent routing engine
-│   │   ├── ingestion.py       ← File loaders, CSV profiler
-│   │   ├── chunking.py        ← RecursiveTextSplitter + metadata enrichment
-│   │   ├── vectorstore.py     ← ChromaDB build/load/add
-│   │   ├── memory.py          ← SQLite conversation history
-│   │   ├── document_generator.py ← LLM → JSON → Node.js → .docx pipeline
-│   │   └── databricks/
-│   │       ├── client.py      ← AES-256 PAT store, SQL execution
-│   │       ├── catalog.py     ← Hive Metastore + Unity Catalog browser
-│   │       ├── profiler.py    ← Statistical profiling, PII detection
-│   │       ├── ingestion.py   ← Profile → chunk → vectorise pipeline
-│   │       └── approved_sources.py ← Per-session SQL whitelist (SQLite)
-│   ├── chroma_db/             ← Persisted ChromaDB vector store
-│   ├── llm_logs.db            ← SQLite: history, logs, connections
-│   ├── generated_docs/        ← Output .docx files
-│   └── models/all-MiniLM-L6-v2/ ← Local embedding model
-│
-├── frontend-governgpt/        ← Next.js 14 application root
-│   ├── src/
-│   │   ├── app/               ← Next.js App Router
-│   │   ├── components/        ← React components
-│   │   │   ├── chat/          ← ChatWindow, MessageBubble, PromptGuidePanel
-│   │   │   ├── databricks/    ← DatabricksPanel, CatalogBrowser, ConnectModal
-│   │   │   ├── sources/       ← SourcePanel, UploadDropzone, FileItem
-│   │   │   └── session/       ← SessionGrid, CreateSessionModal
-│   │   ├── lib/api.ts         ← Type-safe HTTP client
-│   │   ├── store/index.ts     ← Zustand store (persisted)
-│   │   └── types/index.ts     ← Shared TypeScript interfaces
-│   ├── public/                ← Static assets
-│   ├── next.config.js         ← Next.js configuration
-│   └── package.json           ← Dependencies
-│
-└── docker-compose.yml         ← Local development setup
-```
-
----
-
-## 3. RAG Engine — Conversational Data Intelligence
-
-The RAG (Retrieval-Augmented Generation) engine is the core knowledge layer of GovernGPT. It ingests structured and unstructured documents, builds a persistent vector store, and answers questions by retrieving semantically relevant context and passing it to the LLM. All conversation turns are stored in SQLite for multi-turn memory.
-
-### 3.1 Document Ingestion Pipeline
-
-The ingestion pipeline processes 12 file types through format-specific loaders:
-
-| File Type | Loader | Key Features |
-| --- | --- | --- |
-| **.pdf** | PyPDF2 | Text extraction, page-level metadata |
-| **.docx** | python-docx | Paragraph structure, table extraction |
-| **.xlsx** | openpyxl | Sheet names, cell-level data |
-| **.csv** | pandas | Auto-detect schema, statistical profile |
-| **.txt** | Raw file read | UTF-8 encoding, line preservation |
-| **.json** | json.loads() | Hierarchical key-value extraction |
-| **.md** | Markdown parser | Section-level hierarchy |
-| **.pptx** | python-pptx | Slide text, speaker notes |
-| **.html** | BeautifulSoup | DOM structure, semantic tags |
-| **.xml** | xml.etree | Tree traversal, attribute extraction |
-| **.sql** | Raw read | Query parsing, comment removal |
-| **.log** | Log parser | Timestamp, level, message extraction |
-
-Each document receives:
-- `source_id`: Unique identifier (filename + timestamp)
-- `source_type`: File extension category
-- `uploaded_by`: User who uploaded
-- `uploaded_at`: ISO timestamp
-- `file_size`: Bytes
-- `page_count`: For multipage documents
-- `extraction_method`: Loader used
-
-### 3.2 Chunking and Metadata Enrichment
-
-After loading, all documents pass through `chunk_and_enrich()` which uses LangChain's RecursiveCharacterTextSplitter with:
-- **chunk_size:** 800 characters
-- **overlap:** 100 characters
-- **separators:** `['\n\n', '\n', '. ', ' ']` (semantic boundaries)
-
-Each chunk receives a rich metadata envelope persisted to both ChromaDB and SQLite:
-
-```python
-metadata = {
-    "source_id": "claims_policy_v2.pdf_2025-04-21",
-    "source_type": "pdf",
-    "chunk_index": 42,
-    "total_chunks": 156,
-    "page_number": 3,
-    "section_title": "Data Quality Dimensions",
-    "semantic_category": "governance",
-    "pii_detected": False,
-    "pii_types": [],
-    "sensitivity_tier": "internal",
-    "keywords": ["quality", "validation", "rules"],
-    "char_start": 2450,
-    "char_end": 3250,
-    "chunk_hash": "sha256:abc123..."
-}
-```
-
-### 3.3 Vector Store (ChromaDB)
-
-Chunks are embedded using all-MiniLM-L6-v2 (384-dimensional vectors, L2-normalised) and stored in a persistent ChromaDB collection named `governance_docs`. All metadata values are flattened to strings before storage (ChromaDB rejects lists/booleans). The vector store persists on disk at `chroma_db/` and survives server restarts.
-
-The retriever uses **Maximum Marginal Relevance (MMR)** search:
-- `fetch_k = k × 6` candidates retrieved by cosine similarity
-- `k × 2` selected by MMR algorithm (diversity over pure relevance)
-- **Multi-source guarantee:** If only 1 source represented, force-fetch from all other source files
-- **Excluded tables:** Chunks from removed ingest items are filtered before context building
-- **Truncation:** 1,500 character truncation per chunk prevents context window overflow
-
-### 3.4 Query Routing: 3-Stage Gate
-
-Every query entering `query_governance()` passes through a 3-stage routing gate before any LLM call:
-
-**Stage 1 — Regex Intent Detection**
-```
-Pattern matching for SQL keywords:
-  ✓ SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP
-  ✓ EXPLAIN, DESC, SHOW, CALL, EXECUTE
-  ✗ Fails → proceed to Stage 2
-```
-
-**Stage 2 — LLM Intent Classifier**
-```
-Prompt: "Is this a request for SQL execution or general Q&A?"
-Classification: SQL | RAG | MIXED
-Confidence: 0.0–1.0
-  ✓ SQL confidence > 0.7 → proceed to Stage 3
-  ✗ Otherwise → route to standard RAG
-```
-
-**Stage 3 — Hard Gate (Approved Tables)**
-```
-If intent = SQL:
-  ✓ Session has approved tables → run SQL Agent
-  ✗ No approved tables → refuse SQL, suggest RAG
-```
-
-### 3.5 Standard RAG Path (NOT_SQL intent)
-
-When a query is classified as NOT_SQL, the standard conversational RAG chain executes:
-
-1. **Condense:** If chat_history is non-empty, GPT-4o rewrites the question into a self-contained standalone question incorporating conversation context
-2. **Retrieve:** MMR retriever fetches k=5 chunks from ChromaDB using the condensed question
-3. **Format:** Chunks formatted with `[Source: filename]` headers
-4. **Answer:** QA_PROMPT passes context + history + question to LLM
-5. **Persist:** Human and AI messages saved to `conversation_history` in SQLite
-
-The QA_PROMPT embeds a full data governance expert persona covering:
-- Data Architecture & Engineering
-- Data Modelling & Semantics
-- Governance & Compliance (GDPR, data residency, audit)
-- Analytics & Business Intelligence
-- AI/ML Governance
-
-Response structure templates are provided for each question type.
-
-### 3.6 Conversation Memory
-
-All conversations are persisted in SQLite:
+## Part 1: Create Checkpoint & Output Tables
 
 ```sql
-CREATE TABLE conversation_history (
-    id INTEGER PRIMARY KEY,
-    session_id TEXT,
-    user_id TEXT,
-    turn_number INTEGER,
-    human_message TEXT,
-    ai_response TEXT,
-    sources TEXT,  -- JSON list of [source_id, chunk_index]
-    intent TEXT,   -- SQL | RAG | MIXED
-    created_at TIMESTAMP
-);
-```
+%sql
 
-Multi-turn context is retrieved as:
-```
-[Message 1] → [Message 2] → [Message 3] → [New Query]
+-- =====================================================================
+-- PASS 1: CREATE CHECKPOINT TABLE (per-episode analysis)
+-- =====================================================================
+
+CREATE TABLE IF NOT EXISTS axahealth_dataplatform_pd_lab.jogesh_rajiyan_axahealth.fcr_llm_pass1_checkpoint (
+    ConversationId STRING,
+    ClaimNumber STRING,
+    ContactEpisode LONG,
+    EpisodeStart TIMESTAMP,
+    MembershipNumber STRING,
+    primary_demand_type STRING,
+    primary_demand_evidence STRING,
+    primary_demand_confidence DOUBLE,
+    secondary_demand_types_json STRING,
+    topics_json STRING,
+    primary_topic STRING,
+    primary_topic_coverage_pct DOUBLE,
+    resolution_status STRING,
+    resolution_evidence STRING,
+    resolution_agent_action STRING,
+    resolution_customer_indication STRING,
+    resolution_confidence DOUBLE,
+    sentiment_score DOUBLE,
+    sentiment_category STRING,
+    sentiment_evidence STRING,
+    sentiment_confidence DOUBLE,
+    overall_confidence DOUBLE,
+    prompt_tokens LONG,
+    completion_tokens LONG,
+    total_tokens LONG,
+    api_latency DOUBLE,
+    task_latency DOUBLE,
+    request_id STRING,
+    error STRING,
+    processed_at TIMESTAMP
+)
+USING DELTA
+COMMENT "Checkpoint for FCR Pass 1 - per-episode demand/topic/sentiment analysis";
+
+-- =====================================================================
+-- PASS 2: CREATE CHECKPOINT TABLE (repeat-contact comparison)
+-- =====================================================================
+
+CREATE TABLE IF NOT EXISTS axahealth_dataplatform_pd_lab.jogesh_rajiyan_axahealth.fcr_llm_pass2_checkpoint (
+    ConversationId STRING,
+    ClaimNumber STRING,
+    ContactEpisode LONG,
+    PreviousContactEpisode LONG,
+    topic_similarity DOUBLE,
+    same_underlying_issue BOOLEAN,
+    continuing_previous_issue BOOLEAN,
+    genuinely_new_issue BOOLEAN,
+    repeat_contact BOOLEAN,
+    repeat_contact_llm_confidence DOUBLE,
+    repeat_contact_reason STRING,
+    repeat_contact_evidence STRING,
+    true_failure_supported BOOLEAN,
+    prompt_tokens LONG,
+    completion_tokens LONG,
+    total_tokens LONG,
+    api_latency DOUBLE,
+    task_latency DOUBLE,
+    request_id STRING,
+    error STRING,
+    processed_at TIMESTAMP
+)
+USING DELTA
+COMMENT "Checkpoint for FCR Pass 2 - repeat-contact comparison";
+
+-- Verify both created
+SHOW TABLES LIKE 'fcr_llm_*';
 ```
 
 ---
 
-## 4. SQL Agent — Agentic Live Data Analysis
+## Part 2: Validate Input Table
 
-The SQL Agent is a 6-step agentic loop that classifies user intent, generates SQL, executes it against live Databricks tables, interprets results, and surfaces governance signals. It is activated only when SQL Agent is toggled ON and approved tables exist in the session.
+```sql
+%sql
 
-### 4.1 Data Connection Management
+-- =====================================================================
+-- CHECK finalcombinedchannels STRUCTURE
+-- =====================================================================
 
-Connections are stored in SQLite with the authentication token encrypted using AES-256 (Fernet):
+DESC TABLE axahealth_dataplatform_pd_lab.jogesh_rajiyan_axahealth.finalcombinedchannels;
 
-- User provides: connection name, workspace URL, HTTP path, PAT, default catalog
-- Token is encrypted via `encrypt_pat()` before SQLite storage — never stored in plaintext
-- Decryption key derived from environment secrets + PBKDF2-HMAC-SHA256
-- Connection tested at save time via data warehouse test query
-- Each connection assigned a UUID `connection_id` referenced in all subsequent calls
+-- Check required columns exist
+SELECT 
+  CASE WHEN COUNT(*) > 0 THEN 'YES' ELSE 'NO' END as has_claim_number,
+  CASE WHEN SUM(CASE WHEN ContactEpisode IS NOT NULL THEN 1 ELSE 0 END) > 0 THEN 'YES' ELSE 'NO' END as has_episode,
+  CASE WHEN SUM(CASE WHEN CustomerEpisodeConversation IS NOT NULL THEN 1 ELSE 0 END) > 0 THEN 'YES' ELSE 'NO' END as has_customer_conv
+FROM axahealth_dataplatform_pd_lab.jogesh_rajiyan_axahealth.finalcombinedchannels;
 
-```python
-{
-    "connection_id": "uuid-1234-5678",
-    "connection_name": "Production Warehouse",
-    "workspace_url": "https://adb-xxxxx.cloud.databricks.com",
-    "http_path": "/sql/1.0/warehouses/abc123",
-    "encrypted_pat": "gAAAAAB...",  # AES-256 ciphertext
-    "default_catalog": "main",
-    "created_at": "2025-04-21T10:30:00Z",
-    "last_tested": "2025-04-21T15:45:00Z",
-    "test_status": "success"
-}
+-- Check data volume
+SELECT COUNT(*) as total_episodes,
+       COUNT(DISTINCT ClaimNumber) as unique_claims,
+       COUNT(DISTINCT MembershipNumber) as unique_members,
+       MIN(EpisodeStart) as earliest_date,
+       MAX(EpisodeStart) as latest_date,
+       COUNT(CASE WHEN PreviousContactEpisode IS NOT NULL THEN 1 END) as non_first_contact_episodes
+FROM axahealth_dataplatform_pd_lab.jogesh_rajiyan_axahealth.finalcombinedchannels;
+
+-- Sample data
+SELECT ClaimNumber, ContactEpisode, EpisodeStart, PreviousContactEpisode, 
+       LEFT(CustomerEpisodeConversation, 100) as customer_text_sample
+FROM axahealth_dataplatform_pd_lab.jogesh_rajiyan_axahealth.finalcombinedchannels
+LIMIT 5;
 ```
-
-### 4.2 Table Ingestion into Knowledge Set
-
-Before SQL queries can run, tables must be profiled and ingested:
-
-1. **Catalog Browse:** List available catalogs, schemas, tables
-2. **Table Selection:** User selects table(s) for analysis
-3. **Statistical Profile:** Compute row count, null %, unique %, data types
-4. **Schema Extraction:** Column names, types, nullable flags, comments
-5. **Sample Data:** Retrieve first 100 rows
-6. **Metadata Chunk:** Create special chunk containing table schema + stats
-7. **Index in ChromaDB:** Schema chunk added to vector store for semantic search
-8. **SQLite Whitelist:** Approved table names stored in session-specific whitelist
-
-### 4.3 The 6-Step Agentic Loop
-
-Once intent is confirmed as SQL (Stage 3 gate passed), `run_sql_agent()` executes:
-
-**Step 1 — Intent Override (User Explicit)**
-```
-Check if user provided:
-  - Explicit catalog, schema, table names
-  - Explicit column names
-  - Explicit WHERE clauses
-
-If yes → prepopulate generator context (reduces hallucination)
-```
-
-**Step 2 — Think Aloud**
-```
-Prompt LLM:
-  "The user is asking: [question]
-   Available tables: [whitelist]
-   How would you approach this in SQL?
-   Think step-by-step before writing SQL."
-
-Output: Chain-of-thought reasoning (shown to user)
-```
-
-**Step 3 — SQL Generation**
-```
-Prompt LLM:
-  "Given the reasoning above, write a SQL query.
-   Constraint: Only SELECT queries.
-   Constraint: Only approved tables.
-   Constraint: LIMIT 200 rows.
-   
-   Query:"
-
-Output: Raw SQL text
-```
-
-**Step 4 — Pre-Execution Validation**
-```
-1. Parse SQL with sqlparse library
-2. Check statement type (only SELECT allowed)
-3. Check for DDL/DML keywords (DENY: CREATE, DROP, INSERT, UPDATE, DELETE)
-4. Extract table names, compare with whitelist
-5. Extract column names, validate against schema
-6. Check for suspicious patterns:
-   - Recursive CTEs
-   - Union with unvetted tables
-   - Subqueries on non-whitelisted tables
-   
-If validation fails → refuse execution, suggest correction
-```
-
-**Step 5 — Execute Against Data Warehouse**
-```
-Execute via Databricks SQL Connector:
-  - Query: Validated SQL
-  - Warehouse: From connection config
-  - Timeout: 60 seconds
-  - Max rows: 200
-  
-Return:
-  {
-    "status": "success",
-    "row_count": 42,
-    "columns": ["col1", "col2"],
-    "rows": [[...], [...], ...],
-    "execution_time_ms": 450
-  }
-```
-
-**Step 6 — Interpret + Governance Overlay**
-```
-Prompt LLM:
-  "Query executed successfully. Results:
-   [rows displayed]
-   
-   In 2-3 sentences, what do these results tell us?
-   Are there any data governance signals
-   (completeness, timeliness, accuracy)?
-   
-   Interpretation:"
-
-Output: Natural language summary + governance flags
-```
-
-### 4.4 Security Architecture
-
-**SQL Injection Prevention:**
-- Parameterized queries only (never string concatenation)
-- SQL parsing + AST validation before execution
-- Whitelist enforcement at parse time
-
-**Table Access Control:**
-- Session-specific approved table list (SQLite whitelist)
-- Users cannot query unapproved tables (hard gate at Step 4)
-- Whitelist modified only via UI approval workflow
-
-**PII/Sensitive Data Protection:**
-- Automatic PII detection on column names (regex + ML)
-- Flagged columns suppressed from results (or hashed)
-- Audit log: who queried which tables when
-
-**Encryption:**
-- Connection PATs encrypted at rest (AES-256)
-- Connection PATs decrypted in memory only when executing
-- PAT never logged or exposed in error messages
 
 ---
 
-## 5. Document Generation (.docx)
-
-GovernGPT can produce professional Word documents (.docx) on demand. The pipeline uses a 3-step approach: LLM generates structured JSON, a Node.js script builds the document using the docx library, and the file is served for download.
-
-### 5.1 Trigger Detection
-
-The frontend's DOC_TRIGGER regex detects documentation requests before sending to the API:
-
-```
-/(create|generate|write|produce|build|make|prepare|draft|design)
-\s+(a\s+)?(document|report|summary|analysis|brief|proposal|specification|memo|whitepaper)
-/i
-```
-
-**Example triggers:**
-- ✓ "Generate a data governance report"
-- ✓ "Write a compliance summary"
-- ✓ "Create a technical specification"
-- ✗ "Show me the data" (no action)
-
-### 5.2 Document Content Prompt
-
-When triggered, the LLM receives:
-
-```
-You are a professional data governance consultant.
-Based on the conversation so far:
-  - User question: [query]
-  - Retrieved documents: [context]
-  - Query results: [data]
-
-Generate a professional document covering:
-  1. Executive Summary (2-3 sentences)
-  2. Key Findings (bullet points)
-  3. Governance Implications
-  4. Recommendations
-  5. Technical Details (if applicable)
-
-Format your response as JSON:
-{
-  "title": "Document Title",
-  "sections": [
-    {"heading": "Executive Summary", "content": "..."},
-    ...
-  ]
-}
-```
-
-### 5.3 Document Generation Pipeline
-
-**Backend:** FastAPI receives JSON from LLM, triggers Node.js subprocess:
+## Part 3: Python Setup & Authentication
 
 ```python
-# backend/services/document_generator.py
+%python
 
-async def generate_document(doc_json: dict) -> str:
-    """
-    Generate .docx from JSON specification
-    """
-    # Write JSON to temp file
-    json_path = f"/tmp/doc_{uuid4()}.json"
-    with open(json_path, 'w') as f:
-        json.dump(doc_json, f)
-    
-    # Execute Node.js script
-    script_path = "backend/scripts/generate_docx.js"
-    output_path = f"generated_docs/{uuid4()}.docx"
-    
-    process = await asyncio.create_subprocess_exec(
-        "node", script_path, json_path, output_path,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
+# ==============================================
+# CELL: IMPORTS & PATH SETUP
+# ==============================================
+
+import asyncio
+import json
+import time
+import pandas as pd
+import numpy as np
+from datetime import datetime
+import requests
+from msal import ConfidentialClientApplication
+from azure.identity import ConfidentialClientCredential
+from azure.keyvault.secrets import SecretClient
+import pyspark.sql.functions as F
+
+# Import the FCR LLM processor module
+exec(open('/mnt/user-data/outputs/fcr_llm_processor.py').read())
+
+print("[SETUP] All imports successful")
+print("[SETUP] FCR LLM processor module loaded")
+```
+
+```python
+%python
+
+# ==============================================
+# CELL: AUTHENTICATE & GET TOKEN
+# ==============================================
+
+# Service Connector Details
+connector = "z-ppp-pr-dbr-keyvaultcredentials-key05"
+vault_url = "https://z-ppp-en1-pr-dala-key05.vault.azure.net/"
+client_id_key = "modelgateway-healthsgpt-client-id"
+client_secret_key = "modelgateway-healthsgpt-client-secret"
+
+# OAuth tenant and scope
+tenant_id = "edd791b6-a6e2-450b-9582-5c29c2cc2d25"
+scopes = ["https://axapppuk.onmicrosoft.com/modelgateway-api-pr/.default"]
+
+# Model Gateway Base URL
+modelgateway_baseurl = "https://your-model-gateway-url/"  # UPDATE THIS
+
+# ========================
+# Get Credentials from Key Vault
+# ========================
+def get_uc_secrets(connector: str, vault_url: str, *secret_keys: str) -> dict:
+    """Retrieve secrets from Azure Key Vault"""
+    credential = dbutils.credentials.getServiceCredentialsProvider(connector)
+    client = SecretClient(vault_url=vault_url, credential=credential)
+    return {k: client.get_secret(k).value for k in secret_keys}
+
+try:
+    secrets = get_uc_secrets(connector, vault_url, client_id_key, client_secret_key)
+    client_id = secrets[client_id_key]
+    client_secret = secrets[client_secret_key]
+    print("[AUTH] Successfully retrieved secrets from Key Vault")
+except Exception as e:
+    print(f"[ERROR] Failed to get secrets: {e}")
+    raise
+
+# ========================
+# Get OAuth Token
+# ========================
+def get_oauth_token(tenant_id, client_id, client_secret, scopes):
+    """Acquire OAuth token for model gateway"""
+    app = ConfidentialClientApplication(
+        client_id,
+        client_credential=client_secret,
+        authority=f"https://login.microsoftonline.com/{tenant_id}"
+    )
+    result = app.acquire_token_for_client(scopes=scopes)
+    if "access_token" in result:
+        return result["access_token"]
+    raise RuntimeError(f"Failed to acquire token: {result}")
+
+try:
+    token = get_oauth_token(tenant_id, client_id, client_secret, scopes)
+    print(f"[AUTH] Token acquired successfully")
+    print(f"[AUTH] Token preview: {token[:30]}...")
+except Exception as e:
+    print(f"[ERROR] Token acquisition failed: {e}")
+    raise
+```
+
+---
+
+## Part 4: Load & Prepare Data
+
+```python
+%python
+
+# ==============================================
+# CELL: LOAD finalcombinedchannels
+# ==============================================
+
+# Load the table
+df_sp = spark.table("axahealth_dataplatform_pd_lab.jogesh_rajiyan_axahealth.finalcombinedchannels")
+
+print(f"[DATA] Loaded finalcombinedchannels")
+print(f"[DATA] Total episodes: {df_sp.count():,}")
+
+# Show schema
+print("\n[DATA] Table schema:")
+df_sp.printSchema()
+
+# Show sample
+print("\n[DATA] Sample episode:")
+df_sp.limit(1).display()
+```
+
+```python
+%python
+
+# ==============================================
+# CELL: VALIDATE INPUT SCHEMA
+# ==============================================
+
+# Check column existence using the validator
+available_cols = df_sp.columns
+print(f"[SCHEMA] Total columns available: {len(available_cols)}")
+
+try:
+    schema_info = inspect_input_schema(available_cols)
+    print("\n[SCHEMA] Validation passed")
+    print(f"[SCHEMA] Agent conversation column: {schema_info['agent_conversation_col']}")
+    print(f"[SCHEMA] Optional columns available: {len(schema_info['available_optional'])}")
+except ValueError as e:
+    print(f"[ERROR] Schema validation failed: {e}")
+    raise
+```
+
+```python
+%python
+
+# ==============================================
+# CELL: CHUNK DATA BY DATE (for large datasets)
+# ==============================================
+
+# For 10K-50K episodes: single chunk
+# For 50K-200K episodes: chunk by month or quarter
+# For 200K+ episodes: chunk by month
+
+# Define chunks based on your data volume
+# Adjust dates to match your actual data range
+date_chunks = [
+    ("2024-01-01", "2024-03-31"),   # Q1 2024
+    ("2024-04-01", "2024-06-30"),   # Q2 2024
+    ("2024-07-01", "2024-09-30"),   # Q3 2024
+    ("2024-10-01", "2024-12-31"),   # Q4 2024
+]
+
+# Option A: SMALL DATASET (<10K episodes) - no chunking needed
+# df = df_sp.toPandas()
+
+# Option B: LARGE DATASET - load in chunks
+pandas_dfs = []
+total_records = 0
+
+for start_date, end_date in date_chunks:
+    try:
+        df_chunk = df_sp.filter(
+            (F.col("EpisodeStart") >= start_date) &
+            (F.col("EpisodeStart") <= end_date)
+        )
+        count = df_chunk.count()
+        print(f"[CHUNK] {start_date} to {end_date}: {count:,} episodes")
+        
+        if count > 0:
+            pandas_dfs.append(df_chunk.toPandas())
+            total_records += count
+    except Exception as e:
+        print(f"[WARN] Could not load chunk {start_date}-{end_date}: {e}")
+
+if pandas_dfs:
+    df = pd.concat(pandas_dfs, ignore_index=True)
+else:
+    df = df_sp.toPandas()
+
+print(f"\n[DATA] Total episodes loaded: {len(df):,}")
+print(f"[DATA] Memory usage: {df.memory_usage(deep=True).sum() / 1024**2:.1f} MB")
+```
+
+---
+
+## Part 5: Run PASS 1 — Per-Episode Analysis (sample test first)
+
+```python
+%python
+
+# ==============================================
+# CELL: TEST ON SMALL SAMPLE FIRST
+# ==============================================
+
+df_sample = df.sample(n=min(5, len(df)), random_state=42)
+
+print(f"[TEST] Running Pass 1 on {len(df_sample)} sample episodes")
+print("[TEST] This will verify LLM connectivity and output format before full batch\n")
+
+try:
+    pass1_sample_results = run_fcr_pass1(
+        df_sample, 
+        schema_info,
+        token=token,
+        modelgateway_baseurl=modelgateway_baseurl,
+        checkpoint_table=None,  # no checkpoint for sample test
+        tenant_id=tenant_id,
+        client_id=client_id,
+        client_secret=client_secret,
+        scopes=scopes
     )
     
-    await process.wait()
-    return output_path
-```
-
-**Frontend:** Node.js script uses docx library:
-
-```javascript
-// backend/scripts/generate_docx.js
-
-const { Document, Packer, Paragraph, HeadingLevel, TextRun } = require('docx');
-const fs = require('fs');
-
-async function generateDocument(jsonPath, outputPath) {
-    const docSpec = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+    print(f"\n[TEST] Pass 1 sample complete: {len(pass1_sample_results)} episodes analyzed")
+    print(f"[TEST] Columns in output: {len(pass1_sample_results.columns)}")
     
-    const doc = new Document({
-        sections: [{
-            children: docSpec.sections.map(section => [
-                new Paragraph({
-                    text: section.heading,
-                    heading: HeadingLevel.HEADING_1,
-                    bold: true
-                }),
-                new Paragraph(section.content)
-            ]).flat()
-        }]
-    });
+    # Show sample results
+    print("\n[TEST] Sample output:")
+    display(pass1_sample_results[['ClaimNumber', 'ContactEpisode', 'primary_demand_type', 
+                                   'primary_topic', 'resolution_status', 'sentiment_score', 
+                                   'error']].head())
     
-    const buffer = await Packer.toBuffer(doc);
-    fs.writeFileSync(outputPath, buffer);
-    console.log(`Document saved: ${outputPath}`);
-}
-
-generateDocument(process.argv[2], process.argv[3]);
+except Exception as e:
+    print(f"\n[ERROR] Sample test failed: {e}")
+    import traceback
+    traceback.print_exc()
+    raise
 ```
-
-### 5.4 Document Serving
-
-FastAPI serves the generated document:
 
 ```python
-@router.get("/api/document/{doc_id}")
-async def download_document(doc_id: str):
-    """Download generated document"""
-    path = f"generated_docs/{doc_id}.docx"
-    return FileResponse(
-        path,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        filename=f"governgpt_export_{doc_id}.docx"
+%python
+
+# ==============================================
+# CELL: RUN PASS 1 - FULL BATCH
+# ==============================================
+
+print("=" * 80)
+print("PASS 1 - FULL BATCH")
+print("=" * 80)
+
+PASS1_CHECKPOINT = "axahealth_dataplatform_pd_lab.jogesh_rajiyan_axahealth.fcr_llm_pass1_checkpoint"
+
+try:
+    pass1_results = run_fcr_pass1(
+        df,
+        schema_info,
+        token=token,
+        modelgateway_baseurl=modelgateway_baseurl,
+        checkpoint_table=PASS1_CHECKPOINT,
+        tenant_id=tenant_id,
+        client_id=client_id,
+        client_secret=client_secret,
+        scopes=scopes
     )
+    
+    print(f"\n[SUCCESS] Pass 1 complete: {len(pass1_results):,} episodes processed")
+    
+except Exception as e:
+    print(f"\n[ERROR] Pass 1 failed: {e}")
+    import traceback
+    traceback.print_exc()
+    raise
 ```
 
 ---
 
-## 6. Frontend Architecture
+## Part 6: Quality Check Pass 1 Results
 
-### 6.1 Session Management
+```python
+%python
 
-Sessions represent isolated conversation contexts. Each session:
-- Has a unique `session_id` (UUID)
-- Stores conversation history in SQLite
-- Maintains approved Databricks tables (whitelist)
-- Persists in Zustand store (localStorage)
+# ==============================================
+# CELL: CHECK PASS 1 RESULTS
+# ==============================================
 
-```typescript
-interface Session {
-  session_id: string;
-  created_at: Date;
-  last_active: Date;
-  title: string;
-  conversation: Message[];
-  approved_tables: {
-    connection_id: string;
-    table_names: string[];
-  }[];
-}
+print("\n" + "=" * 80)
+print("PASS 1 - QUALITY CHECK")
+print("=" * 80)
 
-const useSessionStore = create((set) => ({
-  sessions: [],
-  createSession: () => { /* ... */ },
-  deleteSession: (id) => { /* ... */ },
-  updateSession: (id, data) => { /* ... */ }
-}));
-```
+total = len(pass1_results)
+successful = (pass1_results['error'].isna()).sum()
+failed = (pass1_results['error'].notna()).sum()
 
-### 6.2 Chat Interface
+print(f"\nTotal episodes processed: {total:,}")
+print(f"Successful: {successful:,} ({100*successful/total:.1f}%)")
+print(f"Failed: {failed:,} ({100*failed/total:.1f}%)")
 
-**ChatWindow Component:**
-- Displays conversation turns (human messages on right, AI on left)
-- Renders source citations: `[Source: filename, page 3]`
-- Shows thinking time for SQL queries
-- Displays execution results inline
+# Demand distribution
+print("\n--- Demand Type Distribution ---")
+demand_dist = pass1_results['primary_demand_type'].value_counts()
+for demand, count in demand_dist.items():
+    pct = (count / total) * 100
+    print(f"  {demand}: {count:,} ({pct:.1f}%)")
 
-**PromptGuidePanel:**
-- Suggests common queries based on context
-- Shows available tables, columns
-- Provides query templates
+# Resolution distribution
+print("\n--- Resolution Status Distribution ---")
+resolution_dist = pass1_results['resolution_status'].value_counts()
+for status, count in resolution_dist.items():
+    pct = (count / total) * 100
+    print(f"  {status}: {count:,} ({pct:.1f}%)")
 
-### 6.3 Data Catalog Explorer
+# Sentiment distribution
+print("\n--- Sentiment Distribution ---")
+sentiment_dist = pass1_results['sentiment_category'].value_counts()
+for sent, count in sentiment_dist.items():
+    pct = (count / total) * 100
+    print(f"  {sent}: {count:,} ({pct:.1f}%)")
 
-**CatalogBrowser Component:**
-- Browse: Catalog → Schema → Table
-- View table schema (columns, types)
-- See row count, null percentages
-- Preview first 10 rows
-- Add table to session whitelist
+# Confidence
+print("\n--- LLM Confidence Distribution ---")
+conf_buckets = [
+    (0.9, 1.0, "Very High (0.9-1.0)"),
+    (0.7, 0.9, "High (0.7-0.9)"),
+    (0.5, 0.7, "Medium (0.5-0.7)"),
+    (0.0, 0.5, "Low (<0.5)"),
+]
 
----
+for min_conf, max_conf, label in conf_buckets:
+    count = ((pass1_results['overall_confidence'] >= min_conf) & 
+             (pass1_results['overall_confidence'] < max_conf)).sum()
+    pct = (count / total) * 100
+    print(f"  {label}: {count:,} ({pct:.1f}%)")
 
-## 7. API Reference
+# Token usage
+print("\n--- Token Usage ---")
+total_tokens = pass1_results['total_tokens'].sum()
+print(f"Total tokens used: {total_tokens:,}")
+print(f"Avg tokens per episode: {total_tokens / successful:.0f}" if successful > 0 else "N/A")
 
-### 7.1 Chat Query Endpoint
-
-```
-POST /api/query/
-
-Request:
-{
-  "session_id": "uuid-1234",
-  "message": "What tables contain claims data?",
-  "use_sql_agent": false,
-  "chat_history": []
-}
-
-Response:
-{
-  "session_id": "uuid-1234",
-  "response": "Based on the governance documents...",
-  "sources": [
-    {
-      "source_id": "data_catalog.pdf_2025-04-21",
-      "chunk_index": 12,
-      "relevance": 0.92
-    }
-  ],
-  "intent": "RAG",
-  "execution_time_ms": 2340
-}
-```
-
-### 7.2 SQL Agent Endpoint
-
-```
-POST /api/sql-agent/execute
-
-Request:
-{
-  "session_id": "uuid-1234",
-  "connection_id": "uuid-5678",
-  "question": "How many records in claims_raw?",
-  "use_approved_tables": true
-}
-
-Response:
-{
-  "thinking": "User wants row count. I'll SELECT COUNT(*) FROM claims_raw.",
-  "sql": "SELECT COUNT(*) as record_count FROM main.bronze.claims_raw LIMIT 200;",
-  "results": {
-    "status": "success",
-    "row_count": 1,
-    "columns": ["record_count"],
-    "rows": [[5432100]],
-    "execution_time_ms": 450
-  },
-  "interpretation": "The claims_raw table contains 5.4M records as of last refresh.",
-  "governance_flags": []
-}
-```
-
-### 7.3 Document Generation Endpoint
-
-```
-POST /api/document/generate
-
-Request:
-{
-  "session_id": "uuid-1234",
-  "query": "Generate a data governance report",
-  "document_type": "report"
-}
-
-Response:
-{
-  "document_id": "doc-uuid-9999",
-  "title": "Data Governance Report",
-  "status": "success",
-  "download_url": "/api/document/doc-uuid-9999",
-  "generated_at": "2025-04-21T16:00:00Z"
-}
+# Errors
+if failed > 0:
+    print(f"\n--- Top 5 Errors ---")
+    error_counts = pass1_results[pass1_results['error'].notna()]['error'].value_counts().head(5)
+    for error_msg, count in error_counts.items():
+        print(f"  {count:>3}: {error_msg[:60]}")
 ```
 
 ---
 
-## 8. Deployment Architecture
+## Part 7: Prepare Pass 2 Input (only for non-first contacts)
 
-### 8.1 Local Development
+```python
+%python
 
-```bash
-# Backend
-cd backend
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --reload
+# ==============================================
+# CELL: BUILD PASS 2 INPUT
+# ==============================================
 
-# Frontend (separate terminal)
-cd frontend-governgpt
-npm install
-npm run dev
+# Convert Pass 1 results to Spark for SQL operations
+pass1_spark = spark.createDataFrame(pass1_results)
+pass1_spark.createOrReplaceTempView("pass1_results_temp")
 
-# Both accessible at:
-# Frontend: http://localhost:3000
-# Backend API: http://localhost:8000
-```
+# Load episodes that have previous contacts
+non_first_spark = spark.table(
+    "axahealth_dataplatform_pd_lab.jogesh_rajiyan_axahealth.finalcombinedchannels"
+).filter(F.col("PreviousContactEpisode").isNotNull())
 
-### 8.2 Production Deployment (App Service)
+print(f"[PASS2] Episodes with previous contacts: {non_first_spark.count():,}")
 
-```yaml
-# azure-pipelines.yml
-stages:
-  - Build (test, lint, build)
-  - Deploy (push to App Service)
-  - Monitor (Application Insights)
+# Build Pass 2 input using build_pass2_input function
+# This joins current episode to its previous episode's Pass 1 output
+pass2_input_pdf = build_pass2_input(
+    non_first_spark.toPandas(),
+    pass1_results
+)
 
-Environment Variables:
-  - OPENAI_API_KEY
-  - DATABASE_URL
-  - ENCRYPTION_MASTER_KEY
+print(f"[PASS2] Input prepared for Pass 2: {len(pass2_input_pdf):,} episode pairs")
+
+if len(pass2_input_pdf) == 0:
+    print("[WARN] No episode pairs ready for Pass 2 yet - previous episodes may still be processing")
 ```
 
 ---
 
-## 9. Security Considerations
+## Part 8: Run PASS 2 — Repeat Contact Comparison (sample then full)
 
-| Threat | Mitigation |
-| --- | --- |
-| **SQL Injection** | Parameterized queries, AST validation, whitelist enforcement |
-| **Prompt Injection** | Input sanitization, guardrails on LLM prompts |
-| **Token Exposure** | Encrypted at rest (AES-256), in-memory decryption only |
-| **Data Exfiltration** | PII detection, output filtering, audit logging |
-| **Unauthorized Access** | Session-based access control, approved table whitelist |
-| **LLM Jailbreak** | System prompts constrain behavior, refuse unsafe requests |
+```python
+%python
+
+# ==============================================
+# CELL: TEST PASS 2 ON SAMPLE
+# ==============================================
+
+if len(pass2_input_pdf) > 0:
+    pass2_sample = pass2_input_pdf.sample(n=min(3, len(pass2_input_pdf)), random_state=42)
+    
+    print(f"[TEST] Running Pass 2 on {len(pass2_sample)} sample episode pairs")
+    
+    try:
+        pass2_sample_results = run_fcr_pass2(
+            pass2_sample,
+            token=token,
+            modelgateway_baseurl=modelgateway_baseurl,
+            checkpoint_table=None,
+            tenant_id=tenant_id,
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=scopes
+        )
+        
+        print(f"\n[TEST] Pass 2 sample complete: {len(pass2_sample_results)} episode pairs analyzed")
+        print("\n[TEST] Sample output:")
+        display(pass2_sample_results[['ClaimNumber', 'ContactEpisode', 'repeat_contact',
+                                       'repeat_contact_llm_confidence', 'same_underlying_issue',
+                                       'error']].head())
+        
+    except Exception as e:
+        print(f"\n[ERROR] Pass 2 sample failed: {e}")
+        import traceback
+        traceback.print_exc()
+```
+
+```python
+%python
+
+# ==============================================
+# CELL: RUN PASS 2 - FULL BATCH
+# ==============================================
+
+if len(pass2_input_pdf) > 0:
+    print("=" * 80)
+    print("PASS 2 - FULL BATCH (REPEAT CONTACT COMPARISON)")
+    print("=" * 80)
+    
+    PASS2_CHECKPOINT = "axahealth_dataplatform_pd_lab.jogesh_rajiyan_axahealth.fcr_llm_pass2_checkpoint"
+    
+    try:
+        pass2_results = run_fcr_pass2(
+            pass2_input_pdf,
+            token=token,
+            modelgateway_baseurl=modelgateway_baseurl,
+            checkpoint_table=PASS2_CHECKPOINT,
+            tenant_id=tenant_id,
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=scopes
+        )
+        
+        print(f"\n[SUCCESS] Pass 2 complete: {len(pass2_results):,} episode pairs processed")
+        
+    except Exception as e:
+        print(f"\n[ERROR] Pass 2 failed: {e}")
+        import traceback
+        traceback.print_exc()
+        pass2_results = pd.DataFrame()  # fallback to empty
+else:
+    print("[INFO] No episode pairs to process in Pass 2 yet")
+    pass2_results = pd.DataFrame()
+```
 
 ---
 
-## 10. Performance Characteristics
+## Part 9: Check Pass 2 Results
 
-| Operation | Baseline | Optimized |
-| --- | --- | --- |
-| **Document Ingest** | 5 sec (10 MB file) | 2 sec (vectorization parallelized) |
-| **RAG Query** | 3.2 sec | 1.8 sec (MMR caching) |
-| **SQL Execution** | 2-5 sec (query dependent) | Same (warehouse-bound) |
-| **Document Gen** | 8 sec | 4 sec (Node.js subprocess) |
-| **Vector Search** | 150 ms (5 docs) | 95 ms (ChromaDB index) |
+```python
+%python
+
+# ==============================================
+# CELL: CHECK PASS 2 RESULTS
+# ==============================================
+
+if len(pass2_results) > 0:
+    print("\n" + "=" * 80)
+    print("PASS 2 - QUALITY CHECK")
+    print("=" * 80)
+    
+    total = len(pass2_results)
+    successful = (pass2_results['error'].isna()).sum()
+    failed = (pass2_results['error'].notna()).sum()
+    
+    print(f"\nTotal episode pairs processed: {total:,}")
+    print(f"Successful: {successful:,} ({100*successful/total:.1f}%)")
+    print(f"Failed: {failed:,} ({100*failed/total:.1f}%)")
+    
+    # Repeat contact rate
+    print("\n--- Repeat Contact Distribution ---")
+    repeat_dist = pass2_results[pass2_results['error'].isna()]['repeat_contact'].value_counts()
+    for repeat, count in repeat_dist.items():
+        pct = (count / successful) * 100
+        label = "Repeat Contact" if repeat else "New Issue"
+        print(f"  {label}: {count:,} ({pct:.1f}%)")
+    
+    # Confidence
+    print("\n--- Repeat Contact Confidence (when identified as repeat) ---")
+    repeats_only = pass2_results[(pass2_results['error'].isna()) & 
+                                  (pass2_results['repeat_contact'] == True)]
+    if len(repeats_only) > 0:
+        print(f"  Mean confidence: {repeats_only['repeat_contact_llm_confidence'].mean():.2f}")
+        print(f"  Median confidence: {repeats_only['repeat_contact_llm_confidence'].median():.2f}")
+    
+    # Errors
+    if failed > 0:
+        print(f"\n--- Top 5 Errors ---")
+        error_counts = pass2_results[pass2_results['error'].notna()]['error'].value_counts().head(5)
+        for error_msg, count in error_counts.items():
+            print(f"  {count:>3}: {error_msg[:60]}")
+else:
+    print("[INFO] No Pass 2 results yet - either no non-first episodes or still processing")
+```
 
 ---
 
-## 11. Roadmap & Future Enhancements
+## Part 10: Build Final Analysis Table
 
-**v4.1 (Next Release)**
-- [ ] Multi-LLM support (Claude, Gemini, local models)
-- [ ] Streaming responses
-- [ ] Advanced analytics (time-series forecasting)
+```sql
+%sql
 
-**v5.0 (Major Release)**
-- [ ] Knowledge graph construction
-- [ ] Multi-agent orchestration
-- [ ] Real-time data monitoring
-- [ ] Collaborative features (shared sessions)
+-- =====================================================================
+-- BUILD FINAL FCR_ANALYSIS TABLE
+-- =====================================================================
+
+-- Run the simplified SQL pipeline to build the final table
+-- (use the SQL from fcr_sql_pipeline_simplified.sql)
+
+-- This creates:
+-- 1. fcr_analysis - clean episode-level analytical dataset
+-- 2. fcr_summary - overall FCR metrics
+-- 3. fcr_by_demand - repeat rate by demand type
+-- 4. fcr_by_topic - repeat rate by topic
+-- 5. fcr_by_resolution - repeat rate by resolution status
+-- 6. fcr_by_sentiment - repeat rate by sentiment
+
+-- Verify the final table
+SELECT COUNT(*) as total_episodes,
+       COUNT(CASE WHEN contact_type = 'First Contact' THEN 1 END) as first_contacts,
+       COUNT(CASE WHEN contact_type = 'Repeat Contact' THEN 1 END) as repeat_contacts,
+       COUNT(CASE WHEN contact_type = 'New Issue' THEN 1 END) as new_issues
+FROM axahealth_dataplatform_pd_lab.jogesh_rajiyan_axahealth.fcr_analysis;
+
+-- View summary
+SELECT * FROM fcr_summary;
+
+-- View repeat rate by demand
+SELECT * FROM fcr_by_demand;
+
+-- View repeat rate by topic
+SELECT * FROM fcr_by_topic;
+```
 
 ---
 
-## Conclusion
+## Part 11: Export & Archive
 
-GovernGPT combines the intelligence of RAG with the power of agentic SQL execution to create a truly conversational data intelligence platform. By grounding LLM responses in both governance documents and live data, it enables organizations to make data-driven decisions with confidence, speed, and transparency.
+```python
+%python
 
-All components are designed for enterprise production use: secure, auditable, scalable, and maintainable.
+# ==============================================
+# CELL: ARCHIVE RESULTS TO PARQUET
+# ==============================================
+
+# Save Pass 1 results to parquet for records
+pass1_results.to_parquet(
+    '/dbfs/mnt/data-lake/fcr/pass1_results_' + datetime.now().strftime('%Y%m%d_%H%M%S') + '.parquet',
+    index=False
+)
+
+# Save Pass 2 results
+if len(pass2_results) > 0:
+    pass2_results.to_parquet(
+        '/dbfs/mnt/data-lake/fcr/pass2_results_' + datetime.now().strftime('%Y%m%d_%H%M%S') + '.parquet',
+        index=False
+    )
+
+print("[EXPORT] Results archived to data lake")
+```
 
 ---
 
-**Document Version:** 4.0.0  
-**Last Updated:** April 2025  
-**Maintained By:** Data Platform Team
+## Configuration Summary
+
+| Component | Parameter | Value | Notes |
+|-----------|-----------|-------|-------|
+| **Input** | Source table | `finalcombinedchannels` | Episodes from combined MOL+Telephony |
+| **Pass 1** | Checkpoint | `fcr_llm_pass1_checkpoint` | Per-episode demand/topic/sentiment |
+| **Pass 2** | Checkpoint | `fcr_llm_pass2_checkpoint` | Repeat-contact comparison |
+| **Output** | Final table | `fcr_analysis` | Ready for business analysis |
+| **Model** | Model name | `gpt-4o-2024-11-20` | Latest available |
+| **Concurrency** | Max parallel | 10 (default) | Reduce to 8 if rate-limited |
+| **Rate Limits** | Token limit | 15M per 30 min | Automatic backoff if exceeded |
+| **Timeouts** | API timeout | 180 sec | Per-request timeout |
+| **Retries** | Max retries | 3 | For non-rate-limit errors |
+
+---
+
+## Expected Runtime
+
+| Dataset Size | Pass 1 | Pass 2 | Total | Notes |
+|--------------|--------|--------|-------|-------|
+| 1K episodes | 10-15 min | 5 min | 15-20 min | Small test run |
+| 10K episodes | 1-1.5 hours | 30 min | 1.5-2 hours | Typical batch |
+| 50K episodes | 4-5 hours | 2-3 hours | 6-8 hours | Split into 2 chunks |
+| 100K+ episodes | 8-12 hours | 4-6 hours | 12-18 hours | Run overnight |
+
+Times vary by:
+- Conversation length (longer = slower)
+- Model gateway latency (network)
+- Cluster resources (parallelism)
+- Token volume (rate-limit pauses)
+
+---
+
+## Troubleshooting
+
+### "Token limit exceeded"
+```python
+# In authentication cell, reduce concurrency:
+MAX_CONCURRENCY = 8  # from 10
+SAFETY_BUFFER = 0.85  # from 0.90
+```
+
+### "Schema validation failed"
+```sql
+-- Verify agent conversation column exists:
+SELECT COUNT(*) 
+FROM finalcombinedchannels 
+WHERE RelevantAgentEpisodeConversation IS NOT NULL 
+   OR AgentEpisodeConversation IS NOT NULL;
+```
+
+### "Pass 2 input is empty"
+```sql
+-- Check if Pass 1 results are still checkpointing:
+SELECT COUNT(*) FROM fcr_llm_pass1_checkpoint 
+WHERE error IS NULL;
+
+-- Then re-run Part 7 to rebuild Pass 2 input
+```
+
+### "Resume after failure"
+```python
+# The checkpoint tables persist across runs
+# Simply re-run the processor with the same parameters
+# It will skip already-successful rows automatically
+```
+
+### "Check checkpoint progress"
+```sql
+SELECT 
+  'Pass 1' as pass,
+  COUNT(*) as total_rows,
+  COUNT(CASE WHEN error IS NULL THEN 1 END) as successful,
+  COUNT(CASE WHEN error IS NOT NULL THEN 1 END) as failed
+FROM fcr_llm_pass1_checkpoint
+
+UNION ALL
+
+SELECT 
+  'Pass 2' as pass,
+  COUNT(*),
+  COUNT(CASE WHEN error IS NULL THEN 1 END),
+  COUNT(CASE WHEN error IS NOT NULL THEN 1 END)
+FROM fcr_llm_pass2_checkpoint;
+```
+
+---
+
+## Key Differences from Telephony Processor
+
+| Aspect | Telephony | FCR |
+|--------|-----------|-----|
+| **Input grain** | Conversation | Episode |
+| **Passes** | 1 (extract messages) | 2 (analyze + compare) |
+| **Output complexity** | 2 fields (customer/agent msg) | 20+ fields (demand/topic/sentiment/repeat) |
+| **Dependencies** | None | Pass 2 depends on Pass 1 checkpoint |
+| **Resume logic** | Row-level dedup | Row-level dedup per pass |
+| **Validation** | Basic (message presence) | Structural + semantic |
+
+---
+
+## After Completion
+
+Once `fcr_analysis` is ready:
+
+1. **Query the summary reports** (see FCR_PIPELINE_GUIDE.md)
+2. **Identify pain points** (high repeat-rate demand types/topics)
+3. **Drill into specific episodes** using ClaimNumber/ContactEpisode keys
+4. **Join to downstream business systems** using ClaimNumber
+5. **Build dashboards** from the 5 summary views
+6. **Archive results** with timestamp for audit trail
