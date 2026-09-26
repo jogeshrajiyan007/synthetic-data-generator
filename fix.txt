@@ -7,34 +7,43 @@ WITH ordered AS (
     LAG(MessageTimestamp)    OVER (PARTITION BY CaseNumber ORDER BY MessageTimestamp, MessageSequenceNumberInCase) AS PrevMessageTimestamp,
     LAG(AH_MessageContent_c) OVER (PARTITION BY CaseNumber ORDER BY MessageTimestamp, MessageSequenceNumberInCase) AS PrevMessageContent
   FROM MOLClean
+  WHERE MessageCreatedBy2 = 'Agent'
 )
 SELECT
-  CaseNumber,
-  policynumber,
-  SecureMessageId    AS AgentSecureMessageId,
-  MessageTimestamp   AS AgentMessageTimestamp,
-  AH_MessageContent_c AS AgentMessage,
-  ResponseAgentId,
-  AgentName,
-  HasTransferFlag,
-  HandleTimeSecs,
-  wait_time,
-  ContactChannel,
-  PrevSecureMessageId  AS CustomerSecureMessageId,
-  PrevMessageTimestamp AS CustomerMessageTimestamp,
+  ord.CaseNumber,
+  ord.policynumber,
+  ord.SecureMessageId    AS AgentSecureMessageId,
+  ord.MessageTimestamp   AS AgentMessageTimestamp,
+  ord.AH_MessageContent_c AS AgentMessage,
+  -- Response metadata from MOLCustomerMessage (null for Customer_Initiation rows)
+  COALESCE(c.ResponseAgentId, ord.ResponseAgentId) AS ResponseAgentId,
+  COALESCE(c.AgentName, ord.AgentName) AS AgentName,
+  COALESCE(c.HasTransferFlag, ord.HasTransferFlag) AS HasTransferFlag,
+  COALESCE(c.HandleTimeSecs, ord.HandleTimeSecs) AS HandleTimeSecs,
+  COALESCE(c.wait_time, ord.wait_time) AS wait_time,
+  COALESCE(c.ContactChannel, ord.ContactChannel) AS ContactChannel,
+  -- Customer message context from LAG (if exists)
+  ord.PrevSecureMessageId  AS CustomerSecureMessageId,
+  ord.PrevMessageTimestamp AS CustomerMessageTimestamp,
   CASE
-    WHEN PrevSender = 'Customer' THEN PrevMessageContent
+    WHEN ord.PrevSender = 'Customer' THEN ord.PrevMessageContent
     ELSE '[NO_EXPLICIT_CUSTOMER_MESSAGE]'
   END AS CustomerMessage,
+  -- Message type classification
   CASE
-    WHEN PrevSender = 'Customer' THEN 'Customer_Query'
-    WHEN PrevSender = 'Agent'    THEN 'Agent_FollowUp'
+    WHEN ord.PrevSender = 'Customer' THEN 'Customer_Query'
+    WHEN ord.PrevSender = 'Agent'    THEN 'Agent_FollowUp'
     ELSE 'Customer_Initiation'
   END AS MessageInteractionType,
-  -- how many agent messages have stacked since the last real customer message
-  SUM(CASE WHEN PrevSender = 'Customer' OR PrevSender IS NULL THEN 0 ELSE 1 END)
-      OVER (PARTITION BY CaseNumber ORDER BY MessageTimestamp, MessageSequenceNumberInCase
-            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS FollowUpDepth
-FROM ordered
-WHERE MessageCreatedBy2 = 'Agent'
-ORDER BY CaseNumber, AgentMessageTimestamp;
+  -- Follow-up depth counter
+  SUM(CASE 
+    WHEN ord.PrevSender = 'Customer' OR ord.PrevSender IS NULL THEN 0 
+    ELSE 1 
+  END)
+    OVER (PARTITION BY ord.CaseNumber ORDER BY ord.MessageTimestamp, ord.MessageSequenceNumberInCase
+          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS FollowUpDepth
+FROM ordered ord
+LEFT JOIN MOLCustomerMessage c
+  ON ord.CaseNumber = c.CaseNumber
+  AND ord.MessageTimestamp = c.ResponseTimestamp
+ORDER BY ord.CaseNumber, ord.AgentMessageTimestamp;
