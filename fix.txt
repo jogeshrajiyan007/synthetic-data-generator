@@ -1,31 +1,40 @@
 CREATE OR REPLACE TEMPORARY VIEW MOLCustomerAgentResponse AS
+WITH ordered AS (
+  SELECT
+    *,
+    LAG(MessageCreatedBy2)   OVER (PARTITION BY CaseNumber ORDER BY MessageTimestamp, MessageSequenceNumberInCase) AS PrevSender,
+    LAG(SecureMessageId)     OVER (PARTITION BY CaseNumber ORDER BY MessageTimestamp, MessageSequenceNumberInCase) AS PrevSecureMessageId,
+    LAG(MessageTimestamp)    OVER (PARTITION BY CaseNumber ORDER BY MessageTimestamp, MessageSequenceNumberInCase) AS PrevMessageTimestamp,
+    LAG(AH_MessageContent_c) OVER (PARTITION BY CaseNumber ORDER BY MessageTimestamp, MessageSequenceNumberInCase) AS PrevMessageContent
+  FROM MOLClean
+)
 SELECT
-    COALESCE(c.casenumber, a.CaseNumber)       AS CaseNumber,
-    COALESCE(c.policynumber, a.policynumber)   AS policynumber,
-    c.SecureMessageId,
-    c.MessageTimestamp                         AS CustomerMessageTimestamp,
-    c.MessageSequenceNumberInCase,
-    c.CustomerMessageSequenceNumberInCase,
-    COALESCE(c.AH_MessageContent_c, 'CUSTOMER_INITIATED_MOL_NO_EXPLICIT_MESSAGE') AS CustomerMessage,
-    c.ResponseTimestamp,
-    a.SecureMessageId                          AS AgentSecureMessageId,
-    a.MessageTimestamp                         AS AgentMessageTimestamp,
-    a.AgentMessageSequenceNumberInCase,
-    a.AH_MessageContent_c                      AS AgentMessage,
-    COALESCE(c.ResponseAgentId, a.ResponseAgentId) AS ResponseAgentId,
-    COALESCE(c.AgentName, a.AgentName)             AS AgentName,
-    COALESCE(c.HasTransferFlag, a.HasTransferFlag) AS HasTransferFlag,
-    COALESCE(c.HandleTimeSecs, a.HandleTimeSecs)   AS HandleTimeSecs,
-    COALESCE(c.wait_time, a.wait_time)             AS wait_time,
-    COALESCE(c.ContactChannel, a.ContactChannel)   AS ContactChannel,
-    c.PreviousMessageTimestamp,
-    c.GapFromPreviousMessageSecs,
-    CASE WHEN c.SecureMessageId IS NULL THEN 'Customer_Initiation' ELSE 'Customer_Query' END AS CustomerInitiationType
-FROM MOLCustomerMessage c
-RIGHT JOIN MOLClean a
-  ON c.casenumber = a.CaseNumber
- AND a.MessageTimestamp = c.ResponseTimestamp
-WHERE a.MessageCreatedBy2 = 'Agent'
-;
-
-SELECT * FROM MOLCustomerAgentResponse WHERE casenumber = '11887956' ORDER BY AgentMessageTimestamp;
+  CaseNumber,
+  policynumber,
+  SecureMessageId    AS AgentSecureMessageId,
+  MessageTimestamp   AS AgentMessageTimestamp,
+  AH_MessageContent_c AS AgentMessage,
+  ResponseAgentId,
+  AgentName,
+  HasTransferFlag,
+  HandleTimeSecs,
+  wait_time,
+  ContactChannel,
+  PrevSecureMessageId  AS CustomerSecureMessageId,
+  PrevMessageTimestamp AS CustomerMessageTimestamp,
+  CASE
+    WHEN PrevSender = 'Customer' THEN PrevMessageContent
+    ELSE '[NO_EXPLICIT_CUSTOMER_MESSAGE]'
+  END AS CustomerMessage,
+  CASE
+    WHEN PrevSender = 'Customer' THEN 'Customer_Query'
+    WHEN PrevSender = 'Agent'    THEN 'Agent_FollowUp'
+    ELSE 'Customer_Initiation'
+  END AS MessageInteractionType,
+  -- how many agent messages have stacked since the last real customer message
+  SUM(CASE WHEN PrevSender = 'Customer' OR PrevSender IS NULL THEN 0 ELSE 1 END)
+      OVER (PARTITION BY CaseNumber ORDER BY MessageTimestamp, MessageSequenceNumberInCase
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS FollowUpDepth
+FROM ordered
+WHERE MessageCreatedBy2 = 'Agent'
+ORDER BY CaseNumber, AgentMessageTimestamp;
