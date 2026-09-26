@@ -1,158 +1,31 @@
 CREATE OR REPLACE TEMPORARY VIEW MOLCustomerAgentResponse AS
-
-WITH FirstCustomerMessage AS
-(
-    SELECT
-        CaseNumber,
-        MessageTimestamp AS FirstCustomerMessageTimestamp,
-        MessageSequenceNumberInCase AS FirstCustomerMessageSequenceNumber
-    FROM
-    (
-        SELECT
-            CaseNumber,
-            MessageTimestamp,
-            MessageSequenceNumberInCase,
-            ROW_NUMBER() OVER
-            (
-                PARTITION BY CaseNumber
-                ORDER BY MessageTimestamp, MessageSequenceNumberInCase
-            ) AS rn
-        FROM MOLClean
-        WHERE MessageCreatedBy2 = 'Customer'
-    )
-    WHERE rn = 1
-),
-
-/* ============================================================
-   1. NORMAL CUSTOMER -> AGENT RESPONSES
-   ============================================================ */
-
-NormalCustomerAgentResponses AS
-(
-    SELECT
-        c.CaseNumber,
-        c.PolicyNumber,
-        c.SecureMessageId,
-
-        c.MessageTimestamp AS CustomerMessageTimestamp,
-        c.CustomerMessageSequenceNumberInCase,
-
-        c.AH_MessageContent__c AS CustomerMessage,
-
-        c.ResponseTimestamp,
-
-        a.SecureMessageId AS AgentSecureMessageId,
-        a.MessageTimestamp AS AgentMessageTimestamp,
-        a.MessageSequenceNumberInCase AS AgentMessageSequenceNumberInCase,
-        a.AH_MessageContent__c AS AgentMessage,
-
-        c.ResponseAgentId,
-        c.AgentName,
-        c.HasTransferFlag,
-        c.HandleTimeSecs,
-        c.wait_time,
-        c.ContactChannel,
-        c.PreviousMessageTimestamp,
-        c.GapFromPreviousMessageSecs,
-
-        0 AS CustomerInitiationFlag,
-
-        'ACTUAL_CUSTOMER_MESSAGE' AS CustomerMessageType
-
-    FROM MOLCustomerMessage c
-
-    LEFT JOIN MOLClean a
-        ON c.CaseNumber = a.CaseNumber
-        AND a.MessageCreatedBy2 = 'Agent'
-        AND a.MessageTimestamp = c.ResponseTimestamp
-),
-
-/* ============================================================
-   2. AGENT MESSAGES BEFORE FIRST CAPTURED CUSTOMER MESSAGE
-      These were previously LOST.
-   ============================================================ */
-
-InitialAgentMessages AS
-(
-    SELECT
-
-        a.CaseNumber,
-        a.PolicyNumber,
-
-        CAST(NULL AS STRING) AS SecureMessageId,
-
-        /*
-         * We use the Agent timestamp as the temporal anchor
-         * because the actual customer message timestamp is
-         * unavailable in the data.
-         */
-        a.MessageTimestamp AS CustomerMessageTimestamp,
-
-        CAST(NULL AS BIGINT) AS CustomerMessageSequenceNumberInCase,
-
-        '[CUSTOMER INITIATION — ORIGINAL CUSTOMER MESSAGE NOT CAPTURED] '
-        || 'Customer initiated the MOL conversation from the AXA website. '
-        || 'The first captured message is an agent response.'
-        AS CustomerMessage,
-
-        a.MessageTimestamp AS ResponseTimestamp,
-
-        a.SecureMessageId AS AgentSecureMessageId,
-        a.MessageTimestamp AS AgentMessageTimestamp,
-        a.MessageSequenceNumberInCase AS AgentMessageSequenceNumberInCase,
-
-        a.AH_MessageContent__c AS AgentMessage,
-
-        a.ResponseAgentID AS ResponseAgentId,
-        a.AgentName,
-        a.HasTransferFlag,
-        a.HandleTimeSecs,
-        a.wait_time,
-        a.ContactChannel,
-
-        CAST(NULL AS TIMESTAMP) AS PreviousMessageTimestamp,
-        CAST(NULL AS BIGINT) AS GapFromPreviousMessageSecs,
-
-        1 AS CustomerInitiationFlag,
-
-        'CUSTOMER_INITIATION_PLACEHOLDER' AS CustomerMessageType
-
-    FROM MOLClean a
-
-    LEFT JOIN FirstCustomerMessage fc
-        ON a.CaseNumber = fc.CaseNumber
-
-    WHERE
-        a.MessageCreatedBy2 = 'Agent'
-
-        AND
-        (
-            /*
-             * Agent message occurred before the first
-             * captured customer message.
-             */
-            fc.FirstCustomerMessageTimestamp IS NULL
-
-            OR a.MessageTimestamp < fc.FirstCustomerMessageTimestamp
-
-            OR
-            (
-                a.MessageTimestamp = fc.FirstCustomerMessageTimestamp
-                AND a.MessageSequenceNumberInCase
-                    < fc.FirstCustomerMessageSequenceNumber
-            )
-        )
-)
-
-/* ============================================================
-   3. COMBINE BOTH
-   ============================================================ */
-
-SELECT *
-FROM NormalCustomerAgentResponses
-
-UNION ALL
-
-SELECT *
-FROM InitialAgentMessages
+SELECT
+    COALESCE(c.casenumber, a.CaseNumber)       AS CaseNumber,
+    COALESCE(c.policynumber, a.policynumber)   AS policynumber,
+    c.SecureMessageId,
+    c.MessageTimestamp                         AS CustomerMessageTimestamp,
+    c.MessageSequenceNumberInCase,
+    c.CustomerMessageSequenceNumberInCase,
+    COALESCE(c.AH_MessageContent_c, 'CUSTOMER_INITIATED_MOL_NO_EXPLICIT_MESSAGE') AS CustomerMessage,
+    c.ResponseTimestamp,
+    a.SecureMessageId                          AS AgentSecureMessageId,
+    a.MessageTimestamp                         AS AgentMessageTimestamp,
+    a.AgentMessageSequenceNumberInCase,
+    a.AH_MessageContent_c                      AS AgentMessage,
+    COALESCE(c.ResponseAgentId, a.ResponseAgentId) AS ResponseAgentId,
+    COALESCE(c.AgentName, a.AgentName)             AS AgentName,
+    COALESCE(c.HasTransferFlag, a.HasTransferFlag) AS HasTransferFlag,
+    COALESCE(c.HandleTimeSecs, a.HandleTimeSecs)   AS HandleTimeSecs,
+    COALESCE(c.wait_time, a.wait_time)             AS wait_time,
+    COALESCE(c.ContactChannel, a.ContactChannel)   AS ContactChannel,
+    c.PreviousMessageTimestamp,
+    c.GapFromPreviousMessageSecs,
+    CASE WHEN c.SecureMessageId IS NULL THEN 'Customer_Initiation' ELSE 'Customer_Query' END AS CustomerInitiationType
+FROM MOLCustomerMessage c
+RIGHT JOIN MOLClean a
+  ON c.casenumber = a.CaseNumber
+ AND a.MessageTimestamp = c.ResponseTimestamp
+WHERE a.MessageCreatedBy2 = 'Agent'
 ;
+
+SELECT * FROM MOLCustomerAgentResponse WHERE casenumber = '11887956' ORDER BY AgentMessageTimestamp;
