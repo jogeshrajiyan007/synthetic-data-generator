@@ -1,1 +1,114 @@
-DataFrame[summary: string, ConversationId: string, policynumber: string, ClaimNumber: string, MemberId: string, MembershipNumber: string, standardisedsegment: string, policysubtype: string, CurrentCondition: string, CurrentConditionCategory: string, system: string, relationship: string, gender: string, ComplaintArea: string, vulnerablecustomer: string, ukregion: string, mskclaim: string, ClaimantAge_ClaimOpendate: string, Agecurrent: string, tenure_years: string, dayssinceclaimopened: string, ContactEpisode: string, ContactSequence: string, PreviousContactEpisode: string, GapHours: string, conversationtimeinsecs: string, premiumannualgrossipt: string, premiumannualnetipt: string, claimtotalpaid: string, exgratiaamountpaid: string, MessageCount: string, AgentResponseCount: string, CustomerEpisodeConversation: string, AgentEpisodeConversation: string, AgentResponsible: string, HasPreviousEpisode: string, RepeatCandidateType: string, SequenceStartEpisode: string, SequenceEndEpisode: string, EpisodeCount: string, SequenceMessageCount: string, SequenceDurationHours: string]
+For the Azure DevOps Cycle Objective, I would frame it as an objective around building a defensible, cross-channel FCR measurement framework, rather than simply listing analytics tasks.
+
+Cycle Objective Title
+
+MyView Pilot: First Contact Resolution (FCR) Framework & Analytics
+
+Description
+
+Objective
+
+Develop a defensible First Contact Resolution (FCR) framework for AXA UK Health that establishes how FCR, Repeat Contacts and customer resolution are identified across channels, while using advanced analytics and LLM-based evidence to distinguish genuine failure demand from expected customer journeys and dependencies.
+
+FCR Framework
+
+First Contact Resolution (FCR) is the extent to which a customer's need, intent or issue is resolved through the initial contact without the customer needing to make a subsequent contact for the same underlying need.
+
+A Repeat Contact is a subsequent customer interaction relating to the same underlying customer need, intent, issue or journey following an earlier contact.
+
+A Repeat Contact does not automatically mean FCR failure.
+
+A subsequent contact can occur for several reasons, including:
+
+The original contact did not resolve the customer's need.
+
+The customer is required to make a further contact as part of an expected process.
+
+The customer is dependent on another party, process or outcome before the journey can progress.
+
+The customer chooses to make another contact despite the previous contact being appropriately resolved.
+
+
+Therefore, the FCR framework will distinguish genuine resolution failure from legitimate or expected repeat interactions.
+
+Work Completed
+
+Cross-Channel Customer Journey Stitching
+
+Integrated Telephony and MOL interactions into a common analytical framework.
+
+Established customer/contact-level stitching across channels.
+
+
+Contact Gap Analysis
+
+Analysed the temporal gap between customer interactions to identify potential repeat contacts and journey progression.
+
+
+Hierarchical Interaction Grouping
+
+Established the analytical hierarchy:
+
+
+Contacts → Episodes → Sequences
+
+This provides the foundation for analysing individual interactions, related customer journeys and longer sequences of related contacts.
+
+LLM-Enabled Customer Interaction Analysis Implemented LLM-based analysis to provide structured understanding and evidence across interactions, including:
+
+Demand Classification
+
+True Failure Demand
+
+Expected Process Demand
+
+Expected Dependency Demand
+
+Customer Choice Demand
+
+
+Topic / Sub-topic Classification
+
+Identification of the underlying customer reason for contact.
+
+
+Resolution Classification
+
+Resolved
+
+Partially Resolved
+
+Not Resolved
+
+
+Evidence Generation
+
+Capturing supporting conversational evidence for the classifications and resolution assessment.
+
+
+
+Work to be Completed
+
+1. Customer Journey Stage Identification
+
+Identify the stage of the customer's journey at each contact/episode to understand whether subsequent interactions represent progression through an expected journey or a failure to resolve the original need.
+
+2. Repeat Contact Risk Score / Risk Tier
+
+Develop a repeat-contact risk model that identifies interactions with a higher likelihood of generating a subsequent contact and categorises them into meaningful risk tiers.
+
+3. FCR Probability Score
+
+Develop an FCR probability measure that combines the available interaction, journey, demand, resolution and behavioural signals to estimate the likelihood that the customer's need has been resolved without requiring another contact.
+
+Expected Outcome
+
+The pilot will establish an evidence-based FCR measurement framework that moves beyond simply counting repeat contacts.
+
+The framework will enable AXA UK Health to distinguish between:
+
+Contact → Repeat Contact → Genuine FCR Failure
+
+while incorporating customer intent, journey stage, demand type, resolution status and LLM-generated evidence into the assessment.
+
+The resulting framework will provide the foundation for FCR measurement, repeat-contact risk identification and future advisor/customer journey insights within MyView.
