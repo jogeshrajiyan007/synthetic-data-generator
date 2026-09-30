@@ -1,15 +1,229 @@
-%sql
-DROP view if exists transcripts;
-create or replace temporary table Transcripts as
-select
-  `id` correlation_id,
-  get_json_object(`Metadata`, '$.telephonyv1.attributes.external_call_id') conversationid,
-  get_json_object(
-    `Metadata`,
-    '$.telephonyv1.attributes.analytics_session_start_time'
-  ) sessionstarttime,
-  chattimestamp,
-  get_json_object(`Metadata`, '$.telephonyv1.agent_upn') Agentemail,
-  get_json_object(ChatSummary, '$.text_output') AS transcript_summary
-from
-  axahealth_dataplatform_pr_silver.call_summarisation.summaries_health_sensitive
+from pyspark.sql import functions as F, Window
+
+src = spark.table("Transcripts")
+
+# Verify the schema
+src.printSchema()
+
+# ---- Stage 1: normalize ----
+n = F.col("transcript_summary")
+n = F.regexp_replace(n, r"\\r\\n|\\n|\\r", "\n")
+n = F.regexp_replace(n, r"\r\n?", "\n")
+n = F.regexp_replace(n, "[\u00a0\t]+", " ")
+n = F.regexp_replace(n, r"(?m)^[ ]*[•–—][ ]+", "- ")
+
+s1 = (src
+      .withColumn("embedded_corr_id",
+        F.regexp_extract(n, r"(?i)correlation id:\s*\[?([0-9a-f-]{36})", 1))
+      .withColumn("summary_norm",
+        F.regexp_replace(n, r"(?is)\n?\s*correlation id:.*$", "")))
+
+# ---- Stage 2: sections ----
+HEADERS = {
+  "REASON":  r"reason\s+for\s+(?:the\s+)?call",
+  "ACTIONS": r"actions?\s*(?:&|&amp;|and)\s*agreements?",
+  "NEXT":    r"next\s+steps?",
+}
+t = F.col("summary_norm")
+for k, p in HEADERS.items():
+    t = F.regexp_replace(
+        t, rf"(?im)^[ \t]*[*#_>\-]*[ \t]*{p}[ \t]*[*#_:]*[ \t]*$", f"\n@@{k}@@\n")
+
+def section(k):
+    return F.trim(F.regexp_extract(
+        F.col("tagged"), rf"(?s)@@{k}@@(.*?)(?=@@[A-Z]+@@|\z)", 1))
+
+s2 = (s1.withColumn("tagged", t)
+      .withColumn("ReasonForCall", section("REASON"))
+      .withColumn("ActionsAndAgreements", section("ACTIONS"))
+      .withColumn("NextSteps", section("NEXT"))
+      .withColumn("has_unknown_header", F.col("tagged").rlike(
+          r"(?m)^[ \t]*[*#_]*[A-Z][A-Z &]{3,}[*#_:]*[ \t]*$"))
+      .withColumn("parse_status", F.concat_ws(",",
+          F.when(F.col("ReasonForCall") != "", F.lit("R")),
+          F.when(F.col("ActionsAndAgreements") != "", F.lit("A")),
+          F.when(F.col("NextSteps") != "", F.lit("N")))))
+
+print("Stage 2 sample:")
+s2.select("correlation_id", "parse_status", "ReasonForCall", "ActionsAndAgreements", "NextSteps").limit(3).display()
+
+# ---- Stage 3: statements ----
+def bullets(col):
+    c = F.regexp_replace(col, r"(?m)^[ \t]*[-*+][ \t]+", "\u0001")
+    c = F.regexp_replace(c, r"\s*\n\s*", " ")
+    parts = F.transform(F.split(c, "\u0001"), lambda x: F.trim(x))
+    return F.filter(parts, lambda x: F.length(x) > 0)
+
+def norm_key(col):
+    x = F.lower(F.regexp_replace(col, "[\u2018\u2019\u201c\u201d]", "'"))
+    x = F.regexp_replace(x, r"\s+", " ")
+    return F.trim(F.regexp_replace(x, r"[\s.;:,!]+$", ""))
+
+def explode_section(name, ordn, col):
+    return (s2.select("correlation_id",
+                      F.lit(name).alias("section"),
+                      F.lit(ordn).alias("sec_ord"),
+                      F.posexplode(bullets(F.col(col))).alias("stmt_idx", "Statement")))
+
+stmts = (explode_section("REASON", 0, "ReasonForCall")
+  .unionByName(explode_section("ACTIONS", 1, "ActionsAndAgreements"))
+  .unionByName(explode_section("NEXT", 2, "NextSteps"))
+  .withColumn("norm_key", norm_key(F.col("Statement")))
+  .withColumn("DetectedRule", F.when(F.col("section")=="REASON", "SECTION_REASON_FOR_CALL")
+                               .when(F.col("section")=="NEXT",   "SECTION_NEXT_STEPS"))
+  .withColumn("MessageType", F.when(F.col("section")=="REASON", "CUSTOMER")
+                              .when(F.col("section")=="NEXT",   "AGENT")))
+
+print("Stage 3 sample:")
+stmts.select("correlation_id", "section", "stmt_idx", "Statement", "MessageType").limit(10).display()
+
+# ---- Stage 4: clause split ----
+ROLES = {
+  "CUSTOMER":    {"caller","customer","member","policyholder","patient","client","insured"},
+  "AGENT":       {"agent","advisor","adviser","handler","operator","colleague","supervisor"},
+  "THIRD_PARTY": {"provider","hospital","clinic","insurer","consultant","specialist","team"},
+}
+ACTOR = r"(?:the\s+)?(?:" + "|".join(sorted(set().union(*ROLES.values()))) + r")"
+SPLIT_RE = rf"(?i)(?:[.;]\s+|,?\s+(?:and|but|while|whereas|then)\s+)(?={ACTOR}\s+(?!and\b|or\b))"
+
+clauses = (stmts.filter("section = 'ACTIONS'")
+  .select("correlation_id","sec_ord","stmt_idx","Statement",
+          F.posexplode(F.split(F.col("Statement"), SPLIT_RE)).alias("clause_idx","clause_text"))
+  .withColumn("clause_text", F.trim(F.col("clause_text")))
+  .filter(F.length(F.col("clause_text")) > 0)
+  .withColumn("n_clauses", F.count("*").over(Window.partitionBy("correlation_id","stmt_idx"))))
+
+print("Stage 4 sample (clauses with splits):")
+clauses.select("correlation_id", "stmt_idx", "clause_idx", "clause_text", "n_clauses").limit(10).display()
+
+# ---- Stage 5: linguistics (rule-based) ----
+import pandas as pd
+from typing import Iterator
+from pyspark.sql.functions import pandas_udf
+
+SCHEMA = """subject_text string, subject_role string, voice string, by_role string,
+            root_text string, root_lemma string, state_pred boolean, role_to_inf boolean,
+            has_modal boolean, conj_voice_mismatch boolean, parse_ok boolean"""
+
+LEMMAS = {
+    "mentioned": "mention", "informed": "inform", "advised": "advise", "assured": "assure",
+    "provided": "provide", "confirmed": "confirm", "agreed": "agree", "requested": "request",
+    "inquired": "inquire", "contacted": "contact", "discussed": "discuss", "explained": "explain",
+    "transferred": "transfer", "investigated": "investigate", "authorized": "authorize",
+    "processed": "process", "arranged": "arrange", "scheduled": "schedule",
+    "was": "be", "were": "be", "being": "be", "been": "be",
+}
+
+PASSIVE_VERBS = {
+    "mentioned","informed","advised","assured","provided","confirmed","given","told",
+    "contacted","explained","transferred","authorized","processed","arranged","scheduled",
+    "updated","notified","registered","referred","approved", "aware", "unable",
+    "unsure", "concerned", "unhappy", "dissatisfied", "frustrated", "upset", "satisfied",
+    "happy", "confused", "worried", "willing", "unwilling", "reluctant", "annoyed",
+    "distressed", "anxious", "disappointed", "pleased", "hesitant", "interested"
+}
+
+MODALS = {"will","would","can","could","may","might","must","shall","should","need"}
+
+CUSTOMER_STATES = {"unable","unsure","concerned","unhappy","dissatisfied","frustrated","upset",
+    "satisfied","happy","confused","worried","aware","willing","unwilling","reluctant","annoyed",
+    "distressed","anxious","disappointed","pleased","hesitant","interested"}
+
+def role_of(text):
+    w = text.lower().strip()
+    for r, words in ROLES.items():
+        if w in words: return r
+    return "PRONOUN" if w in ("he","she","it","they","we","i","you") else "OTHER"
+
+def _analyse_rule_based(text):
+    o = {
+        "subject_text": None, "subject_role": "NONE", "voice": "ACTIVE", "by_role": "NONE",
+        "root_text": None, "root_lemma": None, "state_pred": False, "role_to_inf": False,
+        "has_modal": False, "conj_voice_mismatch": False, "parse_ok": False
+    }
+    
+    if not text or len(text.split()) < 2:
+        return o
+    
+    words = text.split()
+    
+    verb_idx = None
+    root_verb = None
+    for i, w in enumerate(words):
+        wl = w.lower().rstrip(".,;:!?")
+        if wl in PASSIVE_VERBS or wl.endswith("ed") or wl in MODALS:
+            verb_idx = i
+            root_verb = wl
+            break
+    
+    if verb_idx is None:
+        return o
+    
+    o["has_modal"] = any(w.lower() in MODALS for w in words[:verb_idx+1])
+    
+    subject_words = []
+    subject_role = "NONE"
+    for i in range(verb_idx):
+        r = role_of(words[i])
+        if r != "OTHER":
+            subject_words = words[i:i+1]
+            subject_role = r
+            break
+    
+    if subject_role == "NONE" and verb_idx > 0:
+        first = words[0].lower()
+        if first in ("he","she","it","they","we","you"): 
+            subject_role = "OTHER"
+            subject_words = [words[0]]
+    
+    if subject_words:
+        o["subject_text"] = " ".join(subject_words)
+        o["subject_role"] = subject_role
+    
+    if verb_idx > 0 and words[verb_idx-1].lower() in ("was","were"):
+        o["voice"] = "PASSIVE"
+        o["root_text"] = words[verb_idx]
+        o["root_lemma"] = LEMMAS.get(root_verb, root_verb)
+    elif root_verb == "be" and verb_idx + 1 < len(words):
+        o["voice"] = "COPULA"
+        o["root_text"] = "be"
+        o["root_lemma"] = "be"
+        o["state_pred"] = words[verb_idx + 1].lower() in CUSTOMER_STATES
+    else:
+        o["voice"] = "ACTIVE"
+        o["root_text"] = root_verb
+        o["root_lemma"] = LEMMAS.get(root_verb, root_verb)
+    
+    by_idx = None
+    for i, w in enumerate(words):
+        if w.lower() == "by" and i + 1 < len(words):
+            by_idx = i + 1
+            break
+    
+    if by_idx:
+        by_word = words[by_idx]
+        o["by_role"] = role_of(by_word)
+    
+    if verb_idx + 1 < len(words) and words[verb_idx + 1].lower() == "to":
+        o["role_to_inf"] = subject_role in ("CUSTOMER", "AGENT", "THIRD_PARTY")
+    
+    if o["voice"] == "COPULA" and verb_idx + 1 < len(words):
+        next_word = words[verb_idx + 1].lower().rstrip(".,;:!?")
+        o["state_pred"] = next_word in CUSTOMER_STATES
+    
+    o["parse_ok"] = True
+    return o
+
+@pandas_udf(SCHEMA)
+def analyse_udf(batches: Iterator[pd.Series]) -> Iterator[pd.DataFrame]:
+    for s in batches:
+        yield pd.DataFrame([_analyse_rule_based(text) for text in s.tolist()])
+
+def add_linguistics(df):
+    d = df.select("clause_text").distinct()
+    d = d.withColumn("a", analyse_udf("clause_text")).select("clause_text", "a.*")
+    return df.join(d, "clause_text", "left")
+
+print("Stage 5: adding linguistic analysis...")
+classified = add_linguistics(clauses)
+classified.select("correlation_id", "clause_text", "subject_text", "subject_role", "voice").limit(10).display()
