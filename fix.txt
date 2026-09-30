@@ -1,30 +1,140 @@
-def R(rule, msg, conf):
-    return F.struct(F.lit(rule).alias("DetectedRule"), F.lit(msg).alias("MessageType"),
-                    F.lit(conf).alias("Confidence"))
-c = F.col
-def add_rules(df):
-    dec = (F.when(c("role_to_inf"), R("ROLE_TO_INFINITIVE","AGENT","LOW"))
-     .when(c("subject_role") == "NONE",    R("NO_SUBJECT","AGENT","LOW"))
-     .when(c("subject_role") == "PRONOUN", R("UNRESOLVED_PRONOUN","AGENT","LOW"))
-     .when(c("subject_role") == "BOTH",    R("JOINT_SUBJECT","AGENT","LOW"))
-     .when((c("voice") == "PASSIVE") & (c("by_role") == "CUSTOMER"), R("PASSIVE_BY_CUSTOMER","CUSTOMER","HIGH"))
-     .when((c("voice") == "PASSIVE") & c("by_role").isin("AGENT","THIRD_PARTY","OTHER"), R("PASSIVE_BY_OTHER","AGENT","HIGH"))
-     .when((c("subject_role") == "CUSTOMER") & (c("voice") == "PASSIVE") & c("state_pred"), R("CUSTOMER_STATE","CUSTOMER","MEDIUM"))
-     .when((c("subject_role") == "CUSTOMER") & (c("voice") == "PASSIVE"), R("CUSTOMER_AS_RECIPIENT","AGENT","HIGH"))
-     .when((c("subject_role") == "CUSTOMER") & (c("voice") == "COPULA") & c("state_pred"), R("CUSTOMER_STATE","CUSTOMER","MEDIUM"))
-     .when((c("subject_role") == "CUSTOMER") & (c("voice") == "COPULA"), R("COPULA_UNKNOWN_PREDICATE","AGENT","LOW"))
-     .when(c("subject_role") == "CUSTOMER", R("CUSTOMER_AS_ACTOR","CUSTOMER","HIGH"))
-     .when(c("subject_role") == "AGENT",    R("AGENT_ACTOR","AGENT","HIGH"))
-     .when(c("subject_role") == "THIRD_PARTY", R("THIRD_PARTY_ACTOR","AGENT","HIGH"))
-     .otherwise(R("OTHER_ACTOR","AGENT","MEDIUM")))
-    return (df.withColumn("dec", dec).select("*", "dec.*").drop("dec")
-      .withColumn("Confidence", F.when(c("conj_voice_mismatch") & (c("Confidence") == "HIGH"), "LOW")
-                                 .otherwise(c("Confidence")))
-      .withColumn("DetectedActor", c("subject_text"))
-      .withColumn("IsCustomerSubject", c("subject_role") == "CUSTOMER")
-      .withColumn("IsCustomerPassive", (c("subject_role") == "CUSTOMER") & (c("voice") == "PASSIVE"))
-      .withColumn("NormalizedStatement", norm_key("clause_text")))
+import pandas as pd
+from typing import Iterator
+from pyspark.sql.functions import pandas_udf
+import re
 
-classified = add_rules(add_linguistics(clauses))
-classified.select("correlation_id","clause_text","DetectedActor","subject_role","voice","by_role",
-  "root_lemma","IsCustomerSubject","IsCustomerPassive","DetectedRule","MessageType","Confidence").display()
+SCHEMA = """subject_text string, subject_role string, voice string, by_role string,
+            root_text string, root_lemma string, state_pred boolean, role_to_inf boolean,
+            has_modal boolean, conj_voice_mismatch boolean, parse_ok boolean"""
+
+_NLP = None
+def _nlp():
+    global _NLP
+    if _NLP is None:
+        import spacy
+        _NLP = spacy.load("en_core_web_sm", disable=["ner"])
+    return _NLP
+
+# Lemma dict for common verbs (deterministic, no model)
+LEMMAS = {
+    "mentioned": "mention", "informed": "inform", "advised": "advise", "assured": "assure",
+    "provided": "provide", "confirmed": "confirm", "agreed": "agree", "requested": "request",
+    "inquired": "inquire", "contacted": "contact", "discussed": "discuss", "explained": "explain",
+    "transferred": "transfer", "transferred": "transfer", "investigated": "investigate",
+    "authorized": "authorize", "processed": "process", "arranged": "arrange", "scheduled": "schedule",
+    "was": "be", "were": "be", "being": "be", "been": "be",
+}
+
+# Passive participles
+PASSIVE_VERBS = {
+    "mentioned","informed","advised","assured","provided","confirmed","given","told",
+    "contacted","explained","transferred","authorized","processed","arranged","scheduled",
+    "updated","notified","registered","referred","approved", "advised", "aware", "unable",
+    "unsure", "concerned", "unhappy", "dissatisfied", "frustrated", "upset", "satisfied",
+    "happy", "confused", "worried", "willing", "unwilling", "reluctant", "annoyed",
+}
+
+MODALS = {"will","would","can","could","may","might","must","shall","should","need"}
+
+def role_of(text):
+    w = text.lower().strip()
+    for r, words in ROLES.items():
+        if w in words: return r
+    return "PRONOUN" if w in ("he","she","it","they","we","i","you") else "OTHER"
+
+def _analyse_rule_based(text):
+    """Fallback: rule-based without spaCy parser."""
+    o = {
+        "subject_text": None, "subject_role": "NONE", "voice": "ACTIVE", "by_role": "NONE",
+        "root_text": None, "root_lemma": None, "state_pred": False, "role_to_inf": False,
+        "has_modal": False, "conj_voice_mismatch": False, "parse_ok": False
+    }
+    
+    # Quick checks: empty, too short
+    if not text or len(text.split()) < 2:
+        return o
+    
+    words = text.split()
+    
+    # Find main verb (first verb-like word or past participle)
+    verb_idx = None
+    root_verb = None
+    for i, w in enumerate(words):
+        wl = w.lower().rstrip(".,;:!?")
+        if wl in PASSIVE_VERBS or wl.endswith("ed") or wl in MODALS:
+            verb_idx = i
+            root_verb = wl
+            break
+    
+    if verb_idx is None:
+        return o
+    
+    # Detect modals
+    o["has_modal"] = any(w.lower() in MODALS for w in words[:verb_idx+1])
+    
+    # Subject: first role noun before verb
+    subject_words = []
+    subject_role = "NONE"
+    for i in range(verb_idx):
+        r = role_of(words[i])
+        if r != "OTHER":
+            subject_words = words[i:i+1]
+            subject_role = r
+            break
+    
+    # If no explicit role, try pronouns
+    if subject_role == "NONE" and verb_idx > 0:
+        first = words[0].lower()
+        if first in ("he","she","it"): subject_role = "OTHER"; subject_words = [words[0]]
+        elif first in ("they","we","you"): subject_role = "OTHER"; subject_words = [words[0]]
+    
+    if subject_words:
+        o["subject_text"] = " ".join(subject_words)
+        o["subject_role"] = subject_role
+    
+    # Detect voice: "was/were + past participle" or look for "by" phrase
+    is_passive = False
+    if verb_idx > 0 and words[verb_idx-1].lower() in ("was","were"):
+        is_passive = True
+        o["voice"] = "PASSIVE"
+        o["root_text"] = words[verb_idx]
+        o["root_lemma"] = LEMMAS.get(root_verb, root_verb)
+    elif root_verb == "be" and verb_idx + 1 < len(words):
+        # "Caller is X" or "Caller is X adjective"
+        o["voice"] = "COPULA"
+        o["root_text"] = "be"
+        o["root_lemma"] = "be"
+        o["state_pred"] = words[verb_idx + 1].lower() in CUSTOMER_STATES
+    else:
+        # Active voice
+        o["voice"] = "ACTIVE"
+        o["root_text"] = root_verb
+        o["root_lemma"] = LEMMAS.get(root_verb, root_verb)
+    
+    # Check for "by" phrase (agent passives)
+    by_idx = None
+    for i, w in enumerate(words):
+        if w.lower() == "by" and i + 1 < len(words):
+            by_idx = i + 1
+            break
+    
+    if by_idx:
+        by_word = words[by_idx]
+        o["by_role"] = role_of(by_word)
+    
+    # Role to infinitive: "Caller to contact..."
+    if verb_idx + 1 < len(words) and words[verb_idx + 1].lower() == "to":
+        o["role_to_inf"] = subject_role in ("CUSTOMER", "AGENT", "THIRD_PARTY")
+    
+    # State predicate for copula
+    if o["voice"] == "COPULA" and verb_idx + 1 < len(words):
+        next_word = words[verb_idx + 1].lower().rstrip(".,;:!?")
+        o["state_pred"] = next_word in CUSTOMER_STATES
+    
+    o["parse_ok"] = True
+    return o
+
+@pandas_udf(SCHEMA)
+def analyse_udf(batches: Iterator[pd.Series]) -> Iterator[pd.DataFrame]:
+    for s in batches:
+        yield pd.DataFrame([_analyse_rule_based(text) for text in s.tolist()])
