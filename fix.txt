@@ -1,3 +1,55 @@
+from pyspark.sql import functions as F
+
+src = spark.table("Transcripts")
+
+# Capture all original columns at the start
+ORIG_COLS = ["id", "conversationid", "sessionstarttime", "chattimestamp", "agentemail", "correlation_id"]
+# (adjust these names to match your exact column names if they differ)
+
+# ---- Stage 1: normalize ----
+n = F.col("transcript_summary")
+n = F.regexp_replace(n, r"\\r\\n|\\n|\\r", "\n")
+n = F.regexp_replace(n, r"\r\n?", "\n")
+n = F.regexp_replace(n, "[\u00a0\t]+", " ")
+n = F.regexp_replace(n, r"(?m)^[ ]*[•–—][ ]+", "- ")
+
+s1 = (src.select(ORIG_COLS + ["transcript_summary"])
+      .withColumn("embedded_corr_id",
+        F.regexp_extract(n, r"(?i)correlation id:\s*\[?([0-9a-f-]{36})", 1))
+      .withColumn("summary_norm",
+        F.regexp_replace(n, r"(?is)\n?\s*correlation id:.*$", "")))
+
+# ---- Stage 2: sections ----
+HEADERS = {
+  "REASON":  r"reason\s+for\s+(?:the\s+)?call",
+  "ACTIONS": r"actions?\s*(?:&|&amp;|and)\s*agreements?",
+  "NEXT":    r"next\s+steps?",
+}
+t = F.col("summary_norm")
+for k, p in HEADERS.items():
+    t = F.regexp_replace(
+        t, rf"(?im)^[ \t]*[*#_>\-]*[ \t]*{p}[ \t]*[*#_:]*[ \t]*$", f"\n@@{k}@@\n")
+
+def section(k):
+    return F.trim(F.regexp_extract(
+        F.col("tagged"), rf"(?s)@@{k}@@(.*?)(?=@@[A-Z]+@@|\z)", 1))
+
+s2 = (s1.withColumn("tagged", t)
+      .withColumn("ReasonForCall", section("REASON"))
+      .withColumn("ActionsAndAgreements", section("ACTIONS"))
+      .withColumn("NextSteps", section("NEXT"))
+      .withColumn("has_unknown_header", F.col("tagged").rlike(
+          r"(?m)^[ \t]*[*#_]*[A-Z][A-Z &]{3,}[*#_:]*[ \t]*$"))
+      .withColumn("parse_status", F.concat_ws(",",
+          F.when(F.col("ReasonForCall") != "", F.lit("R")),
+          F.when(F.col("ActionsAndAgreements") != "", F.lit("A")),
+          F.when(F.col("NextSteps") != "", F.lit("N")))))
+
+# Keep s2 with all original columns
+
+
+
+
 base = ["correlation_id","sec_ord","stmt_idx","clause_idx","text","norm_key",
         "DetectedRule","MessageType","Confidence"]
 whole = (stmts.filter("section IN ('REASON','NEXT')")
@@ -14,14 +66,44 @@ audit = whole.select(base).unionByName(acts.select(base)) \
              .withColumn("is_duplicate", F.row_number().over(w) > 1)
 
 def joined(mt):
-    items = F.collect_list(F.when((c("MessageType") == mt) & ~c("is_duplicate"),
+    items = F.collect_list(F.when((F.col("MessageType") == mt) & ~F.col("is_duplicate"),
                 F.struct("sec_ord","stmt_idx","clause_idx","text")))
     return F.concat_ws("\n", F.transform(F.sort_array(items), lambda x: x["text"]))
 
 agg = audit.groupBy("correlation_id").agg(
-    joined("CUSTOMER").alias("CustomerMessage"), joined("AGENT").alias("AgentMessage"),
-    F.sum((c("Confidence") == "LOW").cast("int")).alias("low_conf_count"))
+    joined("CUSTOMER").alias("CustomerMessage"), 
+    joined("AGENT").alias("AgentMessage"),
+    F.sum((F.col("Confidence") == "LOW").cast("int")).alias("low_conf_count"),
+    F.count(F.when(F.col("is_duplicate"), 1)).alias("duplicate_statement_count"))
 
-final = (s2.select("correlation_id","ReasonForCall","ActionsAndAgreements","NextSteps","parse_status")
+# ---- Final join: preserve all original columns ----
+final = (s2.select("correlation_id", *ORIG_COLS, "ReasonForCall", "ActionsAndAgreements", 
+                   "NextSteps", "parse_status", "has_unknown_header", "embedded_corr_id")
          .join(agg, "correlation_id", "left")
-         .fillna({"CustomerMessage": "", "AgentMessage": "", "low_conf_count": 0}))
+         .fillna({"CustomerMessage": "", "AgentMessage": "", "low_conf_count": 0, 
+                  "duplicate_statement_count": 0}))
+
+# View final schema
+final.display()
+
+# Optional: reorder columns for readability
+final_reordered = final.select(
+    "correlation_id",
+    "id",
+    "conversationid",
+    "sessionstarttime",
+    "chattimestamp",
+    "agentemail",
+    "parse_status",
+    "has_unknown_header",
+    "embedded_corr_id",
+    "ReasonForCall",
+    "ActionsAndAgreements",
+    "NextSteps",
+    "CustomerMessage",
+    "AgentMessage",
+    "low_conf_count",
+    "duplicate_statement_count"
+)
+
+final_reordered.display()
