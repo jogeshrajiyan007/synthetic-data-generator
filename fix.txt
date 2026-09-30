@@ -1,5 +1,271 @@
-Hi Lorenzo,
-Following up on our discussion regarding the application and its codebase.
-I’ve checked internally with Sayandeep and Arunav regarding sharing the codebase. Since the application contains some proprietary integrations that were developed as part of use cases for other AXA entities, we’re currently not able to share the codebase directly.
-However, Sayandeep suggested that his team would be happy to support the customization of the application based on your specific requirements. Once the relevant resource is onboarded, we can work on separating the applicable concerns and tailor the solution accordingly.
-I’m looping in Sayandeep and Arunav here so that we can align on the approach and the next steps.
+from pyspark.sql import functions as F
+from pyspark.sql.types import StructType, StructField, StringType
+import re
+
+message_schema = StructType([
+    # Debug columns
+    StructField("ReasonForCall", StringType(), True),
+    StructField("ActionsAndAgreements", StringType(), True),
+    StructField("NextSteps", StringType(), True),
+
+    # Final columns
+    StructField("CustomerMessage", StringType(), True),
+    StructField("AgentMessage", StringType(), True)
+])
+
+
+
+
+
+def parse_transcript_summary(text):
+
+    if not text:
+        return (None, None, None, None, None)
+
+    # =========================================================
+    # 1. NORMALIZE RAW TEXT
+    # =========================================================
+
+    text = text.replace("\\n", "\n")
+    text = text.replace("\\r", "\r")
+    text = text.replace("\\t", "\t")
+
+    # Remove markdown emphasis around headings
+    text = re.sub(r'\*{1,2}', '', text)
+
+    # Normalize spaces
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n[ \t]+', '\n', text)
+
+    # =========================================================
+    # 2. EXTRACT THE 3 SECTIONS
+    # =========================================================
+
+    reason_match = re.search(
+        r'REASON\s+FOR\s+CALL\s*(.*?)'
+        r'(?=ACTIONS\s*&\s*AGREEMENTS|NEXT\s+STEPS|Correlation\s+ID|$)',
+        text,
+        flags=re.I | re.S
+    )
+
+    actions_match = re.search(
+        r'ACTIONS\s*&\s*AGREEMENTS\s*(.*?)'
+        r'(?=NEXT\s+STEPS|Correlation\s+ID|$)',
+        text,
+        flags=re.I | re.S
+    )
+
+    next_steps_match = re.search(
+        r'NEXT\s+STEPS\s*(.*?)'
+        r'(?=Correlation\s+ID|$)',
+        text,
+        flags=re.I | re.S
+    )
+
+    reason = reason_match.group(1).strip() if reason_match else ""
+    actions = actions_match.group(1).strip() if actions_match else ""
+    next_steps = next_steps_match.group(1).strip() if next_steps_match else ""
+
+    # =========================================================
+    # 3. CLEANING FUNCTIONS
+    # =========================================================
+
+    def clean_message(msg):
+
+        if not msg:
+            return ""
+
+        # Remove bullets
+        msg = re.sub(r'^\s*[-•]\s*', '', msg)
+
+        # Remove trailing whitespace
+        msg = msg.strip()
+
+        # Remove accidental correlation ID
+        msg = re.sub(
+            r'\s*Correlation\s+ID\s*:.*$',
+            '',
+            msg,
+            flags=re.I | re.S
+        )
+
+        return msg.strip()
+
+
+    def normalize_for_dedupe(msg):
+
+        key = msg.lower()
+
+        # Normalize curly quotes
+        key = key.replace("’", "'")
+        key = key.replace("“", '"')
+        key = key.replace("”", '"')
+
+        # Remove markdown
+        key = re.sub(r'\*+', '', key)
+
+        # Normalize whitespace
+        key = re.sub(r'\s+', ' ', key)
+
+        # Remove punctuation
+        key = re.sub(r'[^\w\s]', '', key)
+
+        return key.strip()
+
+
+    def dedupe(messages):
+
+        result = []
+        seen = set()
+
+        for msg in messages:
+
+            msg = clean_message(msg)
+
+            if not msg:
+                continue
+
+            key = normalize_for_dedupe(msg)
+
+            if key not in seen:
+                seen.add(key)
+                result.append(msg)
+
+        return result
+
+
+    # =========================================================
+    # 4. EXTRACT BULLETS
+    # =========================================================
+
+    def extract_bullets(section):
+
+        if not section:
+            return []
+
+        bullets = re.findall(
+            r'(?ms)^\s*[-•]\s*(.*?)(?=\n\s*[-•]\s*|\Z)',
+            section
+        )
+
+        # If there are no bullets, treat section as one message
+        if not bullets:
+            cleaned = clean_message(section)
+            return [cleaned] if cleaned else []
+
+        return [
+            clean_message(x)
+            for x in bullets
+            if clean_message(x)
+        ]
+
+
+    # =========================================================
+    # 5. CUSTOMER MESSAGE
+    # =========================================================
+
+    customer_messages = []
+
+    # REASON FOR CALL = Customer
+    reason_clean = clean_message(reason)
+
+    if reason_clean:
+        customer_messages.append(reason_clean)
+
+    # ACTIONS & AGREEMENTS
+    action_bullets = extract_bullets(actions)
+
+    for msg in action_bullets:
+
+        if re.match(
+            r'^(caller|customer|member|patient|client)\b',
+            msg,
+            flags=re.I
+        ):
+            customer_messages.append(msg)
+
+
+    # =========================================================
+    # 6. AGENT MESSAGE
+    # =========================================================
+
+    agent_messages = []
+
+    for msg in action_bullets:
+
+        if re.match(
+            r'^(agent|representative|advisor|associate)\b',
+            msg,
+            flags=re.I
+        ):
+            agent_messages.append(msg)
+
+    # NEXT STEPS ALWAYS GO TO AGENT
+    next_step_bullets = extract_bullets(next_steps)
+
+    agent_messages.extend(next_step_bullets)
+
+
+    # =========================================================
+    # 7. DEDUPLICATE
+    # =========================================================
+
+    customer_messages = dedupe(customer_messages)
+    agent_messages = dedupe(agent_messages)
+
+
+    # =========================================================
+    # 8. FINAL OUTPUT
+    # =========================================================
+
+    customer_output = (
+        "\n".join(customer_messages)
+        if customer_messages
+        else None
+    )
+
+    agent_output = (
+        "\n".join(agent_messages)
+        if agent_messages
+        else None
+    )
+
+    return (
+        reason or None,
+        actions or None,
+        next_steps or None,
+        customer_output,
+        agent_output
+    )
+
+
+
+
+
+
+parse_summary_udf = F.udf(
+    parse_transcript_summary,
+    message_schema
+)
+
+
+result = (
+    cte_transcripts
+    .withColumn(
+        "parsed",
+        parse_summary_udf(F.col("transcript_summary"))
+    )
+    .select(
+        "*",
+
+        # Debug sections
+        F.col("parsed.ReasonForCall"),
+        F.col("parsed.ActionsAndAgreements"),
+        F.col("parsed.NextSteps"),
+
+        # Final classified messages
+        F.col("parsed.CustomerMessage"),
+        F.col("parsed.AgentMessage")
+    )
+    .drop("parsed")
+)
