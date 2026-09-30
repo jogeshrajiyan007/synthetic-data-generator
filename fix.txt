@@ -1,73 +1,30 @@
-import pandas as pd
-from typing import Iterator
-from pyspark.sql.functions import pandas_udf
+def R(rule, msg, conf):
+    return F.struct(F.lit(rule).alias("DetectedRule"), F.lit(msg).alias("MessageType"),
+                    F.lit(conf).alias("Confidence"))
+c = F.col
+def add_rules(df):
+    dec = (F.when(c("role_to_inf"), R("ROLE_TO_INFINITIVE","AGENT","LOW"))
+     .when(c("subject_role") == "NONE",    R("NO_SUBJECT","AGENT","LOW"))
+     .when(c("subject_role") == "PRONOUN", R("UNRESOLVED_PRONOUN","AGENT","LOW"))
+     .when(c("subject_role") == "BOTH",    R("JOINT_SUBJECT","AGENT","LOW"))
+     .when((c("voice") == "PASSIVE") & (c("by_role") == "CUSTOMER"), R("PASSIVE_BY_CUSTOMER","CUSTOMER","HIGH"))
+     .when((c("voice") == "PASSIVE") & c("by_role").isin("AGENT","THIRD_PARTY","OTHER"), R("PASSIVE_BY_OTHER","AGENT","HIGH"))
+     .when((c("subject_role") == "CUSTOMER") & (c("voice") == "PASSIVE") & c("state_pred"), R("CUSTOMER_STATE","CUSTOMER","MEDIUM"))
+     .when((c("subject_role") == "CUSTOMER") & (c("voice") == "PASSIVE"), R("CUSTOMER_AS_RECIPIENT","AGENT","HIGH"))
+     .when((c("subject_role") == "CUSTOMER") & (c("voice") == "COPULA") & c("state_pred"), R("CUSTOMER_STATE","CUSTOMER","MEDIUM"))
+     .when((c("subject_role") == "CUSTOMER") & (c("voice") == "COPULA"), R("COPULA_UNKNOWN_PREDICATE","AGENT","LOW"))
+     .when(c("subject_role") == "CUSTOMER", R("CUSTOMER_AS_ACTOR","CUSTOMER","HIGH"))
+     .when(c("subject_role") == "AGENT",    R("AGENT_ACTOR","AGENT","HIGH"))
+     .when(c("subject_role") == "THIRD_PARTY", R("THIRD_PARTY_ACTOR","AGENT","HIGH"))
+     .otherwise(R("OTHER_ACTOR","AGENT","MEDIUM")))
+    return (df.withColumn("dec", dec).select("*", "dec.*").drop("dec")
+      .withColumn("Confidence", F.when(c("conj_voice_mismatch") & (c("Confidence") == "HIGH"), "LOW")
+                                 .otherwise(c("Confidence")))
+      .withColumn("DetectedActor", c("subject_text"))
+      .withColumn("IsCustomerSubject", c("subject_role") == "CUSTOMER")
+      .withColumn("IsCustomerPassive", (c("subject_role") == "CUSTOMER") & (c("voice") == "PASSIVE"))
+      .withColumn("NormalizedStatement", norm_key("clause_text")))
 
-SCHEMA = """subject_text string, subject_role string, voice string, by_role string,
-            root_text string, root_lemma string, state_pred boolean, role_to_inf boolean,
-            has_modal boolean, conj_voice_mismatch boolean, parse_ok boolean"""
-
-_NLP = None
-def _nlp():
-    global _NLP
-    if _NLP is None:
-        import spacy
-        _NLP = spacy.load("en_core_web_sm", disable=["ner"])
-    return _NLP
-
-def role_of(tok):
-    for w in (tok.lower_, tok.lemma_.lower()):
-        for r, words in ROLES.items():
-            if w in words: return r
-    return "PRONOUN" if tok.pos_ == "PRON" else "OTHER"
-
-def _passive(v):
-    return any(c.dep_ in ("auxpass","nsubjpass") for c in v.children)
-
-def analyse(doc):
-    o = dict(subject_text=None, subject_role="NONE", voice="NONE", by_role="NONE",
-             root_text=None, root_lemma=None, state_pred=False, role_to_inf=False,
-             has_modal=False, conj_voice_mismatch=False, parse_ok=False)
-    roots = [t for t in doc if t.dep_ == "ROOT"]
-    if not roots: return o
-    root = roots[0]; pred = root; voice = "ACTIVE"
-    if root.lemma_ == "be":
-        comp = [c for c in root.children if c.dep_ in ("acomp","attr")]
-        if comp:
-            pred = comp[0]; voice = "PASSIVE" if pred.tag_ == "VBN" else "COPULA"
-        else:
-            voice = "COPULA"
-    elif _passive(root):
-        voice = "PASSIVE"
-    subj = [c for c in root.children if c.dep_ in ("nsubj","nsubjpass")]
-    if subj:
-        heads = [subj[0]] + list(subj[0].conjuncts)
-        roles = {role_of(h) for h in heads}
-        o["subject_text"] = " ".join(h.text for h in heads)
-        if "CUSTOMER" in roles and roles - {"CUSTOMER"} - {"OTHER"}: o["subject_role"] = "BOTH"
-        elif "CUSTOMER" in roles: o["subject_role"] = "CUSTOMER"
-        else: o["subject_role"] = sorted(roles, key=lambda r: r == "OTHER")[0]
-    for h in (root, pred):
-        for c in h.children:
-            if c.dep_ == "agent":
-                po = [g for g in c.children if g.dep_ == "pobj"]
-                o["by_role"] = role_of(po[0]) if po else "OTHER"
-    o["role_to_inf"] = any(role_of(t) in ("CUSTOMER","AGENT","THIRD_PARTY")
-                           and i + 1 < len(doc) and doc[i+1].lower_ == "to"
-                           for i, t in enumerate(doc[:4]))
-    o["has_modal"] = any(c.tag_ == "MD" for c in root.children)
-    o["conj_voice_mismatch"] = any(c.pos_ == "VERB" and _passive(c) != (voice == "PASSIVE")
-                                   for c in root.conjuncts)
-    o.update(voice=voice, root_text=root.text, root_lemma=root.lemma_,
-             state_pred=pred.lower_ in CUSTOMER_STATES, parse_ok=True)
-    return o
-
-@pandas_udf(SCHEMA)
-def analyse_udf(batches: Iterator[pd.Series]) -> Iterator[pd.DataFrame]:
-    nlp = _nlp()
-    for s in batches:
-        yield pd.DataFrame([analyse(d) for d in nlp.pipe(s.tolist(), batch_size=256)])
-
-def add_linguistics(df):   # df has clause_text; parses DISTINCT text only, then joins back
-    d = df.select("clause_text").distinct()
-    d = d.withColumn("a", analyse_udf("clause_text")).select("clause_text", "a.*")
-    return df.join(d, "clause_text", "left")
+classified = add_rules(add_linguistics(clauses))
+classified.select("correlation_id","clause_text","DetectedActor","subject_role","voice","by_role",
+  "root_lemma","IsCustomerSubject","IsCustomerPassive","DetectedRule","MessageType","Confidence").display()
