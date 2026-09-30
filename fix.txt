@@ -1,68 +1,30 @@
-from pyspark.sql import functions as F
+from pyspark.sql import functions as F, Window
 
-src = spark.table("Transcripts")
-# sanity: src.groupBy("correlation_id").count().filter("count>1").count()
-
-# ---- Stage 1: normalize ----
-n = F.col("transcript_summary")
-n = F.regexp_replace(n, r"\\r\\n|\\n|\\r", "\n")      # literal escapes
-n = F.regexp_replace(n, r"\r\n?", "\n")               # real CR/CRLF
-n = F.regexp_replace(n, "[\u00a0\t]+", " ")
-n = F.regexp_replace(n, r"(?m)^[ ]*[•–—][ ]+", "- ") # bullet variants
-s1 = (src.withColumn("embedded_corr_id",
-        F.regexp_extract(n, r"(?i)correlation id:\s*\[?([0-9a-f-]{36})", 1))
-      .withColumn("summary_norm",
-        F.regexp_replace(n, r"(?is)\n?\s*correlation id:.*$", "")))
-
-# ---- Stage 2: sections ----
-HEADERS = {
-  "REASON":  r"reason\s+for\s+(?:the\s+)?call",
-  "ACTIONS": r"actions?\s*(?:&|&amp;|and)\s*agreements?",
-  "NEXT":    r"next\s+steps?",
+# Single source of truth: used by the splitter AND the spaCy step
+ROLES = {
+  "CUSTOMER":    {"caller","customer","member","policyholder","patient","client","insured"},
+  "AGENT":       {"agent","advisor","adviser","handler","operator","colleague","supervisor"},
+  "THIRD_PARTY": {"provider","hospital","clinic","insurer","consultant","specialist","team"},
 }
-t = F.col("summary_norm")
-for k, p in HEADERS.items():
-    t = F.regexp_replace(
-        t, rf"(?im)^[ \t]*[*#_>\-]*[ \t]*{p}[ \t]*[*#_:]*[ \t]*$", f"\n@@{k}@@\n")
+# Customer experiencer states (grammatically identical to "was informed", so the one unavoidable lexicon)
+CUSTOMER_STATES = {"unable","unsure","concerned","unhappy","dissatisfied","frustrated","upset",
+  "satisfied","happy","confused","worried","aware","willing","unwilling","reluctant","annoyed",
+  "distressed","anxious","disappointed","pleased","hesitant","interested"}
 
-def section(k):
-    return F.trim(F.regexp_extract(
-        F.col("tagged"), rf"(?s)@@{k}@@(.*?)(?=@@[A-Z]+@@|\z)", 1))
+ACTOR = r"(?:the\s+)?(?:" + "|".join(sorted(set().union(*ROLES.values()))) + r")"
+# split only when a boundary is followed by an explicit actor noun + something other than and/or
+SPLIT_RE = rf"(?i)(?:[.;]\s+|,?\s+(?:and|but|while|whereas|then)\s+)(?={ACTOR}\s+(?!and\b|or\b))"
 
-s2 = (s1.withColumn("tagged", t)
-      .withColumn("ReasonForCall", section("REASON"))
-      .withColumn("ActionsAndAgreements", section("ACTIONS"))
-      .withColumn("NextSteps", section("NEXT"))
-      .withColumn("has_unknown_header", F.col("tagged").rlike(
-          r"(?m)^[ \t]*[*#_]*[A-Z][A-Z &]{3,}[*#_:]*[ \t]*$"))
-      .withColumn("parse_status", F.concat_ws(",",
-          F.when(F.col("ReasonForCall") != "", F.lit("R")),
-          F.when(F.col("ActionsAndAgreements") != "", F.lit("A")),
-          F.when(F.col("NextSteps") != "", F.lit("N")))))
+def norm_key(col):
+    x = F.lower(F.regexp_replace(col, "[\u2018\u2019\u201c\u201d]", "'"))
+    x = F.regexp_replace(x, r"\s+", " ")
+    return F.trim(F.regexp_replace(x, r"[\s.;:,!]+$", ""))
 
-# ---- Stage 3: statements ----
-def bullets(col):
-    c = F.regexp_replace(col, r"(?m)^[ \t]*[-*+][ \t]+", "\u0001")
-    c = F.regexp_replace(c, r"\s*\n\s*", " ")          # rejoin wrapped lines
-    parts = F.transform(F.split(c, "\u0001"), lambda x: F.trim(x))
-    return F.filter(parts, lambda x: F.length(x) > 0)
+clauses = (stmts.filter("section = 'ACTIONS'")
+  .select("correlation_id","sec_ord","stmt_idx","Statement",
+          F.posexplode(F.split("Statement", SPLIT_RE)).alias("clause_idx","clause_text"))
+  .withColumn("clause_text", F.trim("clause_text"))
+  .filter(F.length("clause_text") > 0)
+  .withColumn("n_clauses", F.count("*").over(Window.partitionBy("correlation_id","stmt_idx"))))
 
-def explode_section(name, ordn, col):
-    return s2.select("correlation_id", F.lit(name).alias("section"),
-                     F.lit(ordn).alias("sec_ord"),
-                     F.posexplode(bullets(F.col(col))).alias("stmt_idx", "Statement"))
-
-stmts = (explode_section("REASON", 0, "ReasonForCall")
-  .unionByName(explode_section("ACTIONS", 1, "ActionsAndAgreements"))
-  .unionByName(explode_section("NEXT", 2, "NextSteps"))
-  .withColumn("norm_key", F.trim(F.regexp_replace(F.regexp_replace(
-        F.lower(F.regexp_replace("Statement", "[\u2018\u2019\u201c\u201d]", "'")),
-        r"[\s]+", " "), r"[\s.;:,!]+$", "")))
-  .withColumn("DetectedRule", F.when(F.col("section")=="REASON", "SECTION_REASON_FOR_CALL")
-                               .when(F.col("section")=="NEXT",   "SECTION_NEXT_STEPS"))
-  .withColumn("MessageType", F.when(F.col("section")=="REASON", "CUSTOMER")
-                              .when(F.col("section")=="NEXT",   "AGENT")))
-
-s2.select("correlation_id","parse_status","has_unknown_header","embedded_corr_id",
-          "ReasonForCall","ActionsAndAgreements","NextSteps").display()
-stmts.orderBy("correlation_id","sec_ord","stmt_idx").display()
+clauses.filter("n_clauses > 1").display()   # validate every split by eye
