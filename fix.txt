@@ -1,136 +1,99 @@
-# ---- Stage 6: rules ----
-def add_rules(df):
-    c = F.col
-    dec = (F.when(c("role_to_inf"), F.struct(F.lit("ROLE_TO_INFINITIVE").alias("DetectedRule"), 
-                                             F.lit("AGENT").alias("MessageType"), 
-                                             F.lit("LOW").alias("Confidence")))
-     .when(c("subject_role") == "NONE",    F.struct(F.lit("NO_SUBJECT").alias("DetectedRule"), 
-                                                     F.lit("AGENT").alias("MessageType"), 
-                                                     F.lit("LOW").alias("Confidence")))
-     .when(c("subject_role") == "PRONOUN", F.struct(F.lit("UNRESOLVED_PRONOUN").alias("DetectedRule"), 
-                                                     F.lit("AGENT").alias("MessageType"), 
-                                                     F.lit("LOW").alias("Confidence")))
-     .when(c("subject_role") == "BOTH",    F.struct(F.lit("JOINT_SUBJECT").alias("DetectedRule"), 
-                                                     F.lit("AGENT").alias("MessageType"), 
-                                                     F.lit("LOW").alias("Confidence")))
-     .when((c("voice") == "PASSIVE") & (c("by_role") == "CUSTOMER"), 
-           F.struct(F.lit("PASSIVE_BY_CUSTOMER").alias("DetectedRule"), 
-                    F.lit("CUSTOMER").alias("MessageType"), 
-                    F.lit("HIGH").alias("Confidence")))
-     .when((c("voice") == "PASSIVE") & c("by_role").isin("AGENT","THIRD_PARTY","OTHER"), 
-           F.struct(F.lit("PASSIVE_BY_OTHER").alias("DetectedRule"), 
-                    F.lit("AGENT").alias("MessageType"), 
-                    F.lit("HIGH").alias("Confidence")))
-     .when((c("subject_role") == "CUSTOMER") & (c("voice") == "PASSIVE") & c("state_pred"), 
-           F.struct(F.lit("CUSTOMER_STATE").alias("DetectedRule"), 
-                    F.lit("CUSTOMER").alias("MessageType"), 
-                    F.lit("MEDIUM").alias("Confidence")))
-     .when((c("subject_role") == "CUSTOMER") & (c("voice") == "PASSIVE"), 
-           F.struct(F.lit("CUSTOMER_AS_RECIPIENT").alias("DetectedRule"), 
-                    F.lit("AGENT").alias("MessageType"), 
-                    F.lit("HIGH").alias("Confidence")))
-     .when((c("subject_role") == "CUSTOMER") & (c("voice") == "COPULA") & c("state_pred"), 
-           F.struct(F.lit("CUSTOMER_STATE").alias("DetectedRule"), 
-                    F.lit("CUSTOMER").alias("MessageType"), 
-                    F.lit("MEDIUM").alias("Confidence")))
-     .when((c("subject_role") == "CUSTOMER") & (c("voice") == "COPULA"), 
-           F.struct(F.lit("COPULA_UNKNOWN_PREDICATE").alias("DetectedRule"), 
-                    F.lit("AGENT").alias("MessageType"), 
-                    F.lit("LOW").alias("Confidence")))
-     .when(c("subject_role") == "CUSTOMER", 
-           F.struct(F.lit("CUSTOMER_AS_ACTOR").alias("DetectedRule"), 
-                    F.lit("CUSTOMER").alias("MessageType"), 
-                    F.lit("HIGH").alias("Confidence")))
-     .when(c("subject_role") == "AGENT",    
-           F.struct(F.lit("AGENT_ACTOR").alias("DetectedRule"), 
-                    F.lit("AGENT").alias("MessageType"), 
-                    F.lit("HIGH").alias("Confidence")))
-     .when(c("subject_role") == "THIRD_PARTY", 
-           F.struct(F.lit("THIRD_PARTY_ACTOR").alias("DetectedRule"), 
-                    F.lit("AGENT").alias("MessageType"), 
-                    F.lit("HIGH").alias("Confidence")))
-     .otherwise(F.struct(F.lit("OTHER_ACTOR").alias("DetectedRule"), 
-                         F.lit("AGENT").alias("MessageType"), 
-                         F.lit("MEDIUM").alias("Confidence"))))
+def _analyse_rule_based(text):
+    o = {
+        "subject_text": None, "subject_role": "NONE", "voice": "ACTIVE", "by_role": "NONE",
+        "root_text": None, "root_lemma": None, "state_pred": False, "role_to_inf": False,
+        "has_modal": False, "conj_voice_mismatch": False, "parse_ok": False
+    }
     
-    return (df.withColumn("dec", dec).select("*", "dec.*").drop("dec")
-      .withColumn("Confidence", F.when(c("conj_voice_mismatch") & (c("Confidence") == "HIGH"), "LOW")
-                                 .otherwise(c("Confidence")))
-      .withColumn("DetectedActor", c("subject_text"))
-      .withColumn("IsCustomerSubject", c("subject_role") == "CUSTOMER")
-      .withColumn("IsCustomerPassive", (c("subject_role") == "CUSTOMER") & (c("voice") == "PASSIVE"))
-      .withColumn("NormalizedStatement", norm_key("clause_text")))
-
-print("Stage 6: applying rules...")
-classified_with_rules = add_rules(classified)
-classified_with_rules.select("correlation_id","clause_text","DetectedRule","MessageType","Confidence").limit(10).display()
-
-# ---- Stage 7: dedup and aggregate ----
-base = ["correlation_id","sec_ord","stmt_idx","clause_idx","text","norm_key",
-        "DetectedRule","MessageType","Confidence"]
-
-# Statements from REASON and NEXT (already classified)
-whole = (stmts.filter("section IN ('REASON','NEXT')")
-  .select("correlation_id","sec_ord","stmt_idx", F.lit(0).alias("clause_idx"),
-          F.col("Statement").alias("text"), "norm_key", "DetectedRule", "MessageType",
-          F.lit("HIGH").alias("Confidence")))
-
-# Clauses from ACTIONS (newly classified)
-acts = classified_with_rules.select("correlation_id","sec_ord","stmt_idx","clause_idx",
-          F.col("clause_text").alias("text"), F.col("NormalizedStatement").alias("norm_key"),
-          "DetectedRule","MessageType","Confidence")
-
-# Combine and mark duplicates
-w = Window.partitionBy("correlation_id","MessageType","norm_key") \
-          .orderBy("sec_ord","stmt_idx","clause_idx")
-audit = whole.select(base).unionByName(acts.select(base)) \
-             .withColumn("is_duplicate", F.row_number().over(w) > 1)
-
-# Aggregate into joined messages
-def joined(mt):
-    items = F.collect_list(F.when((F.col("MessageType") == mt) & ~F.col("is_duplicate"),
-                F.struct("sec_ord","stmt_idx","clause_idx","text")))
-    return F.concat_ws("\n", F.transform(F.sort_array(items), lambda x: x["text"]))
-
-agg = audit.groupBy("correlation_id").agg(
-    joined("CUSTOMER").alias("CustomerMessage"), 
-    joined("AGENT").alias("AgentMessage"),
-    F.sum((F.col("Confidence") == "LOW").cast("int")).alias("low_conf_count"),
-    F.count(F.when(F.col("is_duplicate"), 1)).alias("duplicate_statement_count"))
-
-# ---- Final: join all original columns ----
-final = (s2.select("correlation_id", "conversationid", "sessionstarttime", "chattimestamp", "agentemail",
-                   "ReasonForCall", "ActionsAndAgreements", "NextSteps", 
-                   "parse_status", "has_unknown_header", "embedded_corr_id")
-         .join(agg, "correlation_id", "left")
-         .fillna({"CustomerMessage": "", "AgentMessage": "", "low_conf_count": 0, 
-                  "duplicate_statement_count": 0}))
-
-# Reorder for readability
-final_reordered = final.select(
-    "correlation_id",
-    "conversationid",
-    "sessionstarttime",
-    "chattimestamp",
-    "agentemail",
-    "parse_status",
-    "has_unknown_header",
-    "embedded_corr_id",
-    "ReasonForCall",
-    "ActionsAndAgreements",
-    "NextSteps",
-    "CustomerMessage",
-    "AgentMessage",
-    "low_conf_count",
-    "duplicate_statement_count"
-)
-
-print("FINAL OUTPUT:")
-final_reordered.display()
-
-# Sanity check
-print("Cardinality check (should be all 1s):")
-final_reordered.groupBy("correlation_id").count().filter("count != 1").display()
-
-# Save to persistent table if needed
-# final_reordered.write.mode("overwrite").option("mergeSchema", "true").saveAsTable("transcript_classification_output")
+    if not text or len(text.split()) < 2:
+        return o
+    
+    words = text.split()
+    
+    verb_idx = None
+    root_verb = None
+    for i, w in enumerate(words):
+        wl = w.lower().rstrip(".,;:!?")
+        if wl in PASSIVE_VERBS or wl.endswith("ed") or wl in MODALS:
+            verb_idx = i
+            root_verb = wl
+            break
+    
+    if verb_idx is None:
+        return o
+    
+    o["has_modal"] = any(w.lower() in MODALS for w in words[:verb_idx+1])
+    
+    subject_words = []
+    subject_role = "NONE"
+    for i in range(verb_idx):
+        r = role_of(words[i])
+        if r != "OTHER":
+            subject_words = words[i:i+1]
+            subject_role = r
+            break
+    
+    if subject_role == "NONE" and verb_idx > 0:
+        first = words[0].lower()
+        if first in ("he","she","it","they","we","you"): 
+            subject_role = "OTHER"
+            subject_words = [words[0]]
+    
+    if subject_words:
+        o["subject_text"] = " ".join(subject_words)
+        o["subject_role"] = subject_role
+    
+    # ---- CRITICAL FIX: Detect implicit passives ----
+    # If subject is CUSTOMER and verb is passive-meaning (informed, advised, provided, assured, etc.)
+    # and there's no direct object (no role noun immediately after verb), treat as PASSIVE
+    implicit_passive = False
+    if subject_role == "CUSTOMER" and root_verb in ("informed", "advised", "provided", "assured", 
+                                                     "told", "notified", "updated", "given"):
+        # Check for direct object: next word after verb should not be a role noun or action target
+        if verb_idx + 1 < len(words):
+            next_after_verb = words[verb_idx + 1].lower()
+            # If next word is "that", "of", "they", "no", etc., it's prep/conj, not a direct object
+            if next_after_verb in ("that", "of", "they", "no", "the", "with", "if", "to", "it"):
+                implicit_passive = True
+    
+    # ---- Voice detection (explicit + implicit) ----
+    if verb_idx > 0 and words[verb_idx-1].lower() in ("was","were"):
+        o["voice"] = "PASSIVE"
+        o["root_text"] = words[verb_idx]
+        o["root_lemma"] = LEMMAS.get(root_verb, root_verb)
+    elif implicit_passive:
+        o["voice"] = "PASSIVE"
+        o["root_text"] = root_verb
+        o["root_lemma"] = LEMMAS.get(root_verb, root_verb)
+    elif root_verb == "be" and verb_idx + 1 < len(words):
+        o["voice"] = "COPULA"
+        o["root_text"] = "be"
+        o["root_lemma"] = "be"
+        o["state_pred"] = words[verb_idx + 1].lower() in CUSTOMER_STATES
+    else:
+        o["voice"] = "ACTIVE"
+        o["root_text"] = root_verb
+        o["root_lemma"] = LEMMAS.get(root_verb, root_verb)
+    
+    # by-phrase detection
+    by_idx = None
+    for i, w in enumerate(words):
+        if w.lower() == "by" and i + 1 < len(words):
+            by_idx = i + 1
+            break
+    
+    if by_idx:
+        by_word = words[by_idx]
+        o["by_role"] = role_of(by_word)
+    
+    # Role to infinitive: "Caller to contact..."
+    if verb_idx + 1 < len(words) and words[verb_idx + 1].lower() == "to":
+        o["role_to_inf"] = subject_role in ("CUSTOMER", "AGENT", "THIRD_PARTY")
+    
+    # State predicate for copula
+    if o["voice"] == "COPULA" and verb_idx + 1 < len(words):
+        next_word = words[verb_idx + 1].lower().rstrip(".,;:!?")
+        o["state_pred"] = next_word in CUSTOMER_STATES
+    
+    o["parse_ok"] = True
+    return o
